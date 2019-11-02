@@ -1,3 +1,9 @@
+# IDE
+nbproject
+
+# Builds
+build
+
 # Prerequisites
 *.d
 
