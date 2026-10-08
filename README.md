@@ -1,6 +1,6 @@
 # qcc
 
-[![Build Status][qcc-ti]][qcc-tu]
+[![Python tests][qcc-ti]][qcc-tu]
 
 Quantum Compiler Collection — a technology-agnostic quantum circuit compiler.
 
@@ -30,5 +30,5 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [python/README.md](python/R
 
 MIT. Copyright [Qevedo](https://qevedo.com)
 
-[qcc-ti]: https://img.shields.io/travis/qevedo/qcc/master.svg
-[qcc-tu]: https://travis-ci.org/qevedo/qcc
+[qcc-ti]: https://github.com/qevedo/qcc/actions/workflows/python.yml/badge.svg?branch=master
+[qcc-tu]: https://github.com/qevedo/qcc/actions/workflows/python.yml
