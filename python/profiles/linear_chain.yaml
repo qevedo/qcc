@@ -1,0 +1,25 @@
+name: linear_chain_16
+topology: linear_chain
+qubits: 16
+directed_edges: false
+max_parallel_2q: 1
+native_gates: [rz, sx, x, cx]
+gate_rules:
+  cx:
+    placement: edge
+edges:
+  - [0, 1]
+  - [1, 2]
+  - [2, 3]
+  - [3, 4]
+  - [4, 5]
+  - [5, 6]
+  - [6, 7]
+  - [7, 8]
+  - [8, 9]
+  - [9, 10]
+  - [10, 11]
+  - [11, 12]
+  - [12, 13]
+  - [13, 14]
+  - [14, 15]

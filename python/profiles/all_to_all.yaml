@@ -1,0 +1,11 @@
+name: all_to_all
+topology: all_to_all
+qubits: 32
+directed_edges: false
+max_parallel_2q: 8
+native_gates: [rz, sx, x, cx]
+gate_rules:
+  cx:
+    placement: edge
+# Complete graph — every pair connected.
+edges: []

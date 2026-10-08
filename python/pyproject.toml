@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qcc"
+version = "0.1.0"
+description = "Quantum Compiler Collection — technology-agnostic quantum circuit compiler"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+    "openqasm>=3,<4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+qcc = "qcc.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qcc*"]
+
+[tool.setuptools.package-data]
+qcc = ["../profiles/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
