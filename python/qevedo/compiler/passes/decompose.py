@@ -5,9 +5,9 @@ from __future__ import annotations
 import math
 from typing import List, Optional
 
-from qcc.device import DeviceSpec
-from qcc.ir import Circuit, Instruction, Qubit
-from qcc.passes.base import Pass
+from qevedo.compiler.device import DeviceSpec
+from qevedo.compiler.ir import Circuit, Instruction, Qubit
+from qevedo.compiler.passes.base import Pass
 
 PI = math.pi
 HALF_PI = PI / 2

@@ -6,11 +6,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from qcc.device import DeviceSpec, default_device
-from qcc.emit.qasm import emit_qasm
-from qcc.frontend.qasm import parse_qasm
-from qcc.ir import Circuit
-from qcc.passes.base import PassManager
+from qevedo.compiler.device import DeviceSpec, default_device
+from qevedo.compiler.emit.qasm import emit_qasm
+from qevedo.compiler.frontend.qasm import parse_qasm
+from qevedo.compiler.ir import Circuit
+from qevedo.compiler.passes.base import PassManager
 
 
 @dataclass

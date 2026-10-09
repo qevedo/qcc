@@ -3,11 +3,11 @@ import math
 import openqasm
 import pytest
 
-from qcc.cli import main
-from qcc.compiler import compile_source
-from qcc.emit.qasm import emit_qasm
-from qcc.frontend.qasm import QasmFrontendError, parse_qasm
-from qcc.ir import Clbit, Instruction, Qubit
+from qevedo.compiler.cli import main
+from qevedo.compiler.compiler import compile_source
+from qevedo.compiler.emit.qasm import emit_qasm
+from qevedo.compiler.frontend.qasm import QasmFrontendError, parse_qasm
+from qevedo.compiler.ir import Clbit, Instruction, Qubit
 
 
 def names(circuit):

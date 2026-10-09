@@ -8,7 +8,7 @@ from fractions import Fraction
 import openqasm
 from openqasm import ast
 
-from qcc.ir import Circuit, Clbit, Instruction, Qubit
+from qevedo.compiler.ir import Circuit, Clbit, Instruction, Qubit
 
 __all__ = ["emit_qasm"]
 

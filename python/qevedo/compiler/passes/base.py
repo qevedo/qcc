@@ -5,8 +5,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Iterable, List, Optional
 
-from qcc.device import DeviceSpec
-from qcc.ir import Circuit
+from qevedo.compiler.device import DeviceSpec
+from qevedo.compiler.ir import Circuit
 
 
 class Pass(ABC):
@@ -33,8 +33,8 @@ class PassManager:
 
     @classmethod
     def default(cls, device: Optional[DeviceSpec] = None) -> PassManager:
-        from qcc.passes.decompose import DecomposeToNative
-        from qcc.passes.optimize import CancelAdjacentInverses
+        from qevedo.compiler.passes.decompose import DecomposeToNative
+        from qevedo.compiler.passes.optimize import CancelAdjacentInverses
 
         del device  # routing passes will use this later
         return cls([DecomposeToNative(), CancelAdjacentInverses()])

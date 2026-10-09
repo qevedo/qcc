@@ -6,14 +6,14 @@ import argparse
 import sys
 from pathlib import Path
 
-from qcc.compiler import CompileOptions, compile_file
-from qcc.device import DeviceSpec, default_device
-from qcc.emit.qasm import emit_qasm
-from qcc.frontend.qasm import QasmFrontendError
+from qevedo.compiler.compiler import CompileOptions, compile_file
+from qevedo.compiler.device import DeviceSpec, default_device
+from qevedo.compiler.emit.qasm import emit_qasm
+from qevedo.compiler.frontend.qasm import QasmFrontendError
 
 
 def _profiles_dir() -> Path:
-    return Path(__file__).resolve().parent.parent / "profiles"
+    return Path(__file__).resolve().parent / "profiles"
 
 
 def main(argv: list[str] | None = None) -> int:

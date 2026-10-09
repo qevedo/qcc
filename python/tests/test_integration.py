@@ -1,11 +1,11 @@
-from qcc.compiler import CompileOptions, compile_file
-from qcc.device import DeviceSpec, default_device
-from qcc.emit.qasm import emit_qasm
+from qevedo.compiler.compiler import CompileOptions, compile_file
+from qevedo.compiler.device import DeviceSpec, default_device
+from qevedo.compiler.emit.qasm import emit_qasm
 from pathlib import Path
 
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
-PROFILES = Path(__file__).resolve().parents[1] / "profiles"
+PROFILES = Path(__file__).resolve().parents[1] / "qevedo" / "compiler" / "profiles"
 
 
 def test_compile_bell_to_native_gates(tmp_path):

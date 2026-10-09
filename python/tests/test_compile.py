@@ -2,14 +2,14 @@ from pathlib import Path
 
 import pytest
 
-from qcc.device import DeviceSpec
-from qcc.frontend.qasm import parse_qasm
-from qcc.passes.decompose import DecomposeToNative
-from qcc.passes.optimize import CancelAdjacentInverses
+from qevedo.compiler.device import DeviceSpec
+from qevedo.compiler.frontend.qasm import parse_qasm
+from qevedo.compiler.passes.decompose import DecomposeToNative
+from qevedo.compiler.passes.optimize import CancelAdjacentInverses
 
 
 BELL = Path(__file__).resolve().parents[1] / "examples" / "bell.qasm"
-PROFILES = Path(__file__).resolve().parents[1] / "profiles"
+PROFILES = Path(__file__).resolve().parents[1] / "qevedo" / "compiler" / "profiles"
 
 
 def test_parse_bell_circuit():
@@ -31,7 +31,7 @@ def test_decompose_removes_h():
 
 
 def test_cancel_double_x():
-    from qcc.ir import Circuit, Instruction, Qubit
+    from qevedo.compiler.ir import Circuit, Instruction, Qubit
 
     circuit = Circuit(num_qubits=1, qreg_sizes={"q": 1})
     q = Qubit("q", 0)

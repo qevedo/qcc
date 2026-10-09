@@ -42,10 +42,10 @@ gate_rules:
   cx: { on: edge }
 ```
 
-Reference profiles live in `python/profiles/`.
+Reference profiles live in `python/qevedo/compiler/profiles/` and ship with the package.
 
 ## Design choices
 
 - **Python first** for IR and passes; C++ reserved for hot paths later (P2.7).
-- **Frontend on `openqasm` 3.x**: parsing and semantic checks come from the `openqasm` package; `qcc/frontend/qasm.py` only lowers the checked tree to IR, and `qcc/emit/qasm.py` builds an `openqasm` tree and prints it, so output is always valid OpenQASM 2 or 3.
+- **Frontend on `openqasm` 3.x**: parsing and semantic checks come from the `openqasm` package; `qevedo/compiler/frontend/qasm.py` only lowers the checked tree to IR, and `qevedo/compiler/emit/qasm.py` builds an `openqasm` tree and prints it, so output is always valid OpenQASM 2 or 3.
 - **DeviceSpec drives routing**, not hard-coded IBM/Qiskit backend objects — this is the main differentiator vs UCC.

@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "qcc"
+name = "qevedo-compiler"
 version = "0.1.0"
-description = "Quantum Compiler Collection — technology-agnostic quantum circuit compiler"
+description = "QCC, the Quantum Compiler Collection: a technology-agnostic quantum circuit compiler (qevedo.compiler)"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "PyYAML>=6.0",
@@ -18,14 +18,21 @@ dependencies = [
 dev = ["pytest>=7.0"]
 
 [project.scripts]
-qcc = "qcc.cli:main"
+qcc = "qevedo.compiler.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/qevedo/qcc"
+Repository = "https://github.com/qevedo/qcc"
+
+# `qevedo` is a namespace package (no __init__.py) shared with the other
+# Qevedo packages, such as qevedo-simulator.
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["qcc*"]
+include = ["qevedo.compiler*"]
+namespaces = true
 
 [tool.setuptools.package-data]
-qcc = ["../profiles/*.yaml"]
+"qevedo.compiler" = ["profiles/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

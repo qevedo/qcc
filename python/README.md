@@ -1,8 +1,15 @@
-# QCC (Python)
+# QCC: the Quantum Compiler Collection
 
-Technology-agnostic quantum circuit compiler. This is the active implementation; the C++ tree is reserved for future performance work.
+A technology-agnostic quantum circuit compiler, part of the Qevedo packages:
+it installs as `qevedo-compiler` and imports as `qevedo.compiler`.
 
 ## Install
+
+```bash
+pip install qevedo-compiler
+```
+
+For development, from a checkout:
 
 ```bash
 cd qcc/python
@@ -15,9 +22,21 @@ the sibling checkout: `pip install -e ../../openqasm`.
 ## Usage
 
 ```bash
-qcc compile examples/bell.qasm -o /tmp/out.qasm --device profiles/all_to_all.yaml
+qcc compile examples/bell.qasm -o /tmp/out.qasm --device qevedo/compiler/profiles/all_to_all.yaml
 qcc compile program.qasm -o /tmp/out.qasm --qasm-version 3 -I lib/
 ```
+
+From Python:
+
+```python
+from qevedo.compiler import compile_source, emit_qasm
+
+circuit = compile_source(open("examples/bell.qasm").read())
+print(emit_qasm(circuit))
+```
+
+The reference device profiles ship with the package, in
+`qevedo/compiler/profiles/`.
 
 Input can be OpenQASM 2 or 3. Programs are checked by `openqasm.analyze`
 before lowering, so errors are reported with their location. The frontend

@@ -5,9 +5,9 @@ from __future__ import annotations
 import math
 from typing import List, Optional
 
-from qcc.device import DeviceSpec
-from qcc.ir import Circuit, Instruction
-from qcc.passes.base import Pass
+from qevedo.compiler.device import DeviceSpec
+from qevedo.compiler.ir import Circuit, Instruction
+from qevedo.compiler.passes.base import Pass
 
 
 def _angles_close(a: float, b: float, tol: float = 1e-12) -> bool:

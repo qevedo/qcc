@@ -20,7 +20,7 @@ import openqasm
 from openqasm import ast
 from openqasm.semantic import Analysis, Scope, SymbolKind
 
-from qcc.ir import Circuit, Clbit, Instruction, Qubit
+from qevedo.compiler.ir import Circuit, Clbit, Instruction, Qubit
 
 __all__ = ["QasmFrontendError", "parse_qasm"]
 
