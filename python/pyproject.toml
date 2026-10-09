@@ -21,8 +21,8 @@ dev = ["pytest>=7.0"]
 qcc = "qevedo.compiler.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/qevedo/qcc"
-Repository = "https://github.com/qevedo/qcc"
+Homepage = "https://github.com/qevedo/qevedo-compiler"
+Repository = "https://github.com/qevedo/qevedo-compiler"
 
 # `qevedo` is a namespace package (no __init__.py) shared with the other
 # Qevedo packages, such as qevedo-simulator.

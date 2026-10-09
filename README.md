@@ -1,4 +1,4 @@
-# qcc
+# qevedo-compiler
 
 [![Python tests][qcc-ti]][qcc-tu]
 
@@ -38,5 +38,5 @@ builds the package and publishes it to PyPI through trusted publishing
 
 MIT. Copyright [Qevedo](https://qevedo.com)
 
-[qcc-ti]: https://github.com/qevedo/qcc/actions/workflows/python.yml/badge.svg?branch=master
-[qcc-tu]: https://github.com/qevedo/qcc/actions/workflows/python.yml
+[qcc-ti]: https://github.com/qevedo/qevedo-compiler/actions/workflows/python.yml/badge.svg?branch=master
+[qcc-tu]: https://github.com/qevedo/qevedo-compiler/actions/workflows/python.yml

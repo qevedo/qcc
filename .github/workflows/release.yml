@@ -4,7 +4,7 @@ name: Release
 # tag must match the version in python/pyproject.toml and the tests must pass.
 #
 # Publishing uses PyPI trusted publishing: on pypi.org, add a (pending) trusted
-# publisher for project "qevedo-compiler", owner "qevedo", repository "qcc",
+# publisher for project "qevedo-compiler", owner "qevedo", repository "qevedo-compiler",
 # workflow "release.yml", environment "pypi". No API token is stored in GitHub.
 on:
   push:
