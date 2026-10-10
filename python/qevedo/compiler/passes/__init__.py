@@ -7,6 +7,7 @@ from qevedo.compiler.passes.optimize import (
     CommutativeCancellation,
     MergeSingleQubitGates,
 )
+from qevedo.compiler.passes.native import NativePipeline
 from qevedo.compiler.passes.resynthesize import ResynthesizeTwoQubitBlocks
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "DecomposeToNative",
     "LoweringError",
     "MergeSingleQubitGates",
+    "NativePipeline",
     "Pass",
     "PassManager",
     "ResynthesizeTwoQubitBlocks",

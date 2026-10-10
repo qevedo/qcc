@@ -6,6 +6,26 @@ on:
   workflow_call:
 
 jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --release --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --release
+      - name: Lint the Python bindings
+        working-directory: python
+        run: cargo clippy --release -- -D warnings
+
   test:
     runs-on: ubuntu-latest
     strategy:

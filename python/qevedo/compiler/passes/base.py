@@ -33,6 +33,16 @@ class PassManager:
 
     @classmethod
     def default(cls, device: Optional[DeviceSpec] = None) -> PassManager:
+        """The default pipeline: the Rust core when it is installed, else the Python passes."""
+        from qevedo.compiler.passes.native import NativePipeline, available
+
+        if available():
+            return cls([NativePipeline()])
+        return cls.reference(device)
+
+    @classmethod
+    def reference(cls, device: Optional[DeviceSpec] = None) -> PassManager:
+        """The default pipeline as Python passes, the reference for the Rust core."""
         from qevedo.compiler.passes.decompose import DecomposeToNative
         from qevedo.compiler.passes.optimize import CommutativeCancellation, MergeSingleQubitGates
         from qevedo.compiler.passes.resynthesize import ResynthesizeTwoQubitBlocks

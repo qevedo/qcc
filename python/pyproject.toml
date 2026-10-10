@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
 
 [project]
 name = "qevedo-compiler"
@@ -27,15 +27,13 @@ qcc = "qevedo.compiler.cli:main"
 Homepage = "https://github.com/qevedo/qevedo-compiler"
 Repository = "https://github.com/qevedo/qevedo-compiler"
 
-# `qevedo` is a namespace package (no __init__.py) shared with the other
-# Qevedo packages, such as qevedo-simulator.
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["qevedo.compiler*"]
-namespaces = true
-
-[tool.setuptools.package-data]
-"qevedo.compiler" = ["profiles/*.yaml"]
+[tool.maturin]
+# The Rust core (../core, through the bindings in src/) is the module
+# qevedo.compiler._core. `qevedo` is a namespace package shared with
+# qevedo-simulator: no qevedo/__init__.py here.
+python-source = "."
+module-name = "qevedo.compiler._core"
+features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

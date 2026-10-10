@@ -1,0 +1,17 @@
+[package]
+name = "qcc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+description = "The core of QCC, the Quantum Compiler Collection: gate synthesis and optimization passes"
+license = "MIT"
+repository = "https://github.com/qevedo/qevedo-compiler"
+keywords = ["quantum", "compiler", "quantum-computing", "synthesis"]
+categories = ["science", "compilers"]
+
+[dependencies]
+num-complex = "0.4.6"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

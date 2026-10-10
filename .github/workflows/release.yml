@@ -1,7 +1,9 @@
 name: Release
 
 # Publish qevedo-compiler to PyPI when a version tag (vX.Y.Z) is pushed. The
-# tag must match the version in python/pyproject.toml and the tests must pass.
+# tag must match the version in python/pyproject.toml and python/Cargo.toml,
+# and the tests must pass. The package contains the Rust core
+# (qevedo.compiler._core), so it ships one abi3 wheel per platform.
 #
 # Publishing uses PyPI trusted publishing: on pypi.org, add a (pending) trusted
 # publisher for project "qevedo-compiler", owner "qevedo", repository "qevedo-compiler",
@@ -14,40 +16,73 @@ jobs:
   test:
     uses: ./.github/workflows/python.yml
 
-  build:
-    needs: test
+  check:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: python
     steps:
       - uses: actions/checkout@v5
-
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-
-      - name: Check the tag against the version
+      - name: Check the tag against the versions
+        working-directory: python
         run: |
           version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match the pyproject.toml version $version"
+          crate=$(python -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")
+          if [ "v$version" != "$GITHUB_REF_NAME" ] || [ "$crate" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, pyproject.toml $version and Cargo.toml $crate must agree"
             exit 1
           fi
 
-      - name: Build
+  wheels:
+    needs: [test, check]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64 }
+          - { os: ubuntu-latest, target: aarch64 }
+          - { os: macos-latest, target: aarch64 }
+          - { os: macos-latest, target: x86_64 }
+          - { os: windows-latest, target: x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: auto
+      - name: Check the x86-64 Linux wheel
+        if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64'
         run: |
-          python -m pip install --upgrade build twine
-          python -m build
-          python -m twine check --strict dist/*
-
+          python -m pip install python/dist/*.whl
+          python -c "from qevedo.compiler import compile_source; from qevedo.compiler.passes import native; assert native.available(); print(compile_source('OPENQASM 3.0; include \"stdgates.inc\"; qubit[2] q; swap q[0], q[1];').gate_counts())"
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: wheels-${{ matrix.os }}-${{ matrix.target }}
+          path: python/dist/
+
+  sdist:
+    needs: [test, check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
           path: python/dist/
 
   publish:
-    needs: build
+    needs: [wheels, sdist]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -57,9 +92,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist/
-
+          path: dist
+          merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   github-release:
@@ -70,9 +104,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist/
-
+          path: dist
+          merge-multiple: true
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

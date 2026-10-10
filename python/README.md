@@ -9,12 +9,16 @@ it installs as `qevedo-compiler` and imports as `qevedo.compiler`.
 pip install qevedo-compiler
 ```
 
-For development, from a checkout:
+For development, from a checkout (this builds the Rust core, so it needs a
+Rust toolchain, from https://rustup.rs):
 
 ```bash
 cd qcc/python
-pip install -e ".[dev]"
+pip install -e ".[dev]"            # or: maturin develop --release
 ```
+
+The Rust core lives in `../core` (`cargo test --release` there runs its own
+tests); `src/` holds its Python bindings.
 
 `openqasm` 3.x is installed from PyPI. To develop both together, also install
 the sibling checkout: `pip install -e ../../openqasm`.

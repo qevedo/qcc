@@ -1,0 +1,21 @@
+[package]
+name = "qevedo-compiler"
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.87"
+description = "Python bindings of the QCC core (qevedo.compiler._core)"
+license = "MIT"
+repository = "https://github.com/qevedo/qevedo-compiler"
+publish = false
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+qcc = { path = "../core" }
+pyo3 = { version = "=0.29.2", features = ["abi3-py310"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
