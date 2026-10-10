@@ -15,7 +15,10 @@ The **Python compiler** in `python/` is the active implementation (v0.1):
 - Lowering to any device's native gates with the fewest gates (Euler and KAK synthesis, optimal two-qubit gate counts) and peephole optimization
 - CLI: `qcc compile input.qasm -o out.qasm --device qevedo/compiler/profiles/grid_2x4.yaml [--qasm-version 3]`
 
-The C++ tree is a placeholder for future performance work.
+The lowering and optimization passes run in a **Rust core** (`core/`, the
+`qcc` crate), loaded by the Python package as `qevedo.compiler._core` through
+PyO3 bindings (`python/src/`). The Python passes stay as the reference
+implementation, and the tests check one against the other.
 
 ## Quick start
 
