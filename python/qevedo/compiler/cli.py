@@ -10,6 +10,7 @@ from qevedo.compiler.compiler import CompileOptions, compile_file
 from qevedo.compiler.device import DeviceSpec, default_device
 from qevedo.compiler.emit.qasm import emit_qasm
 from qevedo.compiler.frontend.qasm import QasmFrontendError
+from qevedo.compiler.passes.decompose import LoweringError
 
 
 def _profiles_dir() -> Path:
@@ -61,7 +62,7 @@ def _run_compile(args: argparse.Namespace) -> int:
     try:
         options = CompileOptions(device=device, include_paths=args.include)
         compiled = compile_file(args.input, options)
-    except QasmFrontendError as error:
+    except (QasmFrontendError, LoweringError) as error:
         print(f"qcc: {error}", file=sys.stderr)
         return 1
     output = emit_qasm(compiled, version=f"{args.qasm_version}.0")

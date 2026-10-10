@@ -19,8 +19,37 @@ OpenQASM 2/3  →  openqasm.parse + analyze  →  frontend  →  IR  →  passes
 
 ### Implemented passes
 
-1. **DecomposeToNative** — lowers `h`, `u`, `u1`–`u3`, `p`, `x`, `y`, `z`, `s`, `t` into `{rz, sx, x}`; preserves `cx`, `measure`, `barrier`.
-2. **CancelAdjacentInverses** — removes back-to-back self-inverses (`x`, `cx`, `sx`, opposite `rz`).
+The default pipeline is decompose → merge single-qubit runs → cancel inverses →
+merge single-qubit runs again.
+
+1. **DecomposeToNative**: rewrites every gate that is not in the device's
+   `native_gates` with the fewest native gates, keeping the cheapest of the
+   routes that apply (fewest two-qubit gates first, then fewest gates):
+   - *Single-qubit gates*: a ZYZ Euler decomposition emitted in the device's
+     single-qubit basis (`rz`+`sx`[+`x`], `rz`+`rx`, `rz`+`ry`, `rx`+`ry` or
+     `u3`), which is optimal for each basis.
+   - *Two-qubit gates*: a KAK decomposition. The Weyl-chamber point of the
+     gate fixes the minimal number of native two-qubit gates (0–3 for CX-like
+     gates `cx`, `cz`, `cy`, `ch`, `ecr`; one per non-zero coordinate for
+     `rxx`, `ryy`, `rzz`, `rzx`). A template circuit with that point is
+     dressed with single-qubit gates computed from the two KAK
+     decompositions; template variants and rotations moved across the
+     two-qubit gates (Z on a CX control, X on its target, Pauli products
+     through Clifford gates) keep the single-qubit gate count low.
+   - *Standard-library definitions*: `qelib1.inc`/`stdgates.inc` gates with a
+     known short definition (`crz` is `rz, cx, rz, cx`), lowered recursively.
+     Gates on three or more qubits (`ccx`, `cswap`, `rccx`, and the `c3x`
+     family through their `qelib1.inc` bodies) take this route.
+2. **MergeSingleQubitGates**: replaces each run of single-qubit gates on a
+   qubit by its shortest equivalent in the native basis.
+3. **CancelAdjacentInverses**: removes pairs of gates that undo each other
+   with no other gate on their qubits in between (`x x`, `cx cx`, `s sdg`,
+   `rz(a) rz(-a)`, …; `sx sx` is an `x` and is left for the merge pass).
+
+The synthesis lives in `qevedo/compiler/synthesis/` (`gates.py`: matrices of
+the standard gates; `one_qubit.py`: Euler decompositions; `two_qubit.py`: KAK
+and templates). Not supported yet as native two-qubit gates: `iswap`,
+`sqrt_iswap` and other gates that are not CX-like or Ising rotations.
 
 ### Planned passes (Phase 3)
 

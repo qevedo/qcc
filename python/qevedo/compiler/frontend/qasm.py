@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from importlib import resources
 from os import PathLike
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from openqasm import ast
 from openqasm.semantic import Analysis, Scope, SymbolKind
 
 from qevedo.compiler.ir import Circuit, Clbit, Instruction, Qubit
+from qevedo.compiler.passes.decompose import DEFINITIONS
+from qevedo.compiler.synthesis.gates import is_known_gate
 
 __all__ = ["QasmFrontendError", "parse_qasm"]
 
@@ -85,7 +88,19 @@ def parse_qasm(
     analysis = openqasm.analyze(program, filename=filename, include_paths=include_paths)
     if analysis.errors:
         raise QasmFrontendError("\n".join(str(error) for error in analysis.errors))
-    return _Lowering(analysis).lower(program)
+    lowering = _Lowering(analysis)
+    for include in analysis.includes:
+        if include in _LIBRARIES:
+            library = resources.files("openqasm.stdlib").joinpath(include).read_text("utf-8")
+            lowering.collect(openqasm.parse(library, ignore_version=True), library=True)
+        else:
+            source_text = Path(include).read_text(encoding="utf-8")
+            lowering.collect(openqasm.parse(source_text, filename=include, ignore_version=True))
+    lowering.collect(program)
+    return lowering.lower(program)
+
+
+_LIBRARIES = ("qelib1.inc", "stdgates.inc")
 
 
 class _Lowering:
@@ -93,6 +108,19 @@ class _Lowering:
         self.analysis = analysis
         self.circuit = Circuit()
         self.aliases: dict[str, list[Qubit]] = {}
+        # Gates defined by the program and its own includes, which are always
+        # expanded, and by the standard libraries, which are expanded only when
+        # the compiler has no better way to lower them.
+        self.definitions: dict[str, ast.GateDefinition] = {}
+        self.library_definitions: dict[str, ast.GateDefinition] = {}
+        # Values of the parameters of the gate definitions being expanded.
+        self.bindings: list[dict[str, float]] = []
+
+    def collect(self, program: ast.Program, library: bool = False) -> None:
+        target = self.library_definitions if library else self.definitions
+        for statement in program.statements:
+            if isinstance(statement, ast.GateDefinition):
+                target[statement.name.name] = statement
 
     def lower(self, program: ast.Program) -> Circuit:
         for statement in program.statements:
@@ -174,7 +202,45 @@ class _Lowering:
         width = max(len(group) for group in groups)
         for offset in range(width):
             qubits = tuple(group[0] if len(group) == 1 else group[offset] for group in groups)
+            self.apply(name, params, qubits, node)
+
+    def apply(
+        self, name: str, params: tuple[float, ...], qubits: tuple[Qubit, ...], node: ast.Node
+    ) -> None:
+        """Append gate ``name``, expanding it when its definition must be used."""
+        definition = self.definitions.get(name)
+        if definition is None and not _compiler_knows(name):
+            definition = self.library_definitions.get(name)
+        if definition is None:
             self.circuit.append(Instruction(name, qubits, params))
+            return
+        bindings = {p.name: value for p, value in zip(definition.parameters, params)}
+        targets = {q.name: qubit for q, qubit in zip(definition.qubits, qubits)}
+        self.bindings.append(bindings)
+        try:
+            for statement in definition.body:
+                self.body_statement(statement, targets)
+        finally:
+            self.bindings.pop()
+
+    def body_statement(self, node: ast.Statement, targets: dict[str, Qubit]) -> None:
+        if isinstance(node, ast.GateCall):
+            if node.modifiers:
+                raise QasmFrontendError(
+                    "gate modifiers (inv, pow, ctrl, negctrl) are not supported", node
+                )
+            name = _GATE_NAMES.get(node.name.name, node.name.name)
+            params = tuple(self.number(argument) for argument in node.arguments)
+            qubits = tuple(targets[operand.name] for operand in node.qubits)  # type: ignore[union-attr]
+            self.apply(name, params, qubits, node)
+        elif isinstance(node, ast.GlobalPhase):
+            if node.modifiers or node.qubits:
+                raise QasmFrontendError("controlled global phases are not supported", node)
+        elif isinstance(node, ast.Barrier):
+            qubits = tuple(targets[operand.name] for operand in node.operands)  # type: ignore[union-attr]
+            self.circuit.append(Instruction("barrier", qubits))
+        elif not isinstance(node, ast.Nop):
+            raise QasmFrontendError(f"{_describe(node)} is not supported in a gate body", node)
 
     def measure(
         self,
@@ -284,6 +350,8 @@ class _Lowering:
         if isinstance(node, (ast.IntegerLiteral, ast.FloatLiteral)):
             return node.value
         if isinstance(node, ast.Identifier):
+            if self.bindings and node.name in self.bindings[-1]:
+                return self.bindings[-1][node.name]
             return self.constant(node)
         if isinstance(node, ast.UnaryExpression) and node.op is ast.UnaryOperator.NEGATE:
             return -self.number(node.operand)
@@ -318,6 +386,11 @@ class _Lowering:
                 break
             scope = scope.parent
         raise QasmFrontendError(f"'{identifier.name}' is not a compile-time constant", identifier)
+
+
+def _compiler_knows(name: str) -> bool:
+    """Whether the compiler can lower gate ``name`` without its OpenQASM definition."""
+    return is_known_gate(name) or name in DEFINITIONS
 
 
 _DESCRIPTIONS = {

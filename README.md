@@ -12,7 +12,7 @@ The **Python compiler** in `python/` is the active implementation (v0.1):
 
 - QCC IR (`Circuit`, `Instruction`, `DeviceSpec`)
 - OpenQASM 2 and 3 frontend and emitter, built on [`openqasm`](https://pypi.org/project/openqasm) 3.x (sibling repo [`openqasm`](../openqasm))
-- Decomposition to `{rz, sx, x, cx}` and basic optimization
+- Lowering to any device's native gates with the fewest gates (Euler and KAK synthesis, optimal two-qubit gate counts) and peephole optimization
 - CLI: `qcc compile input.qasm -o out.qasm --device qevedo/compiler/profiles/grid_2x4.yaml [--qasm-version 3]`
 
 The C++ tree is a placeholder for future performance work.

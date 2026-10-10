@@ -84,7 +84,35 @@ def test_includes_relative_to_the_file(tmp_path):
     (tmp_path / "defs.inc").write_text("gate mine a { U(0, 0, 0) a; }\nconst int size = 2;\n")
     path = tmp_path / "main.qasm"
     path.write_text('include "defs.inc";\nqubit[size] q;\nmine q;\n')
-    assert names(parse_qasm(path=path)) == ["mine", "mine"]
+    # Gates defined by the program's own files are expanded into their bodies.
+    assert names(parse_qasm(path=path)) == ["u", "u"]
+
+
+def test_gate_definitions_are_expanded():
+    circuit = parse_qasm(
+        source="""
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        gate twice(t) a, b { rz(2 * t) a; cx a, b; }
+        gate outer(t) a, b { h b; twice(t / 2) b, a; }
+        qubit[2] q;
+        outer(0.6) q[0], q[1];
+        """
+    )
+    assert [(i.name, [q.index for q in i.qubits], i.params) for i in circuit.instructions] == [
+        ("h", [1], ()),
+        ("rz", [1], (pytest.approx(0.6),)),
+        ("cx", [1, 0], ()),
+    ]
+
+
+def test_library_gates_the_compiler_knows_stay_named():
+    circuit = parse_qasm(
+        source='OPENQASM 2.0; include "qelib1.inc"; qreg q[4]; ccx q[0], q[1], q[2]; c3x q[0], q[1], q[2], q[3];'
+    )
+    named = names(circuit)
+    # ccx is lowered by the compiler itself; c3x comes from its qelib1.inc definition.
+    assert named[0] == "ccx" and "c3x" not in named and len(named) > 2
 
 
 def test_semantic_errors_are_reported_with_locations():
