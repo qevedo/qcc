@@ -11,7 +11,13 @@ from qevedo.compiler.ir import Circuit, Instruction, Qubit
 from qevedo.compiler.passes import CancelAdjacentInverses, DecomposeToNative, LoweringError
 from qevedo.compiler.passes.decompose import DEFINITIONS
 from qevedo.compiler.synthesis.gates import _PARAMETRIC, GATE_ARITY, embed, gate_matrix
-from qevedo.compiler.synthesis.one_qubit import bases_for, euler_zyz, ops_matrix, synthesize_1q
+from qevedo.compiler.synthesis.one_qubit import (
+    bases_for,
+    count_1q,
+    euler_zyz,
+    ops_matrix,
+    synthesize_1q,
+)
 from qevedo.compiler.synthesis.two_qubit import (
     _steps_matrix,
     canonical,
@@ -125,6 +131,7 @@ def test_single_qubit_synthesis_is_exact_and_short(label):
     samples += [gate_matrix(g, params_for(g)) for g, n in GATE_ARITY.items() if n == 1]
     for u in samples:
         ops = synthesize_1q(u, bases)
+        assert count_1q(u, bases) == len(ops)
         assert all(name in native for name, _ in ops)
         assert equal_up_to_phase(ops_matrix(ops), u)
         assert len(ops) <= (1 if label == "u3" else 5 if "sx" in native else 3)
@@ -182,10 +189,13 @@ def test_two_qubit_synthesis_is_exact(native):
     rng = np.random.default_rng(5)
     samples = [haar(4, rng) for _ in range(100)]
     samples += [gate_matrix(g, params_for(g)) for g, n in GATE_ARITY.items() if n == 2]
+    cost = lambda m: len(synthesize_1q(m, bases_for(["rz", "sx", "x"])))  # noqa: E731
     for u in samples:
-        steps = synthesize_2q(u, basis)
-        assert all(name in ("u", native) for name, _, _ in steps)
-        assert equal_up_to_phase(_steps_matrix(steps), u)
+        # Without a cost the first template is used as it is; with one, the
+        # variants are compared and rotations are moved across the gates.
+        for steps in (synthesize_2q(u, basis), synthesize_2q(u, basis, cost)):
+            assert all(name in ("u", native) for name, _, _ in steps)
+            assert equal_up_to_phase(_steps_matrix(steps), u)
 
 
 @pytest.mark.parametrize(

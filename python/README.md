@@ -62,6 +62,13 @@ profile's `native_gates`, with the fewest gates:
 - standard gates with a shorter textbook definition, and gates on three or
   more qubits, through their definitions.
 
+After lowering, the circuit is optimized: single-qubit runs are merged,
+gates cancel or merge across gates they commute with, and every run of gates
+on one pair of qubits is resynthesized as a single two-qubit unitary when
+that is cheaper. On a 12-qubit QFT and Qiskit's random circuits this gives the
+same CX counts as Qiskit's `optimization_level=3` and equal or lower total
+gate counts (see `docs/ARCHITECTURE.md`).
+
 ```python
 from qevedo.compiler import CompileOptions, compile_source
 from qevedo.compiler.device import DeviceSpec

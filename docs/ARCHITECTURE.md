@@ -19,8 +19,9 @@ OpenQASM 2/3  →  openqasm.parse + analyze  →  frontend  →  IR  →  passes
 
 ### Implemented passes
 
-The default pipeline is decompose → merge single-qubit runs → cancel inverses →
-merge single-qubit runs again.
+The default pipeline is: decompose, then two rounds of [merge single-qubit
+runs → commutative cancellation → two-qubit block resynthesis], then a final
+merge. Each optimization can expose work for the others.
 
 1. **DecomposeToNative**: rewrites every gate that is not in the device's
    `native_gates` with the fewest native gates, keeping the cheapest of the
@@ -42,9 +43,23 @@ merge single-qubit runs again.
      family through their `qelib1.inc` bodies) take this route.
 2. **MergeSingleQubitGates**: replaces each run of single-qubit gates on a
    qubit by its shortest equivalent in the native basis.
-3. **CancelAdjacentInverses**: removes pairs of gates that undo each other
-   with no other gate on their qubits in between (`x x`, `cx cx`, `s sdg`,
-   `rz(a) rz(-a)`, …; `sx sx` is an `x` and is left for the merge pass).
+3. **CommutativeCancellation**: each gate looks back along its qubits,
+   through gates it commutes with (Z-type gates on a CX control, X-type
+   gates on a CX target, diagonal gates with each other), for an inverse to
+   cancel or a rotation to merge with: `rz(a) q0; cx q0, q1; rz(b) q0`
+   becomes `rz(a + b) q0; cx q0, q1`. (`CancelAdjacentInverses` is the
+   simpler adjacent-only version.)
+4. **ResynthesizeTwoQubitBlocks**: collects maximal runs of gates that only
+   touch one pair of qubits, multiplies each into its 4×4 unitary and
+   replaces it by a fresh KAK synthesis when that has fewer two-qubit
+   gates, or as many and fewer gates. Two SWAPs on the same pair vanish;
+   four CXs that amount to two become two.
+
+Against Qiskit 2.5 (`optimization_level=3`, target `rz, sx, x, cx`, with
+Qiskit's SWAP elision turned off so both outputs implement the same
+unitary), the CX counts are equal on a 12-qubit QFT and on Qiskit's random
+circuits, and the total gate counts are equal on the QFT and 7–9% lower on
+the random circuits.
 
 The synthesis lives in `qevedo/compiler/synthesis/` (`gates.py`: matrices of
 the standard gates; `one_qubit.py`: Euler decompositions; `two_qubit.py`: KAK

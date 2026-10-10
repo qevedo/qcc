@@ -26,7 +26,7 @@ from qevedo.compiler.ir import Circuit, Instruction, Qubit
 from qevedo.compiler.passes.base import Pass
 from qevedo.compiler.passes.optimize import merge_single_qubit_runs
 from qevedo.compiler.synthesis.gates import gate_matrix, is_known_gate
-from qevedo.compiler.synthesis.one_qubit import bases_for, synthesize_1q
+from qevedo.compiler.synthesis.one_qubit import bases_for, count_1q, synthesize_1q
 from qevedo.compiler.synthesis.two_qubit import best_2q_bases, synthesize_2q
 
 __all__ = ["DecomposeToNative", "Lowering", "LoweringError"]
@@ -155,6 +155,7 @@ class Lowering:
         self.bases_2q = best_2q_bases(self.native)
         self._cost_1q = lru_cache(maxsize=None)(self._cost_1q_uncached)
         self._memo: dict[tuple[str, tuple[float, ...], int], list[Instruction]] = {}
+        self._memo_2q: dict[bytes, list[Instruction]] = {}
 
     def lower(self, inst: Instruction) -> list[Instruction]:
         name = inst.name.lower()
@@ -185,7 +186,7 @@ class Lowering:
             if len(inst.qubits) == 1:
                 candidates.append(self._one_qubit(matrix, inst.qubits[0]))
             elif self.bases_2q:
-                candidates.append(self._two_qubit(matrix, inst.qubits))
+                candidates.append(self.two_qubit(matrix, inst.qubits))
         if not candidates:
             if not is_known_gate(name) and name not in DEFINITIONS:
                 raise LoweringError(
@@ -195,7 +196,7 @@ class Lowering:
                 f"cannot lower {inst.name!r}: the native gates {sorted(self.native)} include no "
                 "supported two-qubit gate (cx, cz, cy, ch, ecr, rxx, ryy, rzz or rzx)"
             )
-        return min(candidates, key=_cost)
+        return min(candidates, key=cost)
 
     def _one_qubit(self, matrix: np.ndarray, qubit: Qubit) -> list[Instruction]:
         if not self.bases_1q:
@@ -207,27 +208,39 @@ class Lowering:
 
     def _cost_1q_uncached(self, key: bytes) -> int:
         matrix = np.frombuffer(key, dtype=complex).reshape(2, 2)
-        return len(synthesize_1q(matrix, self.bases_1q)) if self.bases_1q else 0
+        return count_1q(matrix, self.bases_1q) if self.bases_1q else 0
+
+    def two_qubit(self, matrix: np.ndarray, qubits: Sequence[Qubit]) -> list[Instruction]:
+        """The cheapest native sequence for the two-qubit unitary ``matrix`` on ``qubits``."""
+        key = np.ascontiguousarray(matrix, dtype=complex).tobytes()
+        if key not in self._memo_2q:
+            placeholders = (Qubit("", 0), Qubit("", 1))
+            self._memo_2q[key] = self._two_qubit(matrix, placeholders)
+        return [
+            Instruction(low.name, tuple(qubits[q.index] for q in low.qubits), low.params)
+            for low in self._memo_2q[key]
+        ]
 
     def _two_qubit(self, matrix: np.ndarray, qubits: Sequence[Qubit]) -> list[Instruction]:
-        def cost(u: np.ndarray) -> int:
+
+        def cost_1q(u: np.ndarray) -> int:
             return self._cost_1q(np.ascontiguousarray(u, dtype=complex).tobytes())
 
         best: list[Instruction] | None = None
         for basis in self.bases_2q:
             out: list[Instruction] = []
-            for name, params, operands in synthesize_2q(matrix, basis, cost):
+            for name, params, operands in synthesize_2q(matrix, basis, cost_1q):
                 if name == "u":
                     out.extend(self._one_qubit(params, qubits[operands[0]]))
                 else:
                     out.append(Instruction(name, tuple(qubits[i] for i in operands), params))
-            if best is None or _cost(out) < _cost(best):
+            if best is None or cost(out) < cost(best):
                 best = out
         assert best is not None
         return best
 
 
-def _cost(instructions: Sequence[Instruction]) -> tuple[int, int]:
+def cost(instructions: Sequence[Instruction]) -> tuple[int, int]:
     """Two-qubit gates first, then all gates."""
     return (sum(1 for inst in instructions if len(inst.qubits) > 1), len(instructions))
 

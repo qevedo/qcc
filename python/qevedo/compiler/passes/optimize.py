@@ -12,7 +12,12 @@ from qevedo.compiler.passes.base import Pass
 from qevedo.compiler.synthesis.gates import gate_matrix, is_known_gate
 from qevedo.compiler.synthesis.one_qubit import Basis1q, bases_for, synthesize_1q
 
-__all__ = ["CancelAdjacentInverses", "MergeSingleQubitGates", "merge_single_qubit_runs"]
+__all__ = [
+    "CancelAdjacentInverses",
+    "CommutativeCancellation",
+    "MergeSingleQubitGates",
+    "merge_single_qubit_runs",
+]
 
 NON_GATES = {"barrier", "measure", "reset"}
 
@@ -135,3 +140,140 @@ def _resynthesize(
         return run
     qubit = run[0].qubits[0]
     return [Instruction(name, (qubit,), params) for name, params in ops]
+
+
+# How each gate acts on each of its qubits: "Z" if it commutes with Z there
+# (diagonal on that qubit, like a CX control), "X" if it commutes with X (like
+# a CX target). Two gates commute when every qubit they share has the same
+# letter in both.
+_Z_GATES = {
+    "rz", "p", "u1", "phase", "z", "s", "sdg", "t", "tdg", "id",
+    "cz", "cp", "cphase", "cu1", "crz", "rzz", "ccz",
+}  # fmt: skip
+_X_GATES = {"x", "sx", "sxdg", "rx", "rxx"}
+_CONTROLLED_X = {"cx": 1, "cnot": 1, "crx": 1, "ccx": 2}
+_CONTROLLED = {"cy": 1, "ch": 1, "cry": 1, "csx": 1, "cu": 1, "cu3": 1, "cswap": 1}
+# Rotations that merge by adding their angles when they meet.
+_MERGEABLE = {"rz", "rx", "ry", "p", "u1", "phase", "rzz", "rxx", "ryy", "cp", "cphase", "cu1"}
+
+
+def _actions(inst: Instruction) -> list[str | None]:
+    name = inst.name.lower()
+    n = len(inst.qubits)
+    if name in _Z_GATES:
+        return ["Z"] * n
+    if name in _X_GATES:
+        return ["X"] * n
+    if name in _CONTROLLED_X:
+        controls = _CONTROLLED_X[name]
+        return ["Z"] * controls + ["X"] * (n - controls)
+    if name in _CONTROLLED:
+        controls = _CONTROLLED[name]
+        return ["Z"] * controls + [None] * (n - controls)
+    return [None] * n
+
+
+def _commute(a: Instruction, b: Instruction) -> bool:
+    if a.clbits or b.clbits or a.name.lower() in NON_GATES or b.name.lower() in NON_GATES:
+        return not set(a.qubits) & set(b.qubits)
+    actions_a = dict(zip(a.qubits, _actions(a)))
+    actions_b = dict(zip(b.qubits, _actions(b)))
+    for q in set(a.qubits) & set(b.qubits):
+        if actions_a[q] is None or actions_a[q] != actions_b[q]:
+            return False
+    return True
+
+
+class CommutativeCancellation(Pass):
+    """Cancel inverse pairs and merge rotations across gates they commute with.
+
+    ``rz`` on a CX's control commutes with the CX, so ``rz(a) q0; cx q0, q1;
+    rz(b) q0;`` becomes ``rz(a + b) q0; cx q0, q1;``, and two CXs with only
+    gates that commute with them in between cancel.
+    """
+
+    name = "commutative_cancellation"
+
+    #: How far back along a qubit to look for a partner.
+    window = 32
+
+    def run(self, circuit: Circuit, device: DeviceSpec | None = None) -> Circuit:
+        del device
+        out = circuit.copy()
+        kept: list[Instruction | None] = []
+        timelines: dict[Qubit, list[int]] = {}
+        for inst in out.instructions:
+            partner = self._partner(inst, kept, timelines)
+            if partner is not None:
+                previous = kept[partner]
+                assert previous is not None
+                merged = _combine(previous, inst)
+                if merged is not _NO_MERGE:
+                    if merged is None:
+                        kept[partner] = None
+                        for q in previous.qubits:
+                            timelines[q].remove(partner)
+                    else:
+                        kept[partner] = merged
+                    continue
+            for q in inst.qubits:
+                timelines.setdefault(q, []).append(len(kept))
+            kept.append(inst)
+        out.instructions = [inst for inst in kept if inst is not None]
+        return out
+
+    def _partner(
+        self,
+        inst: Instruction,
+        kept: list[Instruction | None],
+        timelines: dict[Qubit, list[int]],
+    ) -> int | None:
+        """An earlier gate on the same qubits that ``inst`` can reach by commuting."""
+        if not inst.qubits or inst.clbits or inst.name.lower() in NON_GATES:
+            return None
+        first = timelines.get(inst.qubits[0], [])
+        for index in reversed(first[-self.window :]):
+            candidate = kept[index]
+            assert candidate is not None
+            if (
+                set(candidate.qubits) == set(inst.qubits)
+                and _combine(candidate, inst) is not _NO_MERGE
+                and _reachable(inst, index, kept, timelines)
+            ):
+                return index
+            if not _commute(candidate, inst):
+                return None
+        return None
+
+
+def _reachable(
+    inst: Instruction, index: int, kept: list[Instruction | None], timelines: dict[Qubit, list[int]]
+) -> bool:
+    """Whether every gate after ``index`` on ``inst``'s other qubits commutes with ``inst``."""
+    return all(
+        _commute(kept[j], inst)  # type: ignore[arg-type]
+        for q in inst.qubits[1:]
+        for j in timelines[q]
+        if j > index
+    )
+
+
+_NO_MERGE = object()
+
+
+def _combine(left: Instruction, right: Instruction):
+    """``left`` followed by ``right`` as one gate, None if they cancel, or _NO_MERGE."""
+    if _is_inverse_pair(left, right):
+        return None
+    a, b = left.name.lower(), right.name.lower()
+    if a != b or a not in _MERGEABLE or len(left.params) != 1 or len(right.params) != 1:
+        return _NO_MERGE
+    if left.qubits != right.qubits and not (
+        a in _SYMMETRIC and set(left.qubits) == set(right.qubits)
+    ):
+        return _NO_MERGE
+    angle = left.params[0] + right.params[0]
+    period = _ROTATIONS.get(a, 2 * math.pi)
+    if abs(math.remainder(angle, period)) < 1e-12:
+        return None
+    return Instruction(left.name, left.qubits, (angle,))

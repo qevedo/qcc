@@ -343,21 +343,23 @@ def synthesize_2q(
         templates = [_ising_template(target.point, basis)]
     else:
         templates = _cx_templates(target.point)
-    best: list[Step] | None = None
-    best_cost = math.inf
-    for template in templates:
-        steps = _instantiate(target, template, basis)
-        if steps is None:
-            continue
-        if cost_1q is None:
-            return steps
-        steps = _dress(steps, cost_1q)
-        cost = sum(cost_1q(params) if name == "u" else 1 for name, params, _ in steps)
-        if cost < best_cost:
-            best, best_cost = steps, cost
-    if best is None:
+    candidates = [
+        steps
+        for template in templates
+        if (steps := _instantiate(target, template, basis)) is not None
+    ]
+    if not candidates:
         raise AssertionError(f"no template reaches the point {target.point}")  # pragma: no cover
-    return best
+    if cost_1q is None:
+        return candidates[0]
+
+    def total(steps: list[Step]) -> int:
+        return sum(cost_1q(params) if name == "u" else 1 for name, params, _ in steps)
+
+    # Moving rotations across the gates is the expensive part: do it for the
+    # two variants that start cheapest.
+    candidates.sort(key=total)
+    return min((_dress(steps, cost_1q) for steps in candidates[:2]), key=total)
 
 
 def _instantiate(target: KAK, template: list[Step], basis: TwoQubitBasis) -> list[Step] | None:
@@ -424,7 +426,7 @@ def _oriented(name: str, params: tuple, operands: tuple[int, int]) -> np.ndarray
 
 @lru_cache(maxsize=4096)
 def _commuting_axes(name: str, params: tuple, operands: tuple[int, int]) -> dict[int, list[int]]:
-    """For each operand, the Pauli axes whose rotations commute with the gate."""
+    """For each qubit (0 or 1, not operand position), the Pauli axes whose rotations commute with the gate."""
     g = _oriented(name, params, operands)
     out: dict[int, list[int]] = {0: [], 1: []}
     for q in (0, 1):
@@ -487,7 +489,8 @@ def _dress(steps: list[Step], cost_1q: Callable[[np.ndarray], int]) -> list[Step
     product; the angle that minimises the two gates' combined cost is kept.
     """
     work = [list(step) for step in steps]
-    for _ in range(2):
+    for _ in range(3):
+        total = sum(cost_1q(step[1]) for step in work if step[0] == "u")
         i = 0
         while i < len(work):
             name, params, operands = work[i]
@@ -495,8 +498,8 @@ def _dress(steps: list[Step], cost_1q: Callable[[np.ndarray], int]) -> list[Step
                 i += 1
                 continue
             axes = _commuting_axes(name, params, operands)
-            for role, q in enumerate(operands):
-                for axis in axes[role]:
+            for q in operands:
+                for axis in axes[q]:
                     before = _neighbour(work, i, q, -1)
                     if before is None:
                         work.insert(i, ["u", I2, (q,)])
@@ -518,6 +521,8 @@ def _dress(steps: list[Step], cost_1q: Callable[[np.ndarray], int]) -> list[Step
                         work[after][1] = a @ r
             i = _move_paulis(work, i, cost_1q)
             i += 1
+        if sum(cost_1q(step[1]) for step in work if step[0] == "u") >= total:
+            break
     return [tuple(step) for step in work if not (step[0] == "u" and np.allclose(step[1], I2))]
 
 
@@ -550,19 +555,17 @@ def _move_paulis(work: list, i: int, cost_1q: Callable[[np.ndarray], int]) -> in
     images = _pauli_images(name, tuple(params), tuple(operands))
     if not images:
         return i
-    slots = []
+    # Make sure both qubits have a single-qubit step on each side, then find
+    # them (inserting shifts indices, so look them up afterwards).
     for q in (0, 1):
-        before = _neighbour(work, i, q, -1)
-        if before is None:
+        if _neighbour(work, i, q, -1) is None:
             work.insert(i, ["u", I2, (q,)])
-            before, i = i, i + 1
-        slots.append(before)
-    for q in (0, 1):
-        after = _neighbour(work, i, q, 1)
-        if after is None:
+            i += 1
+        if _neighbour(work, i, q, 1) is None:
             work.insert(i + 1, ["u", I2, (q,)])
-            after = i + 1
-        slots.append(after)
+    slots = [_neighbour(work, i, q, -1) for q in (0, 1)] + [
+        _neighbour(work, i, q, 1) for q in (0, 1)
+    ]
     b0, b1, a0, a1 = (work[j][1] for j in slots)
     best_cost = sum(cost_1q(m) for m in (b0, b1, a0, a1))
     best = None

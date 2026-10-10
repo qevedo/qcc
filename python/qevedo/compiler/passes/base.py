@@ -34,16 +34,12 @@ class PassManager:
     @classmethod
     def default(cls, device: Optional[DeviceSpec] = None) -> PassManager:
         from qevedo.compiler.passes.decompose import DecomposeToNative
-        from qevedo.compiler.passes.optimize import CancelAdjacentInverses, MergeSingleQubitGates
+        from qevedo.compiler.passes.optimize import CommutativeCancellation, MergeSingleQubitGates
+        from qevedo.compiler.passes.resynthesize import ResynthesizeTwoQubitBlocks
 
         del device  # routing passes will use this later
-        # Merging single-qubit runs can bring inverse pairs together and
-        # cancelling them can join runs, so merge again at the end.
-        return cls(
-            [
-                DecomposeToNative(),
-                MergeSingleQubitGates(),
-                CancelAdjacentInverses(),
-                MergeSingleQubitGates(),
-            ]
-        )
+        # Each optimization can expose work for the others (merging single-qubit
+        # runs brings inverse pairs together, resynthesis joins blocks), so the
+        # round runs twice.
+        rounds = [MergeSingleQubitGates(), CommutativeCancellation(), ResynthesizeTwoQubitBlocks()]
+        return cls([DecomposeToNative(), *rounds, *rounds, MergeSingleQubitGates()])

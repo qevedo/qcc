@@ -17,7 +17,7 @@ import numpy as np
 
 from qevedo.compiler.synthesis.gates import gate_matrix
 
-__all__ = ["Basis1q", "Op", "bases_for", "euler_zyz", "synthesize_1q"]
+__all__ = ["Basis1q", "Op", "bases_for", "count_1q", "euler_zyz", "synthesize_1q"]
 
 #: One gate of a synthesized sequence: (name, params).
 Op = tuple[str, tuple[float, ...]]
@@ -50,12 +50,18 @@ def euler_zyz(u: np.ndarray) -> tuple[float, float, float]:
     return theta, (plus + minus) / 2, (plus - minus) / 2
 
 
+#: ZYZ Euler angles (theta, phi, lam).
+Angles = tuple[float, float, float]
+
+
 @dataclass(frozen=True)
 class Basis1q:
     """A family of native single-qubit gates and how to write a unitary in it."""
 
     name: str
     emit: Callable[[np.ndarray], list[Op]]
+    #: The length of ``emit(u)``, given ``u`` and its ZYZ angles.
+    count: Callable[[np.ndarray, Angles], int]
 
 
 def _rz(z: str, angle: float) -> list[Op]:
@@ -136,17 +142,67 @@ def bases_for(native: Collection[str]) -> list[Basis1q]:
     out: list[Basis1q] = []
     for name in ("u3", "u"):
         if name in native:
-            out.append(Basis1q(name, _u3(name)))
+            out.append(Basis1q(name, _u3(name), _count_u3))
             break
     if z and "sx" in native:
-        out.append(Basis1q("zsx", _zsx(z, "x" if "x" in native else None)))
+        x_gate = "x" if "x" in native else None
+        out.append(Basis1q("zsx", _zsx(z, x_gate), _count_zsx(x_gate is not None)))
     if z and "rx" in native:
-        out.append(Basis1q("zxz", _zxz(z)))
+        out.append(Basis1q("zxz", _zxz(z), _count_zxz))
     if z and "ry" in native:
-        out.append(Basis1q("zyz", _zyz(z)))
+        out.append(Basis1q("zyz", _zyz(z), _count_zyz))
     if "rx" in native and "ry" in native:
-        out.append(Basis1q("xyx", _xyx))
+        out.append(Basis1q("xyx", _xyx, _count_xyx))
     return out
+
+
+def count_1q(u: np.ndarray, bases: list[Basis1q]) -> int:
+    """``len(synthesize_1q(u, bases))``, without building the sequence."""
+    angles = euler_zyz(u)
+    return min(basis.count(u, angles) for basis in bases)
+
+
+def _nonzero(*angles: float) -> int:
+    return sum(1 for angle in angles if not _is_zero(angle))
+
+
+def _count_zsx(uses_x: bool) -> Callable[[np.ndarray, Angles], int]:
+    # Mirrors _zsx.
+    def count(u: np.ndarray, angles: Angles) -> int:
+        theta, phi, lam = angles
+        if _is_zero(theta):
+            return _nonzero(phi + lam)
+        if abs(theta - math.pi / 2) < TOL:
+            return 1 + _nonzero(lam - math.pi / 2, phi + math.pi / 2)
+        if uses_x and abs(theta - math.pi) < TOL:
+            return 1 + _nonzero(phi - lam + math.pi)
+        return 2 + _nonzero(lam, theta + math.pi, phi + math.pi)
+
+    return count
+
+
+def _count_zxz(u: np.ndarray, angles: Angles) -> int:
+    theta, phi, lam = angles
+    if _is_zero(theta):
+        return _nonzero(phi + lam)
+    return 1 + _nonzero(lam - math.pi / 2, phi + math.pi / 2)
+
+
+def _count_zyz(u: np.ndarray, angles: Angles) -> int:
+    theta, phi, lam = angles
+    if _is_zero(theta):
+        return _nonzero(phi + lam)
+    return 1 + _nonzero(lam, phi)
+
+
+def _count_u3(u: np.ndarray, angles: Angles) -> int:
+    theta, phi, lam = angles
+    return 0 if _is_zero(theta) and _is_zero(phi + lam) else 1
+
+
+def _count_xyx(u: np.ndarray, angles: Angles) -> int:
+    # Its angles are those of H U H, not of U.
+    return len(_xyx(u))
 
 
 def synthesize_1q(u: np.ndarray, bases: list[Basis1q]) -> list[Op]:
