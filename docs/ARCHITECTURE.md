@@ -63,8 +63,16 @@ the random circuits.
 
 The synthesis lives in `qevedo/compiler/synthesis/` (`gates.py`: matrices of
 the standard gates; `one_qubit.py`: Euler decompositions; `two_qubit.py`: KAK
-and templates). Not supported yet as native two-qubit gates: `iswap`,
-`sqrt_iswap` and other gates that are not CX-like or Ising rotations.
+and templates), mirrored in Rust in `core/src/`. The Rust core also accepts
+`cp` as a native gate (an Ising rotation up to Z rotations) and any other
+entangling gate (`iswap`, `sqrt_iswap`, `sqrt_swap`, …): `core/src/numeric.rs`
+finds the fewest uses numerically (Levenberg–Marquardt on the Makhlin
+invariants, then a polish against the target matrix that makes the result
+exact). The Python reference has templates for CX-like and Ising gates only.
+
+`core/src/decompose.rs` decomposes one gate or unitary and checks the result;
+`wasm/` compiles it to WebAssembly for the decomposition playground at
+https://qevedo.com/decompose/.
 
 ### Planned passes (Phase 3)
 

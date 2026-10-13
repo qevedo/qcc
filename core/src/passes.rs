@@ -609,9 +609,9 @@ mod tests {
                 .unwrap_err()
                 .contains("cannot lower gate 'mystery'")
         );
-        let no_2q = vec![Instruction::gate("swap", vec![0, 1], vec![])];
+        let no_2q = vec![Instruction::gate("cx", vec![0, 1], vec![])];
         assert!(
-            compile(no_2q, natives(&["rz", "sx", "iswap"]))
+            compile(no_2q, natives(&["rz", "sx", "swap"]))
                 .unwrap_err()
                 .contains("no supported two-qubit gate")
         );

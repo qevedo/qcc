@@ -2,69 +2,49 @@
 
 use crate::linalg::{C, M2, M4, ZERO};
 
-/// SplitMix64, enough for test inputs.
-pub struct Rng(u64);
+pub use crate::rng::Rng;
 
-impl Rng {
-    pub fn new(seed: u64) -> Rng {
-        Rng(seed)
-    }
+/// Random unitaries for the tests.
+pub trait RandomUnitary {
+    fn unitary2(&mut self) -> M2;
+    fn unitary4(&mut self) -> M4;
+}
 
-    pub fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
+fn normal(rng: &mut Rng) -> f64 {
+    let (u1, u2) = (rng.uniform().max(1e-300), rng.uniform());
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+}
 
-    /// Uniform in [0, 1).
-    pub fn uniform(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
-    }
-
-    pub fn range(&mut self, low: f64, high: f64) -> f64 {
-        low + (high - low) * self.uniform()
-    }
-
-    pub fn below(&mut self, n: usize) -> usize {
-        (self.next_u64() % n as u64) as usize
-    }
-
-    fn normal(&mut self) -> f64 {
-        let (u1, u2) = (self.uniform().max(1e-300), self.uniform());
-        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
-    }
-
-    fn columns<const N: usize>(&mut self) -> [[C; N]; N] {
-        // Gram–Schmidt on Gaussian columns gives a Haar-random unitary.
-        let mut cols = [[ZERO; N]; N];
-        for j in 0..N {
-            let mut v = [ZERO; N];
-            for value in v.iter_mut() {
-                *value = C::new(self.normal(), self.normal());
-            }
-            for prev in cols.iter().take(j) {
-                let dot: C = (0..N).map(|i| prev[i].conj() * v[i]).sum();
-                for i in 0..N {
-                    v[i] -= dot * prev[i];
-                }
-            }
-            let norm = v.iter().map(|x| x.norm_sqr()).sum::<f64>().sqrt();
+fn columns<const N: usize>(rng: &mut Rng) -> [[C; N]; N] {
+    // Gram–Schmidt on Gaussian columns gives a Haar-random unitary.
+    let mut cols = [[ZERO; N]; N];
+    for j in 0..N {
+        let mut v = [ZERO; N];
+        for value in v.iter_mut() {
+            *value = C::new(normal(rng), normal(rng));
+        }
+        for prev in cols.iter().take(j) {
+            let dot: C = (0..N).map(|i| prev[i].conj() * v[i]).sum();
             for i in 0..N {
-                cols[j][i] = v[i] / norm;
+                v[i] -= dot * prev[i];
             }
         }
-        cols
+        let norm = v.iter().map(|x| x.norm_sqr()).sum::<f64>().sqrt();
+        for i in 0..N {
+            cols[j][i] = v[i] / norm;
+        }
     }
+    cols
+}
 
-    pub fn unitary2(&mut self) -> M2 {
-        let c = self.columns::<2>();
+impl RandomUnitary for Rng {
+    fn unitary2(&mut self) -> M2 {
+        let c = columns::<2>(self);
         M2([[c[0][0], c[1][0]], [c[0][1], c[1][1]]])
     }
 
-    pub fn unitary4(&mut self) -> M4 {
-        let c = self.columns::<4>();
+    fn unitary4(&mut self) -> M4 {
+        let c = columns::<4>(self);
         let mut m = [[ZERO; 4]; 4];
         for i in 0..4 {
             for j in 0..4 {
@@ -74,7 +54,6 @@ impl Rng {
         M4(m)
     }
 }
-
 pub fn equal_up_to_phase2(a: &M2, b: &M2, tol: f64) -> bool {
     let overlap: C = (0..2)
         .flat_map(|i| (0..2).map(move |j| (i, j)))

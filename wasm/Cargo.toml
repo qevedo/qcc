@@ -1,0 +1,22 @@
+[package]
+name = "qcc-wasm"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+description = "The QCC core for browsers: the decomposition playground on qevedo.com"
+license = "MIT"
+repository = "https://github.com/qevedo/qevedo-compiler"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+qcc = { path = "../core" }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

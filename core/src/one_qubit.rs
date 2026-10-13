@@ -238,7 +238,7 @@ pub fn count_1q(u: &M2, bases: &[Basis1q]) -> usize {
 mod tests {
     use super::*;
     use crate::gates::matrix_1q;
-    use crate::testing::{Rng, equal_up_to_phase2};
+    use crate::testing::{RandomUnitary, Rng, equal_up_to_phase2};
 
     fn ops_matrix(ops: &[Op]) -> M2 {
         ops.iter().fold(M2::IDENTITY, |m, op| {

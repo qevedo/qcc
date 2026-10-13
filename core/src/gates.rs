@@ -125,7 +125,8 @@ pub fn signature(name: &str) -> Option<(usize, usize)> {
         "rx" | "ry" | "rz" | "p" | "phase" | "u1" => (1, 1),
         "u2" => (1, 2),
         "u3" | "u" => (1, 3),
-        "cx" | "cnot" | "cy" | "cz" | "ch" | "csx" | "swap" | "iswap" | "dcx" | "ecr" => (2, 0),
+        "cx" | "cnot" | "cy" | "cz" | "ch" | "csx" | "swap" | "iswap" | "dcx" | "ecr"
+        | "sqrt_swap" | "sqrt_iswap" => (2, 0),
         "cp" | "cphase" | "cu1" | "crx" | "cry" | "crz" | "rxx" | "ryy" | "rzz" | "rzx" => (2, 1),
         "cu3" => (2, 3),
         "cu" => (2, 4),
@@ -179,6 +180,24 @@ pub fn matrix_2q(name: &str, p: &[f64]) -> Option<M4> {
             m.0[1][2] = I;
             m.0[2][1] = I;
             m
+        }
+        ("sqrt_swap", []) => {
+            let (p, m) = (C::new(0.5, 0.5), C::new(0.5, -0.5));
+            let mut g = M4::IDENTITY;
+            g.0[1][1] = p;
+            g.0[2][2] = p;
+            g.0[1][2] = m;
+            g.0[2][1] = m;
+            g
+        }
+        ("sqrt_iswap", []) => {
+            let r = FRAC_1_SQRT_2;
+            let mut g = M4::IDENTITY;
+            g.0[1][1] = C::new(r, 0.0);
+            g.0[2][2] = C::new(r, 0.0);
+            g.0[1][2] = C::new(0.0, r);
+            g.0[2][1] = C::new(0.0, r);
+            g
         }
         ("dcx", []) => cx().swapped() * cx(),
         // Qiskit's definition: rzx(π/4) a, b; x a; rzx(-π/4) a, b.

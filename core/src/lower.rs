@@ -245,7 +245,7 @@ impl Lowering {
         Ok(best)
     }
 
-    fn one_qubit(&self, m: &M2, qubit: usize) -> Result<Vec<Instruction>, String> {
+    pub fn one_qubit(&self, m: &M2, qubit: usize) -> Result<Vec<Instruction>, String> {
         if self.bases_1q.is_empty() {
             let mut native: Vec<&String> = self.native.iter().collect();
             native.sort();
@@ -279,6 +279,14 @@ impl Lowering {
     }
 
     fn two_qubit_new(&mut self, m: &M4) -> Result<Vec<Instruction>, String> {
+        if self.bases_2q.is_empty() {
+            let mut native: Vec<&String> = self.native.iter().collect();
+            native.sort();
+            return Err(format!(
+                "the native gates {native:?} include no supported two-qubit gate \
+                 (cx, cz, cy, ch, ecr, rxx, ryy, rzz or rzx)"
+            ));
+        }
         if self.bases_1q.is_empty() {
             self.one_qubit(&M2::IDENTITY, 0)?;
         }
@@ -293,7 +301,7 @@ impl Lowering {
         let mut best: Option<Vec<Instruction>> = None;
         for basis in &self.bases_2q {
             let mut out = Vec::new();
-            for step in self.synth.synthesize(m, basis, Some(&cost_1q)) {
+            for step in self.synth.synthesize(m, basis, Some(&cost_1q))? {
                 match step {
                     Step::U(q, u) => out.extend(
                         synthesize_1q(&u, bases_1q)

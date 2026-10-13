@@ -74,7 +74,16 @@ def simulator_unitary(name, params, n):
     return np.array(columns).T
 
 
-@pytest.mark.parametrize("name", sorted(GATE_ARITY))
+# Gates that are in neither OpenQASM library nor the simulator.
+NON_STANDARD = {"sqrt_swap", "sqrt_iswap"}
+
+
+def test_square_root_gates():
+    assert np.allclose(gate_matrix("sqrt_swap") @ gate_matrix("sqrt_swap"), gate_matrix("swap"))
+    assert np.allclose(gate_matrix("sqrt_iswap") @ gate_matrix("sqrt_iswap"), gate_matrix("iswap"))
+
+
+@pytest.mark.parametrize("name", sorted(set(GATE_ARITY) - NON_STANDARD))
 def test_gate_matrices_match_the_simulator(name):
     params = params_for(name)
     expected = simulator_unitary(name, params, GATE_ARITY[name])
@@ -228,11 +237,15 @@ def test_ising_counts():
 
 
 def test_unsupported_two_qubit_natives_are_reported():
+    # The Python reference has templates for CX-like and Ising natives only;
+    # the Rust core also finds them numerically for iSWAP, √iSWAP and √SWAP.
     assert two_qubit_basis("iswap") is None
+    assert two_qubit_basis("swap") is None
     with pytest.raises(LoweringError, match="no supported two-qubit gate"):
         compile_source(
-            'OPENQASM 3.0; include "stdgates.inc"; qubit[2] q; swap q[0], q[1];',
-            CompileOptions(device=device(["rz", "sx", "iswap"])),
+            'OPENQASM 3.0; include "stdgates.inc"; qubit[2] q; cx q[0], q[1];',
+            # SWAP cannot entangle, so it cannot build a CX.
+            CompileOptions(device=device(["rz", "sx", "swap"])),
         )
 
 

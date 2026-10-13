@@ -116,6 +116,23 @@ _FIXED: dict[str, np.ndarray] = {
     "swap": SWAP,
     "iswap": np.array([[1, 0, 0, 0], [0, 0, 1j, 0], [0, 1j, 0, 0], [0, 0, 0, 1]]),
     "dcx": _circuit(2, [(CX, (0, 1)), (CX, (1, 0))]),
+    # Square roots of SWAP and iSWAP (not in the OpenQASM libraries).
+    "sqrt_swap": np.array(
+        [
+            [1, 0, 0, 0],
+            [0, (1 + 1j) / 2, (1 - 1j) / 2, 0],
+            [0, (1 - 1j) / 2, (1 + 1j) / 2, 0],
+            [0, 0, 0, 1],
+        ]
+    ),
+    "sqrt_iswap": np.array(
+        [
+            [1, 0, 0, 0],
+            [0, 1 / math.sqrt(2), 1j / math.sqrt(2), 0],
+            [0, 1j / math.sqrt(2), 1 / math.sqrt(2), 0],
+            [0, 0, 0, 1],
+        ]
+    ),
     # Qiskit's definition: rzx(pi/4) a, b; x a; rzx(-pi/4) a, b;
     "ecr": _RZX_MINUS @ np.kron(X, I2) @ _RZX_PLUS,
     "ccx": controlled(controlled(X)),

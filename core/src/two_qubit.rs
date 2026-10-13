@@ -9,6 +9,7 @@
 
 use crate::gates::{cx, matrix_2q, pauli, rotation, rx, ry, rz, sx};
 use crate::linalg::{C, I, M2, M4, ONE, ZERO, equal_up_to_phase4, kron, symmetric_eigenvectors};
+use crate::numeric;
 use crate::one_qubit::{euler_zyz, remainder};
 use std::collections::HashMap;
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_4, PI, TAU};
@@ -48,6 +49,11 @@ static DIAG: LazyLock<[[f64; 4]; 3]> = LazyLock::new(|| {
     }
     out
 });
+
+/// The magic basis and its adjoint.
+pub fn magic() -> (M4, M4) {
+    (*MAGIC, *MAGIC_DAG)
+}
 
 /// exp(i(a XX + b YY + c ZZ)).
 pub fn canonical(point: [f64; 3]) -> M4 {
@@ -276,6 +282,12 @@ pub enum BasisKind {
     CxLike(Box<[M2; 4]>),
     /// exp(-iθ/2 P⊗Q) with the Paulis `(first, second)`.
     Ising(usize, usize),
+    /// A controlled phase with a free angle, cp(λ): an Ising ZZ rotation up to
+    /// Z rotations, rzz(θ) = cp(−2θ) · (Rz(θ) ⊗ Rz(θ)) up to a global phase.
+    ControlledPhase,
+    /// Any other entangling gate (iSWAP, √iSWAP, √SWAP, …), with templates
+    /// found numerically (see `numeric`).
+    Numeric(Box<M4>),
 }
 
 /// How to use native gate `name`, or None when no template uses it yet.
@@ -293,10 +305,19 @@ pub fn two_qubit_basis(name: &str) -> Option<TwoQubitBasis> {
             kind: BasisKind::Ising(p, q),
         });
     }
+    if matches!(name, "cp" | "cphase" | "cu1") {
+        return Some(TwoQubitBasis {
+            name: name.to_string(),
+            kind: BasisKind::ControlledPhase,
+        });
+    }
     let g = matrix_2q(name, &[])?;
     let kg = kak(&g);
     if !close3(kg.point, [FRAC_PI_4, 0.0, 0.0], TOL) {
-        return None;
+        return numeric::is_universal(kg.point).then(|| TwoQubitBasis {
+            name: name.to_string(),
+            kind: BasisKind::Numeric(Box::new(g)),
+        });
     }
     let kc = kak(&cx());
     // CX ∝ (Ac Ag†) G (Bg† Bc) on each qubit.
@@ -402,6 +423,25 @@ fn clifford_map(src: usize, dst: usize) -> M2 {
     unreachable!("no Clifford maps {src} to {dst}")
 }
 
+/// The Ising template with each rzz(θ) written as cp(−2θ) and Z rotations.
+fn controlled_phase_template(point: [f64; 3], name: &str) -> Vec<Step> {
+    let mut steps = Vec::new();
+    for step in ising_template(point, "rzz", 2, 2) {
+        match step {
+            Step::Gate(_, params, q) => {
+                let theta = params[0];
+                steps.extend([
+                    Step::U(0, rz(theta)),
+                    Step::U(1, rz(theta)),
+                    Step::Gate(name.to_string(), vec![-2.0 * theta], q),
+                ]);
+            }
+            other => steps.push(other),
+        }
+    }
+    steps
+}
+
 /// exp(i(a XX + b YY + c ZZ)) as one native rotation per non-zero coordinate.
 fn ising_template(point: [f64; 3], name: &str, first: usize, second: usize) -> Vec<Step> {
     let mut steps = Vec::new();
@@ -478,6 +518,7 @@ type PauliImages = Vec<([usize; 2], [usize; 2])>;
 pub struct TwoQubitSynth {
     commuting: HashMap<GateKey, [Vec<usize>; 2]>,
     images: HashMap<GateKey, PauliImages>,
+    paired: HashMap<GateKey, Vec<usize>>,
 }
 
 fn key(name: &str, params: &[f64], operands: [usize; 2]) -> GateKey {
@@ -506,23 +547,46 @@ impl TwoQubitSynth {
         u: &M4,
         basis: &TwoQubitBasis,
         cost_1q: Option<&dyn Fn(&M2) -> usize>,
-    ) -> Vec<Step> {
+    ) -> Result<Vec<Step>, String> {
         let target = kak(u);
-        let templates = match &basis.kind {
-            BasisKind::Ising(p, q) => vec![ising_template(target.point, &basis.name, *p, *q)],
-            BasisKind::CxLike(_) => cx_templates(target.point),
+        let mut candidates: Vec<Vec<Step>> = match &basis.kind {
+            BasisKind::Numeric(g) => {
+                match numeric::numeric_decomposition(u, &target, &basis.name, g) {
+                    Some(steps) => vec![merge_locals(steps)],
+                    None => {
+                        return Err(format!(
+                            "no decomposition with at most {} {} gates was found",
+                            numeric::MAX_USES,
+                            basis.name
+                        ));
+                    }
+                }
+            }
+            kind => {
+                let templates = match kind {
+                    BasisKind::Ising(p, q) => {
+                        vec![ising_template(target.point, &basis.name, *p, *q)]
+                    }
+                    BasisKind::CxLike(_) => cx_templates(target.point),
+                    BasisKind::ControlledPhase => {
+                        vec![controlled_phase_template(target.point, &basis.name)]
+                    }
+                    BasisKind::Numeric(_) => unreachable!(),
+                };
+                templates
+                    .into_iter()
+                    .filter_map(|t| instantiate(&target, t, basis))
+                    .collect()
+            }
         };
-        let mut candidates: Vec<Vec<Step>> = templates
-            .into_iter()
-            .filter_map(|t| instantiate(&target, t, basis))
-            .collect();
-        assert!(
-            !candidates.is_empty(),
-            "no template reaches the point {:?}",
-            target.point
-        );
+        if candidates.is_empty() {
+            return Err(format!(
+                "no template reaches the Weyl point {:?}",
+                target.point
+            ));
+        }
         let Some(cost) = cost_1q else {
-            return candidates.swap_remove(0);
+            return Ok(candidates.swap_remove(0));
         };
         let total = |steps: &[Step]| -> usize {
             steps
@@ -541,7 +605,7 @@ impl TwoQubitSynth {
                 best = Some((t, dressed));
             }
         }
-        best.unwrap().1
+        Ok(best.unwrap().1)
     }
 
     fn commuting_axes(
@@ -568,6 +632,72 @@ impl TwoQubitSynth {
                 })
             })
             .clone()
+    }
+
+    /// Axes P for which the gate commutes with the same rotation on both
+    /// qubits, exp(-iα/2 P) ⊗ exp(-iα/2 P), but not with it on one qubit:
+    /// every axis for √SWAP, Z for iSWAP.
+    fn paired_axes(&mut self, name: &str, params: &[f64], operands: [usize; 2]) -> Vec<usize> {
+        let single = self.commuting_axes(name, params, operands);
+        self.paired
+            .entry(key(name, params, operands))
+            .or_insert_with(|| {
+                let g = oriented(name, params, operands);
+                (0..3)
+                    .filter(|axis| !single[0].contains(axis) || !single[1].contains(axis))
+                    .filter(|&axis| {
+                        let p = pauli(axis);
+                        let mut m = kron(&p, &M2::IDENTITY);
+                        let other = kron(&M2::IDENTITY, &p);
+                        for i in 0..4 {
+                            for j in 0..4 {
+                                m.0[i][j] += other.0[i][j];
+                            }
+                        }
+                        (g * m).close(&(m * g), 1e-12)
+                    })
+                    .collect()
+            })
+            .clone()
+    }
+
+    /// Move the same rotation on both qubits across gate `i` (see `paired_axes`).
+    fn move_paired(
+        &mut self,
+        work: &mut Vec<Step>,
+        mut i: usize,
+        cost: &dyn Fn(&M2) -> usize,
+    ) -> usize {
+        let Step::Gate(name, params, operands) = &work[i] else {
+            return i;
+        };
+        let axes = self.paired_axes(&name.clone(), &params.clone(), *operands);
+        if axes.is_empty() {
+            return i;
+        }
+        i = ensure_neighbours(work, i);
+        let slots = neighbour_slots(work, i);
+        for axis in axes {
+            let [b0, b1, a0, a1] = slots.map(|j| local(&work[j]));
+            let mut best_cost = cost(&b0) + cost(&b1) + cost(&a0) + cost(&a1);
+            let mut best = None;
+            let mut angles = candidate_angles(axis, &b0, &a0);
+            angles.extend(candidate_angles(axis, &b1, &a1));
+            for angle in angles {
+                let r = rotation(axis, angle);
+                let moved = [r.adjoint() * b0, r.adjoint() * b1, a0 * r, a1 * r];
+                let c: usize = moved.iter().map(cost).sum();
+                if c < best_cost {
+                    (best_cost, best) = (c, Some(moved));
+                }
+            }
+            if let Some(moved) = best {
+                for (j, m) in slots.into_iter().zip(moved) {
+                    set_local(&mut work[j], m);
+                }
+            }
+        }
+        i
     }
 
     fn pauli_images(
@@ -660,6 +790,7 @@ impl TwoQubitSynth {
                         }
                     }
                 }
+                i = self.move_paired(&mut work, i, cost);
                 i = self.move_paulis(&mut work, i, cost);
                 i += 1;
             }
@@ -686,22 +817,8 @@ impl TwoQubitSynth {
         if images.is_empty() {
             return i;
         }
-        // Make sure both qubits have a single-qubit step on each side, then find them.
-        for q in 0..2 {
-            if neighbour(work, i, q, -1).is_none() {
-                work.insert(i, Step::U(q, M2::IDENTITY));
-                i += 1;
-            }
-            if neighbour(work, i, q, 1).is_none() {
-                work.insert(i + 1, Step::U(q, M2::IDENTITY));
-            }
-        }
-        let slots = [
-            neighbour(work, i, 0, -1).unwrap(),
-            neighbour(work, i, 1, -1).unwrap(),
-            neighbour(work, i, 0, 1).unwrap(),
-            neighbour(work, i, 1, 1).unwrap(),
-        ];
+        i = ensure_neighbours(work, i);
+        let slots = neighbour_slots(work, i);
         let [b0, b1, a0, a1] = slots.map(|j| local(&work[j]));
         let mut best_cost = cost(&b0) + cost(&b1) + cost(&a0) + cost(&a1);
         let mut best = None;
@@ -724,6 +841,31 @@ impl TwoQubitSynth {
         }
         i
     }
+}
+
+/// Give both qubits of gate `i` a single-qubit step on each side; returns the
+/// gate's (possibly shifted) index.
+fn ensure_neighbours(work: &mut Vec<Step>, mut i: usize) -> usize {
+    for q in 0..2 {
+        if neighbour(work, i, q, -1).is_none() {
+            work.insert(i, Step::U(q, M2::IDENTITY));
+            i += 1;
+        }
+        if neighbour(work, i, q, 1).is_none() {
+            work.insert(i + 1, Step::U(q, M2::IDENTITY));
+        }
+    }
+    i
+}
+
+/// The single-qubit steps around gate `i`: before on 0 and 1, after on 0 and 1.
+fn neighbour_slots(work: &[Step], i: usize) -> [usize; 4] {
+    [
+        neighbour(work, i, 0, -1).unwrap(),
+        neighbour(work, i, 1, -1).unwrap(),
+        neighbour(work, i, 0, 1).unwrap(),
+        neighbour(work, i, 1, 1).unwrap(),
+    ]
 }
 
 fn local(step: &Step) -> M2 {
@@ -856,7 +998,7 @@ mod tests {
     use super::*;
     use crate::gates::{matrix_2q, signature};
     use crate::one_qubit::{bases_for, count_1q};
-    use crate::testing::Rng;
+    use crate::testing::{RandomUnitary, Rng};
 
     fn standard_2q() -> Vec<M4> {
         let names = [
@@ -918,12 +1060,26 @@ mod tests {
         let mut samples: Vec<M4> = (0..100).map(|_| rng.unitary4()).collect();
         samples.extend(standard_2q());
         let mut synth = TwoQubitSynth::new();
-        for native in ["cx", "cz", "cy", "ch", "ecr", "rzz", "rxx", "ryy", "rzx"] {
+        for native in [
+            "cx",
+            "cz",
+            "cy",
+            "ch",
+            "ecr",
+            "rzz",
+            "rxx",
+            "ryy",
+            "rzx",
+            "cp",
+            "iswap",
+            "sqrt_iswap",
+            "sqrt_swap",
+        ] {
             let basis = two_qubit_basis(native).unwrap();
             for u in &samples {
                 for steps in [
-                    synth.synthesize(u, &basis, None),
-                    synth.synthesize(u, &basis, Some(&cost)),
+                    synth.synthesize(u, &basis, None).unwrap(),
+                    synth.synthesize(u, &basis, Some(&cost)).unwrap(),
                 ] {
                     assert!(implements(&steps, u), "{native}");
                     assert!(steps.iter().all(|s| matches!(s, Step::U(..))
@@ -944,13 +1100,15 @@ mod tests {
             ("iswap", vec![], 2),
             ("swap", vec![], 3),
         ] {
-            let steps = synth.synthesize(&matrix_2q(name, &params).unwrap(), &basis, None);
+            let steps = synth
+                .synthesize(&matrix_2q(name, &params).unwrap(), &basis, None)
+                .unwrap();
             assert_eq!(
                 steps.iter().filter(|s| matches!(s, Step::Gate(..))).count(),
                 count,
                 "{name}"
             );
         }
-        assert!(two_qubit_basis("iswap").is_none());
+        assert!(two_qubit_basis("swap").is_none(), "SWAP cannot entangle");
     }
 }

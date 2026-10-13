@@ -71,8 +71,9 @@ def test_lowering_errors_come_back_as_lowering_errors():
         compile_source('OPENQASM 2.0; include "qelib1.inc"; opaque g a; qreg q[1]; g q[0];')
     with pytest.raises(LoweringError, match="no supported two-qubit gate"):
         compile_source(
-            'OPENQASM 3.0; include "stdgates.inc"; qubit[2] q; swap q[0], q[1];',
-            CompileOptions(device=device(["rz", "sx", "iswap"])),
+            'OPENQASM 3.0; include "stdgates.inc"; qubit[2] q; cx q[0], q[1];',
+            # SWAP cannot entangle, so it cannot build a CX.
+            CompileOptions(device=device(["rz", "sx", "swap"])),
         )
 
 
