@@ -9,6 +9,7 @@ pub mod gates;
 pub mod ir;
 pub mod linalg;
 pub mod lower;
+pub mod multicore;
 pub mod numeric;
 pub mod one_qubit;
 pub mod passes;

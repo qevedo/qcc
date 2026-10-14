@@ -74,6 +74,14 @@ exact). The Python reference has templates for CX-like and Ising gates only.
 `wasm/` compiles it to WebAssembly for the decomposition playground at
 https://qevedo.com/decompose/.
 
+### Multi-core mapping
+
+`core/src/multicore/` maps circuits onto modular architectures (several
+cores linked by teleportation): Hungarian Qubit Assignment, FGP-rOEE and a
+naive baseline, exposed as `qevedo.compiler.multicore`. It works on the
+circuit's two-qubit gates grouped into timeslices and is separate from the
+lowering pipeline. See [MULTICORE.md](MULTICORE.md).
+
 ### Planned passes (Phase 3)
 
 - Initial layout (logical → physical qubit map)

@@ -83,6 +83,23 @@ circuit = compile_source(open("program.qasm").read(), CompileOptions(device=ion_
 print(circuit.gate_counts())
 ```
 
+## Multi-core architectures
+
+`qevedo.compiler.multicore` maps circuits onto modular quantum computers made
+of several cores, deciding before each timeslice which core every qubit is in
+with as few teleportations as possible. It implements Hungarian Qubit
+Assignment (Escofet et al.) and the FGP-rOEE and naive mappers, in Rust:
+
+```python
+from qevedo.compiler.multicore import map_to_cores
+
+mapping = map_to_cores(open("circuit.qasm").read(), cores=4, qubits_per_core=10)
+print(mapping.communications)
+```
+
+See [docs/MULTICORE.md](../docs/MULTICORE.md) for the model, the methods and
+benchmark results.
+
 ## Tests
 
 ```bash

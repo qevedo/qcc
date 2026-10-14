@@ -14,6 +14,7 @@ The **Python compiler** in `python/` is the active implementation (v0.1):
 - OpenQASM 2 and 3 frontend and emitter, built on [`openqasm`](https://pypi.org/project/openqasm) 3.x (sibling repo [`openqasm`](../openqasm))
 - Lowering to any device's native gates with the fewest gates (Euler and KAK synthesis, optimal two-qubit gate counts) and peephole optimization
 - CLI: `qcc compile input.qasm -o out.qasm --device qevedo/compiler/profiles/grid_2x4.yaml [--qasm-version 3]`
+- Mapping onto multi-core (modular) quantum computers: Hungarian Qubit Assignment (HQA) and the FGP-rOEE and naive baselines, with a benchmark reproducing the published comparison ([docs/MULTICORE.md](docs/MULTICORE.md))
 
 The lowering and optimization passes run in a **Rust core** (`core/`, the
 `qcc` crate), loaded by the Python package as `qevedo.compiler._core` through

@@ -39,3 +39,6 @@ build
 
 # Rust
 target/
+
+# Benchmark caches
+benchmarks/multicore/cache/
