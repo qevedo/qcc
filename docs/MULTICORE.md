@@ -21,6 +21,10 @@ mapping = map_to_cores(open("circuit.qasm").read(), cores=4, qubits_per_core=10)
 print(mapping.communications)    # teleportations needed
 print(mapping.assignments[0])    # core of each qubit during the first timeslice
 print(mapping.moves()[3])        # (qubit, from core, to core) before timeslice 3
+
+# Cores in a line, a ring, a grid, or linked by any connected set of links:
+mapping = map_to_cores(circuit, cores=8, qubits_per_core=10, topology="grid:2x4")
+mapping = map_to_cores(circuit, cores=4, qubits_per_core=10, topology=[(0, 1), (1, 2), (1, 3)])
 ```
 
 `map_to_cores` also takes a parsed `Circuit` or a list of two-qubit gates as
@@ -30,10 +34,12 @@ qubit pairs, and a `method`:
 |---|---|
 | `"hqa"` (default) | Hungarian Qubit Assignment with look-ahead attraction |
 | `"hqa-no-lookahead"` | HQA without the attraction term |
+| `"hqa-uniform-cost"` | HQA counting every move as one teleportation (the papers' cost), even across unlinked cores |
 | `"fgp-roee"` | Fine-Grained Partitioning with relaxed Overall Extreme Exchange |
 | `"naive"` | move one qubit of each split gate to the other's core |
 
-From Rust, `qcc::multicore::{Architecture, Timeslices, map, Method}` (see
+From Rust, `qcc::multicore::{Architecture, Timeslices, map, Method}`, with
+`Architecture::new` (all to all), `line`, `ring`, `grid` or `with_links` (see
 `core/examples/multicore.rs`, run with
 `cargo run --release --example multicore -- 100 10`).
 
@@ -43,12 +49,16 @@ As in the papers:
 
 - `cores` cores of `qubits_per_core` physical qubits each;
 - each core is all-to-all inside, and the cores are all-to-all between each
-  other, so moving a qubit's state to any other core is one communication;
+  other, so moving a qubit's state to any other core is one communication
+  (beyond the papers, the cores can instead be linked in a line, a ring, a
+  grid or any connected way; then a move takes one communication per link on
+  the shortest path);
 - the circuit is cut into **timeslices**, sets of two-qubit gates that run in
   parallel (each qubit in at most one gate per slice), built as soon as
   possible; single-qubit gates do not constrain the mapping;
 - the cost is the number of times a qubit is in a different core than in the
-  step before. The initial placement is free.
+  step before (times the links crossed, on sparse links). The initial
+  placement is free.
 
 ## How HQA works
 
@@ -70,6 +80,13 @@ their future interactions, of `2^−(m−t)` for interactions `m − t` slices
 ahead with a qubit now in c. Every mapper starts from the same placement: an
 OEE partition of how often each pair of qubits interacts.
 
+On sparse links, the papers note the cost "can be adapted"; here both terms
+count teleportations: the links qA and qB cross to reach c, plus, for the
+look-ahead, the links each would cross from c to meet its future partners,
+weighted by `2^−(m−t)`. With every core linked to every other this differs
+from the formula above by a constant per gate, so the Hungarian algorithm
+makes the same choices.
+
 ## Code
 
 Rust, in `core/src/multicore/`, one concept per file:
@@ -77,7 +94,7 @@ Rust, in `core/src/multicore/`, one concept per file:
 | file | what it holds |
 |---|---|
 | `mod.rs` | overview, `Method`, `initial_placement`, `map` |
-| `architecture.rs` | the hardware model |
+| `architecture.rs` | the hardware model: cores and the links between them |
 | `timeslices.rs` | circuits as timeslices of two-qubit gates |
 | `assignment.rs` | assignments, mappings, validity, communication count |
 | `lookahead.rs` | how future interactions attract qubits to cores |
@@ -111,6 +128,13 @@ code had to decide, it says so in `hqa.rs` and `baselines.rs`:
   the gates; the naive mapper and FGP-rOEE likewise fall back to moving the
   other qubit, or both, when the first move is impossible.
 
+- **Sparse links** (not in the papers): the cost counts link hops now and in
+  the look-ahead, as above. A small cost per moved qubit (0.01) breaks ties
+  between moving one qubit and moving both to a core in between, which cost
+  as many hops but disturb two placements; it was chosen on these benchmarks,
+  but any value from 0.001 to 0.05 gives totals within 1%. The initial OEE
+  groups go to cores so that groups that interact most are close.
+
 ## Reproducing the papers' comparison
 
 `benchmarks/multicore/` runs the experiments of the 2025 paper on its
@@ -127,19 +151,19 @@ Results (`benchmarks/multicore/results/multicore.csv`, Intel i9-14900K):
 
 | benchmark | FGP-rOEE / HQA communications | naive / HQA | FGP-rOEE / HQA time |
 |---|---|---|---|
-| QFT | 1.84× | 1.23× | 22.2× |
-| Draper adder | 1.44× | 3.74× | 13.2× |
-| Cuccaro adder | 0.73× | 4.30× | 4.2× |
-| Random | 1.10× | 1.87× | 5.6× |
-| Quantum Volume | 1.16× | 1.39× | 9.4× |
-| **mean over all points** | **1.24×** | **3.45×** | median 7.1× |
+| QFT | 1.84× | 1.23× | 20.9× |
+| Draper adder | 1.44× | 3.74× | 10.8× |
+| Cuccaro adder | 0.73× | 4.30× | 4.9× |
+| Random | 1.10× | 1.87× | 6.5× |
+| Quantum Volume | 1.16× | 1.39× | 9.2× |
+| **all points** | **1.24× (mean)** | **3.45× (mean)** | **7.8× (median)** |
 
 Medians per benchmark over the virtual, weak and strong scaling
 configurations; above 1 means HQA needs fewer communications or less time.
 
 - HQA needs **1.24× fewer communications** than FGP-rOEE on average, in line
   with the 1.28× of the original HQA paper (the extended paper reports 1.56×
-  over a different set of configurations), and is a median **7× faster**.
+  over a different set of configurations), and is a median **8× faster**.
 - The look-ahead attraction matters as the paper says: on Cuccaro adders with
   16 qubits per core, HQA without it needs 1.7–3.9× more communications
   (the paper: 2.27× on average).
@@ -148,6 +172,25 @@ configurations; above 1 means HQA needs fewer communications or less time.
 - On random circuits HQA goes below the papers' "lower bound", which assumes
   qubits only move when a gate needs them; HQA moves them ahead of time.
 
+### Sparse links
+
+An experiment the papers do not have: 100-qubit circuits on 10 cores of 10
+qubits, linked all to all, in a ring, in a 2 × 5 grid or in a line.
+Communications count link hops. Mean ratios over the five benchmarks:
+
+| links | papers' cost / HQA | FGP-rOEE / HQA | naive / HQA |
+|---|---|---|---|
+| all to all | 1.00× | 1.31× | 2.34× |
+| ring | 1.06× | 1.91× | 3.84× |
+| 2 × 5 grid | 1.04× | 1.60× | 3.39× |
+| line | 1.10× | 1.76× | 3.17× |
+
+- Counting link hops in HQA's cost saves 4–10% over the papers' cost, most on
+  the line, where distances are largest.
+- HQA's lead over FGP-rOEE grows on sparse links: 1.6–1.9× fewer
+  communications, against 1.3× with all cores linked to all.
+
+![Sparse links](../benchmarks/multicore/charts/topology.svg)
 ![Strong scaling](../benchmarks/multicore/charts/strong.svg)
 ![Weak scaling](../benchmarks/multicore/charts/weak.svg)
 ![Virtual scaling](../benchmarks/multicore/charts/virtual.svg)

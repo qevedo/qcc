@@ -58,6 +58,31 @@ pub fn attraction_to_cores(
     }
 }
 
+/// The look-ahead cost of qubit `q` in every core when the cores are not all
+/// linked: `out[c] = Σ w · hops(c, core of the partner)` over its future
+/// partners already placed, the teleportations it would need to meet them,
+/// weighted like the attraction. With all cores linked to all this is the
+/// total weight minus the attraction, so it orders cores the same way.
+pub fn future_hops_to_cores(
+    slices: &Timeslices,
+    t: usize,
+    q: usize,
+    core_of: &[Option<usize>],
+    arch: &super::Architecture,
+    out: &mut [f64],
+) {
+    out.iter_mut().for_each(|x| *x = 0.0);
+    let mut weight = 1.0;
+    for m in t + 1..slices.len().min(t + 1 + HORIZON) {
+        weight *= 0.5;
+        if let Some(core) = slices.partner(m, q).and_then(|partner| core_of[partner]) {
+            for (c, x) in out.iter_mut().enumerate() {
+                *x += weight * arch.hops(c, core) as f64;
+            }
+        }
+    }
+}
+
 /// The look-ahead weights `w_t` of every pair of qubits, as a dense matrix.
 pub fn weights(slices: &Timeslices, t: usize) -> Vec<Vec<f64>> {
     let n = slices.qubits();

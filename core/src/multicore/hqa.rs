@@ -20,6 +20,14 @@
 //! 2 − attr(op, c)  otherwise (two teleportations)
 //! ```
 //!
+//! When the cores are not all linked to each other, the papers note that the
+//! cost "can be adapted". Here both terms count teleportations: the links
+//! qA and qB cross to reach c now, plus, for the look-ahead, the links each
+//! would cross to meet its future partners from c, weighted by `2^−(m−t)`
+//! (`lookahead::future_hops_to_cores`). With every core linked to every other
+//! this differs from the formula above by a constant per gate, so the
+//! Hungarian algorithm makes the same choices.
+//!
 //! where attr(op, c) is the mean attraction of qA and qB to c (see
 //! [`lookahead`](super::lookahead)), so gates go where their qubits will be
 //! needed next.
@@ -44,17 +52,43 @@
 use super::architecture::Architecture;
 use super::assignment::{Assignment, Mapping, occupancy};
 use super::hungarian::{self, FORBIDDEN};
-use super::lookahead::{attraction, attraction_to_cores};
+use super::lookahead::{attraction, attraction_to_cores, future_hops_to_cores};
 use super::timeslices::Timeslices;
 
+/// On sparse links, moving both qubits of a gate to a core between them
+/// costs as many teleportations as moving one to the other, but disturbs two
+/// placements instead of one. This small cost per moved qubit breaks such
+/// ties towards moving fewer qubits, as the papers' "1 if a qubit is already
+/// there" does with all cores linked to all. (It is a tie-breaker: on the
+/// benchmarks, values from 0.001 to 0.05 all give within 1% of each other.)
+const MOVE_TIE_BREAK: f64 = 0.01;
+
+/// Which terms the HQA cost uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HqaOptions {
+    /// Attraction to where qubits are needed next (the papers' default).
+    pub lookahead: bool,
+    /// Count the links a qubit crosses to reach a core. Without it, every
+    /// move costs one, as with all cores linked to all.
+    pub hops: bool,
+}
+
+impl Default for HqaOptions {
+    fn default() -> HqaOptions {
+        HqaOptions {
+            lookahead: true,
+            hops: true,
+        }
+    }
+}
+
 /// Map the circuit's timeslices onto the cores with HQA, starting from
-/// `initial`. Without `lookahead`, the attraction term is left out (the
-/// papers' "no attraction" variant).
+/// `initial`.
 pub fn hqa(
     slices: &Timeslices,
     arch: &Architecture,
     initial: &Assignment,
-    lookahead: bool,
+    options: HqaOptions,
 ) -> Result<Mapping, String> {
     arch.check_fits(slices.qubits())?;
     let mut current = initial.clone();
@@ -67,11 +101,12 @@ pub fn hqa(
             .copied()
             .collect();
         if !unfeasible.is_empty() {
-            current = place(slices, arch, t, &current, unfeasible, lookahead)?;
+            current = place(slices, arch, t, &current, unfeasible, options)?;
         }
         assignments.push(current.clone());
     }
     Ok(Mapping {
+        architecture: arch.clone(),
         initial: initial.clone(),
         slices: assignments,
     })
@@ -85,7 +120,7 @@ fn place(
     t: usize,
     previous: &[usize],
     mut gates: Vec<(usize, usize)>,
-    lookahead: bool,
+    options: HqaOptions,
 ) -> Result<Assignment, String> {
     let mut core_of: Vec<Option<usize>> = previous.iter().map(|&c| Some(c)).collect();
     let mut free: Vec<usize> = occupancy(arch, previous)
@@ -126,7 +161,7 @@ fn place(
         gates,
         &mut core_of,
         &mut free,
-        lookahead,
+        options,
     )?;
     for q in singles {
         // Back to its core when there is room, else where it is drawn most.
@@ -160,14 +195,24 @@ fn place_gates(
     mut gates: Vec<(usize, usize)>,
     core_of: &mut [Option<usize>],
     free: &mut [usize],
-    lookahead: bool,
+    options: HqaOptions,
 ) -> Result<(), String> {
     let mut attr_a = vec![0.0; arch.cores];
     let mut attr_b = vec![0.0; arch.cores];
+    let sparse = options.hops && !arch.is_all_to_all();
     while !gates.is_empty() {
         let mut cost = Vec::with_capacity(gates.len());
         for &(a, b) in &gates {
-            if lookahead {
+            // The look-ahead term to subtract: the papers' attraction, or, on
+            // sparse links, minus the teleportations still to come.
+            if options.lookahead && sparse {
+                future_hops_to_cores(slices, t, a, core_of, arch, &mut attr_a);
+                future_hops_to_cores(slices, t, b, core_of, arch, &mut attr_b);
+                attr_a
+                    .iter_mut()
+                    .chain(attr_b.iter_mut())
+                    .for_each(|x| *x = -*x);
+            } else if options.lookahead {
                 attraction_to_cores(slices, t, a, core_of, &mut attr_a);
                 attraction_to_cores(slices, t, b, core_of, &mut attr_b);
             }
@@ -176,11 +221,24 @@ fn place_gates(
                     if free[c] < 2 {
                         return FORBIDDEN;
                     }
-                    let base = if previous[a] == c || previous[b] == c {
-                        1.0
-                    } else {
-                        2.0
+                    // Teleportations to bring both qubits to c: 1 or 2 with
+                    // all cores linked to all, as in the papers.
+                    let hops = |q: usize| {
+                        if previous[q] == c {
+                            0
+                        } else if options.hops {
+                            arch.hops(previous[q], c)
+                        } else {
+                            1
+                        }
                     };
+                    let moved = usize::from(previous[a] != c) + usize::from(previous[b] != c);
+                    let base = (hops(a) + hops(b)) as f64
+                        + if sparse {
+                            MOVE_TIE_BREAK * moved as f64
+                        } else {
+                            0.0
+                        };
                     base - (attr_a[c] + attr_b[c]) / 2.0
                 })
                 .collect();
@@ -299,7 +357,11 @@ mod tests {
                         .fitted_to(&arch);
                 let initial = initial_placement(&slices, &arch);
                 for lookahead in [true, false] {
-                    let mapping = hqa(&slices, &arch, &initial, lookahead).unwrap();
+                    let options = HqaOptions {
+                        lookahead,
+                        hops: true,
+                    };
+                    let mapping = hqa(&slices, &arch, &initial, options).unwrap();
                     mapping.validate(&arch, &slices).unwrap();
                 }
             }
@@ -311,7 +373,16 @@ mod tests {
         // Two cores of 3 qubits, 4 qubits: q0 q1 in core 0, q2 q3 in core 1.
         let arch = Architecture::new(2, 3).unwrap();
         let slices = Timeslices::from_pairs(4, &[(1, 2)]).unwrap();
-        let mapping = hqa(&slices, &arch, &vec![0, 0, 1, 1], false).unwrap();
+        let mapping = hqa(
+            &slices,
+            &arch,
+            &vec![0, 0, 1, 1],
+            HqaOptions {
+                lookahead: false,
+                hops: true,
+            },
+        )
+        .unwrap();
         mapping.validate(&arch, &slices).unwrap();
         assert_eq!(mapping.communications(), 1);
     }
@@ -321,7 +392,16 @@ mod tests {
         // Two full cores of 2: a gate across them moves two qubits.
         let arch = Architecture::new(2, 2).unwrap();
         let slices = Timeslices::from_pairs(4, &[(1, 2)]).unwrap();
-        let mapping = hqa(&slices, &arch, &vec![0, 0, 1, 1], false).unwrap();
+        let mapping = hqa(
+            &slices,
+            &arch,
+            &vec![0, 0, 1, 1],
+            HqaOptions {
+                lookahead: false,
+                hops: true,
+            },
+        )
+        .unwrap();
         mapping.validate(&arch, &slices).unwrap();
         assert_eq!(mapping.communications(), 2);
     }
@@ -331,7 +411,7 @@ mod tests {
         // q1–q2 now, then q2–q3: put the pair in q3's core (core 1).
         let arch = Architecture::new(2, 3).unwrap();
         let slices = Timeslices::from_pairs(4, &[(1, 2), (2, 3)]).unwrap();
-        let mapping = hqa(&slices, &arch, &vec![0, 0, 1, 1], true).unwrap();
+        let mapping = hqa(&slices, &arch, &vec![0, 0, 1, 1], HqaOptions::default()).unwrap();
         mapping.validate(&arch, &slices).unwrap();
         assert_eq!(mapping.slices[0][1], 1);
         assert_eq!(mapping.communications(), 1);

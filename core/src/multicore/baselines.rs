@@ -35,6 +35,7 @@ pub fn naive(
         assignments.push(current.clone());
     }
     Ok(Mapping {
+        architecture: arch.clone(),
         initial: initial.clone(),
         slices: assignments,
     })
@@ -188,6 +189,7 @@ pub fn fgp_roee(
         assignments.push(part[..n].to_vec());
     }
     Ok(Mapping {
+        architecture: arch.clone(),
         initial: initial.clone(),
         slices: assignments,
     })
@@ -195,7 +197,10 @@ pub fn fgp_roee(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{hqa::hqa, initial_placement};
+    use super::super::{
+        hqa::{HqaOptions, hqa},
+        initial_placement,
+    };
     use super::*;
 
     #[test]
@@ -215,7 +220,7 @@ mod tests {
             let initial = initial_placement(&slices, &arch);
             let n = naive(&slices, &arch, &initial, 1).unwrap();
             let r = fgp_roee(&slices, &arch, &initial).unwrap();
-            let h = hqa(&slices, &arch, &initial, true).unwrap();
+            let h = hqa(&slices, &arch, &initial, HqaOptions::default()).unwrap();
             for m in [&n, &r, &h] {
                 m.validate(&arch, &slices).unwrap();
             }

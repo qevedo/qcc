@@ -2,7 +2,8 @@
 
 Reproduces the comparison of Escofet et al. (ACM TQC 2025): HQA against
 FGP-rOEE and the naive mapper on QFT, the Draper and Cuccaro adders, random
-circuits and Quantum Volume, in virtual, weak and strong scaling.
+circuits and Quantum Volume, in virtual, weak and strong scaling, and on
+cores linked in a ring, a grid or a line (not in the papers).
 
 ```bash
 pip install qiskit matplotlib     # besides qevedo-compiler

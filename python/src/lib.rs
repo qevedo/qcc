@@ -60,9 +60,12 @@ fn run_passes(
 
 /// Map a circuit, given by its two-qubit gates in program order, onto a
 /// multi-core architecture with `method` ("hqa", "hqa-no-lookahead",
-/// "fgp-roee" or "naive"). Returns (initial assignment, assignment per
-/// timeslice, gates per timeslice, non-local communications).
+/// "hqa-uniform-cost", "fgp-roee" or "naive"). The cores are linked by `links`
+/// (pairs of cores), or all to all when it is None. Returns (initial
+/// assignment, assignment per timeslice, gates per timeslice,
+/// communications, moved qubits).
 #[pyfunction]
+#[pyo3(signature = (pairs, qubits, cores, qubits_per_core, method, links=None))]
 #[allow(clippy::type_complexity)]
 fn map_to_cores(
     py: Python<'_>,
@@ -71,10 +74,21 @@ fn map_to_cores(
     cores: usize,
     qubits_per_core: usize,
     method: &str,
-) -> PyResult<(Vec<usize>, Vec<Vec<usize>>, Vec<Vec<(usize, usize)>>, usize)> {
+    links: Option<Vec<(usize, usize)>>,
+) -> PyResult<(
+    Vec<usize>,
+    Vec<Vec<usize>>,
+    Vec<Vec<(usize, usize)>>,
+    usize,
+    usize,
+)> {
     use qcc::multicore::{Architecture, Method, Timeslices, map};
     let method = Method::parse(method).map_err(PyValueError::new_err)?;
-    let arch = Architecture::new(cores, qubits_per_core).map_err(PyValueError::new_err)?;
+    let arch = match links {
+        Some(links) => Architecture::with_links(cores, qubits_per_core, &links),
+        None => Architecture::new(cores, qubits_per_core),
+    }
+    .map_err(PyValueError::new_err)?;
     // Slices with more gates than the cores can run at once (odd core sizes) are split.
     let slices = Timeslices::from_pairs(qubits, &pairs)
         .map_err(PyValueError::new_err)?
@@ -85,8 +99,14 @@ fn map_to_cores(
     let gates = (0..slices.len())
         .map(|t| slices.slice(t).to_vec())
         .collect();
-    let communications = mapping.communications();
-    Ok((mapping.initial, mapping.slices, gates, communications))
+    let (communications, moved) = (mapping.communications(), mapping.moved_qubits());
+    Ok((
+        mapping.initial,
+        mapping.slices,
+        gates,
+        communications,
+        moved,
+    ))
 }
 
 /// Lower and upper bounds on non-local communications for a random circuit

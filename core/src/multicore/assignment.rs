@@ -7,26 +7,41 @@ use super::timeslices::Timeslices;
 pub type Assignment = Vec<usize>;
 
 /// The result of a mapper: where every qubit is before the circuit starts,
-/// and where it is during each timeslice.
+/// and where it is during each timeslice, on `architecture`.
 #[derive(Clone, Debug)]
 pub struct Mapping {
+    pub architecture: Architecture,
     pub initial: Assignment,
     /// `slices[t]`: the assignment while slice `t` runs.
     pub slices: Vec<Assignment>,
 }
 
 impl Mapping {
-    /// The number of non-local communications: every time a qubit is in a
-    /// different core than in the previous step, its state was teleported
-    /// once. The initial placement is free.
+    /// The number of non-local communications (teleportations): every time a
+    /// qubit is in a different core than in the step before, one per link on
+    /// the way. The initial placement is free. With all cores linked to all,
+    /// this is [`Mapping::moved_qubits`].
     pub fn communications(&self) -> usize {
-        let mut previous = &self.initial;
-        let mut total = 0;
-        for next in &self.slices {
-            total += moves(previous, next);
-            previous = next;
-        }
-        total
+        self.steps()
+            .map(|(a, b)| {
+                a.iter()
+                    .zip(b)
+                    .map(|(&x, &y)| self.architecture.hops(x, y))
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
+    /// How many times a qubit is in a different core than in the step before.
+    pub fn moved_qubits(&self) -> usize {
+        self.steps().map(|(a, b)| moves(a, b)).sum()
+    }
+
+    /// Consecutive pairs of assignments: (initial, slice 0), (slice 0, slice 1), …
+    fn steps(&self) -> impl Iterator<Item = (&Assignment, &Assignment)> {
+        std::iter::once(&self.initial)
+            .chain(&self.slices)
+            .zip(&self.slices)
     }
 
     /// Check that every assignment respects the core capacities and that every
@@ -91,13 +106,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn communications_count_moved_qubits() {
-        let mapping = Mapping {
+    fn communications_count_moved_qubits_and_links() {
+        let mapping = |architecture| Mapping {
+            architecture,
             initial: vec![0, 0, 1, 1],
             slices: vec![vec![0, 1, 0, 1], vec![0, 1, 0, 1], vec![1, 1, 0, 0]],
         };
         // Two moves, then none, then two.
-        assert_eq!(mapping.communications(), 4);
+        let all = mapping(Architecture::new(2, 2).unwrap());
+        assert_eq!((all.communications(), all.moved_qubits()), (4, 4));
+        // On a line of three cores, 0 → 2 takes two links.
+        let line = Mapping {
+            architecture: Architecture::line(3, 2).unwrap(),
+            initial: vec![0, 2],
+            slices: vec![vec![2, 2]],
+        };
+        assert_eq!((line.communications(), line.moved_qubits()), (2, 1));
     }
 
     #[test]
@@ -105,11 +129,13 @@ mod tests {
         let arch = Architecture::new(2, 2).unwrap();
         let slices = Timeslices::from_pairs(4, &[(0, 1)]).unwrap();
         let ok = Mapping {
+            architecture: arch.clone(),
             initial: vec![0, 0, 1, 1],
             slices: vec![vec![0, 0, 1, 1]],
         };
         assert!(ok.validate(&arch, &slices).is_ok());
         let split = Mapping {
+            architecture: arch.clone(),
             initial: vec![0, 0, 1, 1],
             slices: vec![vec![0, 1, 0, 1]],
         };
@@ -120,6 +146,7 @@ mod tests {
                 .contains("interact")
         );
         let full = Mapping {
+            architecture: arch.clone(),
             initial: vec![0, 0, 1, 1],
             slices: vec![vec![0, 0, 0, 1]],
         };

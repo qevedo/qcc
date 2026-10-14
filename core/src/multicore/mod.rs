@@ -9,7 +9,8 @@
 //! # How it fits together
 //!
 //! 1. [`Architecture`] describes the machine: how many cores, how many qubits
-//!    each.
+//!    each, and how the cores are linked (all to all, line, ring, grid or any
+//!    connected set of links).
 //! 2. [`Timeslices`] turns a circuit into its two-qubit gates grouped into
 //!    steps that can run in parallel.
 //! 3. [`initial_placement`] places the qubits before the circuit starts.
@@ -50,7 +51,7 @@ pub use architecture::Architecture;
 pub use assignment::{Assignment, Mapping, in_order, moves};
 pub use baselines::{fgp_roee, naive};
 pub use bounds::random_circuit_bounds;
-pub use hqa::hqa;
+pub use hqa::{HqaOptions, hqa};
 pub use lookahead::{HORIZON, attraction};
 pub use timeslices::Timeslices;
 
@@ -61,6 +62,9 @@ pub enum Method {
     Hqa,
     /// HQA without the attraction term.
     HqaWithoutLookahead,
+    /// HQA that counts every move as one teleportation, ignoring how many
+    /// links it crosses (the papers' cost, for comparison on sparse links).
+    HqaUniformCost,
     /// Fine-Grained Partitioning with relaxed OEE.
     FgpRoee,
     /// One qubit of each split gate moves to the other's core.
@@ -72,11 +76,12 @@ impl Method {
         Ok(match name {
             "hqa" => Method::Hqa,
             "hqa-no-lookahead" => Method::HqaWithoutLookahead,
+            "hqa-uniform-cost" => Method::HqaUniformCost,
             "fgp-roee" => Method::FgpRoee,
             "naive" => Method::Naive,
             other => {
                 return Err(format!(
-                    "unknown mapping method '{other}' (hqa, hqa-no-lookahead, fgp-roee or naive)"
+                    "unknown mapping method '{other}' (hqa, hqa-no-lookahead, hqa-uniform-cost, fgp-roee or naive)"
                 ));
             }
         })
@@ -86,6 +91,8 @@ impl Method {
 /// Place the qubits before the circuit starts: an OEE partition of the total
 /// interaction graph (how often each pair of qubits interacts), as in the
 /// papers. Empty physical slots take part as qubits without interactions.
+/// When the cores are not all linked, the groups that interact most go to
+/// nearby cores.
 pub fn initial_placement(slices: &Timeslices, arch: &Architecture) -> Assignment {
     let n = slices.qubits();
     let total = arch.capacity().max(n);
@@ -97,7 +104,51 @@ pub fn initial_placement(slices: &Timeslices, arch: &Architecture) -> Assignment
     let mut part = in_order(arch, total);
     oee::partition(&w, &mut part, arch.cores, None);
     part.truncate(n);
-    part
+    if arch.is_all_to_all() {
+        return part;
+    }
+    // On sparse links, put the groups that interact most on nearby cores.
+    let order = place_groups(&slices.interaction_counts(), &part, arch);
+    part.into_iter().map(|group| order[group]).collect()
+}
+
+/// For OEE groups `part` on a sparse `arch`, the core of each group that
+/// lowers Σ (interactions between two groups × links between their cores):
+/// start in order and swap pairs of groups while that helps.
+fn place_groups(counts: &[Vec<f64>], part: &[usize], arch: &Architecture) -> Vec<usize> {
+    let k = arch.cores;
+    let mut traffic = vec![vec![0.0; k]; k];
+    for (a, row) in counts.iter().enumerate() {
+        for (b, &w) in row.iter().enumerate() {
+            traffic[part[a]][part[b]] += w;
+        }
+    }
+    let mut core: Vec<usize> = (0..k).collect();
+    let cost = |core: &[usize]| -> f64 {
+        (0..k)
+            .flat_map(|g| (0..k).map(move |h| (g, h)))
+            .map(|(g, h)| traffic[g][h] * arch.hops(core[g], core[h]) as f64)
+            .sum()
+    };
+    let mut best = cost(&core);
+    loop {
+        let mut improved = false;
+        for g in 0..k {
+            for h in g + 1..k {
+                core.swap(g, h);
+                let c = cost(&core);
+                if c + 1e-9 < best {
+                    best = c;
+                    improved = true;
+                } else {
+                    core.swap(g, h);
+                }
+            }
+        }
+        if !improved {
+            return core;
+        }
+    }
 }
 
 /// Map `slices` onto `arch` with `method`, from [`initial_placement`].
@@ -114,8 +165,25 @@ pub fn map(slices: &Timeslices, arch: &Architecture, method: Method) -> Result<M
     }
     let initial = initial_placement(slices, arch);
     let mapping = match method {
-        Method::Hqa => hqa(slices, arch, &initial, true),
-        Method::HqaWithoutLookahead => hqa(slices, arch, &initial, false),
+        Method::Hqa => hqa(slices, arch, &initial, HqaOptions::default()),
+        Method::HqaWithoutLookahead => hqa(
+            slices,
+            arch,
+            &initial,
+            HqaOptions {
+                lookahead: false,
+                hops: true,
+            },
+        ),
+        Method::HqaUniformCost => hqa(
+            slices,
+            arch,
+            &initial,
+            HqaOptions {
+                lookahead: true,
+                hops: false,
+            },
+        ),
         Method::FgpRoee => fgp_roee(slices, arch, &initial),
         Method::Naive => naive(slices, arch, &initial, 0x5EED),
     }?;
@@ -143,7 +211,13 @@ mod tests {
                     (a, (a + 1 + rng.below(qubits - 1)) % qubits)
                 })
                 .collect();
-            let arch = Architecture::new(cores, per_core).unwrap();
+            let arch = match rng.below(4) {
+                0 => Architecture::new(cores, per_core),
+                1 => Architecture::line(cores, per_core),
+                2 => Architecture::ring(cores, per_core),
+                _ => Architecture::grid(2, cores.div_ceil(2), per_core),
+            }
+            .unwrap();
             let slices = Timeslices::from_pairs(qubits, &pairs)
                 .unwrap()
                 .fitted_to(&arch);
@@ -170,5 +244,52 @@ mod tests {
                 .contains("fitted_to")
         );
         assert!(map(&slices.fitted_to(&arch), &arch, Method::Hqa).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod topology_tests {
+    use super::*;
+    use crate::rng::Rng;
+
+    fn random_layers(rng: &mut Rng, qubits: usize, layers: usize) -> Vec<(usize, usize)> {
+        let mut pairs = Vec::new();
+        for _ in 0..layers {
+            let mut order: Vec<usize> = (0..qubits).collect();
+            for i in (1..qubits).rev() {
+                order.swap(i, rng.below(i + 1));
+            }
+            pairs.extend(order.chunks(2).map(|c| (c[0], c[1])));
+        }
+        pairs
+    }
+
+    /// On a line of cores, counting links in the cost (HQA) beats counting
+    /// every move as one (the papers' cost).
+    #[test]
+    fn counting_links_helps_on_a_line() {
+        let mut rng = Rng::new(4);
+        let arch = Architecture::line(8, 6).unwrap();
+        let (mut hops, mut uniform) = (0, 0);
+        for _ in 0..4 {
+            let slices = Timeslices::from_pairs(48, &random_layers(&mut rng, 48, 40)).unwrap();
+            hops += map(&slices, &arch, Method::Hqa).unwrap().communications();
+            uniform += map(&slices, &arch, Method::HqaUniformCost)
+                .unwrap()
+                .communications();
+        }
+        assert!(hops < uniform, "with links {hops}, uniform {uniform}");
+    }
+
+    #[test]
+    fn all_to_all_communications_are_moves() {
+        let mut rng = Rng::new(5);
+        let arch = Architecture::new(4, 6).unwrap();
+        let slices = Timeslices::from_pairs(24, &random_layers(&mut rng, 24, 10)).unwrap();
+        let mapping = map(&slices, &arch, Method::Hqa).unwrap();
+        assert_eq!(mapping.communications(), mapping.moved_qubits());
+        // And HQA's cost there is the papers' 1 or 2.
+        let uniform = map(&slices, &arch, Method::HqaUniformCost).unwrap();
+        assert_eq!(uniform.communications(), mapping.communications());
     }
 }

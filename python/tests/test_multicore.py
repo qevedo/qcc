@@ -28,7 +28,7 @@ def check(mapping):
         for core in range(mapping.cores):
             assert assignment.count(core) <= mapping.qubits_per_core
     moved = sum(len(step) for step in mapping.moves())
-    assert moved == mapping.communications
+    assert moved == mapping.moved_qubits
 
 
 @pytest.mark.parametrize("method", METHODS)
@@ -72,3 +72,31 @@ def test_spare_room_and_errors():
         map_to_cores(pairs, 4, 4, method="magic")
     with pytest.raises(ValueError, match="at least two qubits"):
         map_to_cores(pairs, 10, 1)
+
+
+@pytest.mark.parametrize(
+    "topology", ["line", "ring", "grid", "grid:2x3", [(0, 1), (1, 2), (1, 3), (3, 4), (3, 5)]]
+)
+def test_sparse_topologies(topology):
+    pairs = random_pairs(36, 20, seed=4)
+    for method in METHODS:
+        mapping = map_to_cores(pairs, cores=6, qubits_per_core=6, method=method, topology=topology)
+        check(mapping)
+        assert mapping.communications >= mapping.moved_qubits
+
+
+def test_counting_links_pays_off_on_a_line():
+    pairs = random_pairs(48, 40, seed=5)
+    hqa = map_to_cores(pairs, 8, 6, method="hqa", topology="line").communications
+    uniform = map_to_cores(pairs, 8, 6, method="hqa-uniform-cost", topology="line").communications
+    assert hqa < uniform
+
+
+def test_topology_errors():
+    pairs = random_pairs(8, 4, seed=6)
+    with pytest.raises(ValueError, match="do not connect"):
+        map_to_cores(pairs, 4, 2, topology=[(0, 1), (2, 3)])
+    with pytest.raises(ValueError, match="not 4"):
+        map_to_cores(pairs, 4, 2, topology="grid:3x3")
+    with pytest.raises(ValueError, match="unknown topology"):
+        map_to_cores(pairs, 4, 2, topology="torus")

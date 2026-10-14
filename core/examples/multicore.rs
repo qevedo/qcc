@@ -1,7 +1,7 @@
 //! Map a random circuit onto a multi-core quantum computer with each method
 //! and compare the non-local communications they need.
 //!
-//!     cargo run --release --example multicore -- [qubits] [cores]
+//!     cargo run --release --example multicore -- [qubits] [cores] [all|line|ring]
 //!
 //! The circuit has 2 × qubits layers, each pairing up all qubits at random,
 //! like the random circuits of Escofet et al.
@@ -11,13 +11,16 @@ use qcc::rng::Rng;
 use std::time::Instant;
 
 fn main() {
-    let args: Vec<usize> = std::env::args()
-        .skip(1)
-        .filter_map(|a| a.parse().ok())
-        .collect();
-    let qubits = args.first().copied().unwrap_or(100);
-    let cores = args.get(1).copied().unwrap_or(10);
-    let arch = Architecture::new(cores, qubits.div_ceil(cores)).expect("a valid architecture");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let qubits: usize = args.first().and_then(|a| a.parse().ok()).unwrap_or(100);
+    let cores: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(10);
+    let per_core = qubits.div_ceil(cores);
+    let arch = match args.get(2).map(String::as_str) {
+        Some("line") => Architecture::line(cores, per_core),
+        Some("ring") => Architecture::ring(cores, per_core),
+        _ => Architecture::new(cores, per_core),
+    }
+    .expect("a valid architecture");
 
     let mut rng = Rng::new(1);
     let mut pairs = Vec::new();
@@ -48,6 +51,7 @@ fn main() {
     for method in [
         Method::Hqa,
         Method::HqaWithoutLookahead,
+        Method::HqaUniformCost,
         Method::FgpRoee,
         Method::Naive,
     ] {
