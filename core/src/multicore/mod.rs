@@ -18,7 +18,11 @@
 //!    a [`Mapping`], whose [`Mapping::communications`] is the cost:
 //!    * [`hqa`] — Hungarian Qubit Assignment (Escofet et al.), the main one;
 //!    * [`naive`] and [`fgp_roee`] — the baselines it is compared with.
-//! 5. [`random_circuit_bounds`] gives the theoretical bounds for random
+//! 5. [`physical_circuit`] turns a mapping into instructions on physical
+//!    qubits when the cores are not all-to-all inside: SWAPs routed with
+//!    SABRE inside each core and teleportations between cores
+//!    ([`map_and_route`] does steps 2 to 5 at once).
+//! 6. [`random_circuit_bounds`] gives the theoretical bounds for random
 //!    circuits, to put the numbers in context.
 //!
 //! [`map`] runs the whole pipeline for a [`Method`].
@@ -35,6 +39,7 @@
 //! | `oee.rs` | Overall Extreme Exchange graph partitioning |
 //! | `hqa.rs` | Hungarian Qubit Assignment |
 //! | `baselines.rs` | the naive and FGP-rOEE mappers |
+//! | `physical.rs` | routing inside cores and teleportations: a circuit that runs |
 //! | `bounds.rs` | theoretical bounds for random circuits |
 
 mod architecture;
@@ -45,6 +50,7 @@ mod hqa;
 pub mod hungarian;
 mod lookahead;
 pub mod oee;
+mod physical;
 mod timeslices;
 
 pub use architecture::Architecture;
@@ -53,6 +59,7 @@ pub use baselines::{fgp_roee, naive};
 pub use bounds::random_circuit_bounds;
 pub use hqa::{HqaOptions, hqa};
 pub use lookahead::{HORIZON, attraction};
+pub use physical::{PhysicalCircuit, map_and_route, physical_circuit};
 pub use timeslices::Timeslices;
 
 /// A mapping algorithm.

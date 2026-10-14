@@ -15,7 +15,7 @@ Python API.
 ## Quick start
 
 ```python
-from qevedo.compiler.multicore import map_to_cores
+from qevedo.compiler.multicore import map_and_route, map_to_cores
 
 mapping = map_to_cores(open("circuit.qasm").read(), cores=4, qubits_per_core=10)
 print(mapping.communications)    # teleportations needed
@@ -25,6 +25,12 @@ print(mapping.moves()[3])        # (qubit, from core, to core) before timeslice 
 # Cores in a line, a ring, a grid, or linked by any connected set of links:
 mapping = map_to_cores(circuit, cores=8, qubits_per_core=10, topology="grid:2x4")
 mapping = map_to_cores(circuit, cores=4, qubits_per_core=10, topology=[(0, 1), (1, 2), (1, 3)])
+
+# Qubits inside each core coupled in a 3 × 3 grid: route each core with SABRE
+# and get a circuit on physical qubits, with SWAPs and teleportations.
+result = map_and_route(circuit, cores=4, qubits_per_core=9, chip="grid:3x3")
+print(result.teleportations, result.swaps)
+print(result.circuit.instructions[:5])   # cx, swap and teleport on q[0..35]
 ```
 
 `map_to_cores` also takes a parsed `Circuit` or a list of two-qubit gates as
@@ -38,7 +44,8 @@ qubit pairs, and a `method`:
 | `"fgp-roee"` | Fine-Grained Partitioning with relaxed Overall Extreme Exchange |
 | `"naive"` | move one qubit of each split gate to the other's core |
 
-From Rust, `qcc::multicore::{Architecture, Timeslices, map, Method}`, with
+From Rust, `qcc::multicore::{Architecture, Timeslices, map, Method}` (and
+`map_and_route` with a `qcc::routing::CouplingGraph` for the chip), with
 `Architecture::new` (all to all), `line`, `ring`, `grid` or `with_links` (see
 `core/examples/multicore.rs`, run with
 `cargo run --release --example multicore -- 100 10`).
@@ -87,6 +94,38 @@ weighted by `2^−(m−t)`. With every core linked to every other this differs
 from the formula above by a constant per gate, so the Hungarian algorithm
 makes the same choices.
 
+## Routing inside the cores
+
+The mappers, like the papers, take every core as all-to-all inside. When the
+qubits of a core are coupled in a line, a grid or any other graph (the
+*chip*), `map_and_route` also produces the circuit that runs:
+
+1. The timeslices are grouped into **epochs**, runs in which no qubit changes
+   core.
+2. In each epoch, each core runs its part of the circuit, single-qubit gates
+   and measurements included, routed on its chip with **SABRE** (Li, Ding and
+   Xie, ASPLOS 2019), which inserts SWAPs. Each core starts where the
+   previous epoch left its qubits; the first epoch's layout comes from
+   SABRE's forward–backward layout search.
+3. Between epochs, the qubits that change core are **teleported**. A qubit
+   arriving in a core takes the free slot closest to the qubit it interacts
+   with next, or, if that one has not arrived yet, the free slot with most
+   free neighbours, so the partner can land next to it.
+
+The output is a circuit on `cores × qubits_per_core` physical qubits, where
+`q[c · qubits_per_core + s]` is slot `s` of core `c`, with `swap` inside
+cores and `teleport source, destination` between them. The teleportations
+before a timeslice happen at once (as with communication qubits in each
+core): a destination is empty or is being left by another teleportation.
+They are listed so that each destination is already free whenever possible.
+Tests simulate the routed circuits and check that they compute the same state
+as the original.
+
+The SABRE router is a module of its own (`core/src/routing/`) and routes any
+circuit on any connected chip; on 20-qubit lines, 5 × 5 grids and 19-qubit
+heavy-hex chips it inserts about as many SWAPs as Qiskit's `SabreLayout`
+(2774 against 2806 over QFT, random, Quantum Volume and Cuccaro circuits).
+
 ## Code
 
 Rust, in `core/src/multicore/`, one concept per file:
@@ -102,10 +141,14 @@ Rust, in `core/src/multicore/`, one concept per file:
 | `oee.rs` | Overall Extreme Exchange graph partitioning |
 | `hqa.rs` | Hungarian Qubit Assignment |
 | `baselines.rs` | the naive and FGP-rOEE mappers |
+| `physical.rs` | routing inside cores and teleportations: a circuit that runs |
 | `bounds.rs` | theoretical bounds for random circuits |
 
+and in `core/src/routing/`, `coupling.rs` (chips: coupling graphs and their
+distances) and `sabre.rs` (the SABRE router and layout search).
+
 Python: `python/qevedo/compiler/multicore.py` (API) and the
-`map_to_cores` binding in `python/src/lib.rs`. Tests: the `tests` module of
+`map_to_cores` and `map_and_route` bindings in `python/src/lib.rs`. Tests: the `tests` module of
 each Rust file (including a randomized test of every method on 300 random
 architectures and circuits) and `python/tests/test_multicore.py`.
 
@@ -190,6 +233,33 @@ Communications count link hops. Mean ratios over the five benchmarks:
 - HQA's lead over FGP-rOEE grows on sparse links: 1.6–1.9× fewer
   communications, against 1.3× with all cores linked to all.
 
+### Routing inside the cores
+
+The same 100-qubit circuits on 10 cores of 10 qubits (cores linked all to
+all), now with the qubits of each core coupled in a 2 × 5 grid or a line
+(`results/routing.csv`). Totals over the five benchmarks:
+
+| chip | method | teleportations | SWAPs |
+|---|---|---|---|
+| 2 × 5 grid | HQA | **10193** | 16105 |
+| | FGP-rOEE | 13023 | 15020 |
+| | naive | 17790 | 11464 |
+| line | HQA | **10193** | 29459 |
+| | FGP-rOEE | 13023 | 29138 |
+| | naive | 17790 | 22938 |
+
+- Fewer teleportations can cost SWAPs: the naive mapper moves a qubit only
+  to meet its partner, so it lands next to it, while HQA also moves qubits
+  ahead of time, before their partners are there.
+- Still, HQA has the lowest total wherever one teleportation costs more than
+  2.1 SWAPs (the largest break-even over every benchmark and both chips),
+  and a teleportation, which consumes an EPR pair shared across a link and
+  needs a Bell measurement, costs far more than a local SWAP on any hardware
+  proposed. The exception is again the Cuccaro adder, where FGP-rOEE needs
+  fewer teleportations (114 against 156) and HQA fewer SWAPs.
+- Choosing the slot of an arriving qubit by its next partner, rather than
+  the first free slot, saves 18% of the SWAPs over all these runs.
+
 ![Sparse links](../benchmarks/multicore/charts/topology.svg)
 ![Strong scaling](../benchmarks/multicore/charts/strong.svg)
 ![Weak scaling](../benchmarks/multicore/charts/weak.svg)
@@ -206,5 +276,8 @@ Communications count link hops. Mean ratios over the five benchmarks:
   [arXiv:2403.17205](https://arxiv.org/abs/2403.17205).
 - J. M. Baker et al., "Time-sliced quantum circuit partitioning for modular
   architectures", Computing Frontiers (2020): FGP-rOEE.
+- G. Li, Y. Ding and Y. Xie, "Tackling the Qubit Mapping Problem for
+  NISQ-Era Quantum Devices", ASPLOS (2019),
+  [arXiv:1809.02573](https://arxiv.org/abs/1809.02573): SABRE.
 - A. Ovide et al., "Mapping quantum algorithms to multi-core quantum computing
   architectures", [arXiv:2303.16125](https://arxiv.org/abs/2303.16125) (2023).

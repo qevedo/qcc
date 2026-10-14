@@ -23,7 +23,8 @@ cargo run --release --example multicore -- 100 10 # compare multi-core mappers
 | `two_qubit.rs` | two-qubit synthesis: KAK decomposition, templates, moving rotations across gates |
 | `numeric.rs` | numerically found decompositions for iSWAP-like native gates |
 | `decompose.rs` | decompose one gate or unitary and check it (used by the playground) |
-| `multicore/` | mapping circuits onto multi-core architectures: HQA and baselines (see `multicore/mod.rs` and `../docs/MULTICORE.md`) |
+| `routing/` | routing on a chip whose qubits are not all coupled: coupling graphs and SABRE (see `routing/mod.rs`) |
+| `multicore/` | mapping circuits onto multi-core architectures: HQA and baselines, then routing inside each core (see `multicore/mod.rs` and `../docs/MULTICORE.md`) |
 | `rng.rs` | a small seeded random generator |
 | `testing.rs` | helpers for the unit tests |
 

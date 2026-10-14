@@ -31,6 +31,16 @@ cores, the links are all-to-all as in the papers, or a line, a ring, a grid or
 any connected set of links (``topology``); moving a qubit between cores that
 are not linked takes one teleportation per link on the shortest path, and HQA
 counts those links in its cost.
+
+When the qubits inside each core are not all coupled to each other (a line,
+a grid...), :func:`map_and_route` also routes each core with SABRE and
+returns a circuit on physical qubits, with SWAPs inside cores and
+teleportations between them:
+
+    from qevedo.compiler.multicore import map_and_route
+
+    result = map_and_route(source, cores=4, qubits_per_core=9, chip="grid:3x3")
+    print(result.teleportations, "teleportations,", result.swaps, "SWAPs")
 """
 
 from __future__ import annotations
@@ -39,9 +49,17 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from qevedo.compiler.ir import Circuit, Qubit
+from qevedo.compiler.ir import Circuit, Clbit, Instruction, Qubit
 
-__all__ = ["METHODS", "CoreMapping", "map_to_cores", "random_circuit_bounds", "topology_links"]
+__all__ = [
+    "METHODS",
+    "CoreCircuit",
+    "CoreMapping",
+    "map_and_route",
+    "map_to_cores",
+    "random_circuit_bounds",
+    "topology_links",
+]
 
 METHODS = ("hqa", "hqa-no-lookahead", "hqa-uniform-cost", "fgp-roee", "naive")
 
@@ -134,8 +152,154 @@ def map_to_cores(
     )
 
 
+@dataclass
+class CoreCircuit:
+    """A circuit mapped onto cores and routed inside them, ready to run."""
+
+    #: Which core each qubit is in, step by step.
+    mapping: CoreMapping
+    #: The circuit on physical qubits: register ``q`` of ``cores × qubits_per_core``
+    #: qubits, where ``q[c · qubits_per_core + s]`` is slot ``s`` of core ``c``.
+    #: SWAPs inside cores are ``swap``; moves between cores are ``teleport``
+    #: (source, destination). Barriers are dropped.
+    circuit: Circuit
+    #: How the qubits of each core are coupled, as pairs of slots.
+    chip: list[tuple[int, int]]
+    #: ``initial_layout[q]``: the physical qubit of circuit qubit ``q`` at the start.
+    initial_layout: list[int]
+    #: ``final_layout[q]``: where circuit qubit ``q`` ends up.
+    final_layout: list[int]
+    #: SWAPs inserted inside cores.
+    swaps: int
+    #: Teleportations, one per link crossed (``mapping.communications``).
+    teleportations: int
+    #: Time mapping and routing took, in seconds.
+    seconds: float
+
+
+def map_and_route(
+    circuit: Circuit | str | Sequence[tuple[int, int]],
+    cores: int,
+    qubits_per_core: int,
+    chip: Topology = "line",
+    method: str = "hqa",
+    topology: Topology = "all-to-all",
+    num_qubits: int | None = None,
+    trials: int = 8,
+    seed: int = 1,
+) -> CoreCircuit:
+    """Map ``circuit`` onto cores, as :func:`map_to_cores`, and route it inside them.
+
+    ``circuit`` is a :class:`~qevedo.compiler.ir.Circuit`, OpenQASM source, or
+    two-qubit gates as pairs of qubit indices (taken as CX gates on
+    ``num_qubits`` qubits, as in :func:`map_to_cores`).
+
+    ``chip`` is how the ``qubits_per_core`` qubits of every core are coupled:
+    ``"line"`` (the default), ``"ring"``, ``"grid"``, ``"grid:RxC"``,
+    ``"all-to-all"`` or a list of pairs of slots. ``topology`` links the
+    cores, as in :func:`map_to_cores`. Between the steps where qubits change
+    core, each core's part of the circuit is routed with SABRE (``trials``
+    random starts for the first layout); a qubit arriving in a core takes the
+    free slot closest to its next partner.
+
+    Raises ``ValueError`` as :func:`map_to_cores` does, and when the chip's
+    couplings do not connect its qubits.
+    """
+    from qevedo.compiler import _core
+
+    if method not in METHODS:
+        raise ValueError(f"unknown mapping method {method!r}; choose one of {', '.join(METHODS)}")
+    if isinstance(circuit, str):
+        from qevedo.compiler.frontend.qasm import parse_qasm
+
+        circuit = parse_qasm(source=circuit)
+    if not isinstance(circuit, Circuit):
+        qubits, pairs = _two_qubit_gates(circuit, num_qubits)
+        circuit = Circuit(
+            num_qubits=len(qubits),
+            qreg_sizes={"q": len(qubits)},
+            instructions=[Instruction("cx", (qubits[a], qubits[b])) for a, b in pairs],
+        )
+    if any(len(inst.qubits) > 2 and inst.name != "barrier" for inst in circuit.instructions):
+        from qevedo.compiler.passes.decompose import DecomposeToNative
+
+        circuit = DecomposeToNative().run(circuit)
+    qubits = [Qubit(name, i) for name, size in circuit.qreg_sizes.items() for i in range(size)]
+    qubit_index = {q: i for i, q in enumerate(qubits)}
+    clbits = [Clbit(name, i) for name, size in circuit.creg_sizes.items() for i in range(size)]
+    clbit_index = {c: i for i, c in enumerate(clbits)}
+    raw = [
+        (
+            inst.name,
+            [qubit_index[q] for q in inst.qubits],
+            list(inst.params),
+            [clbit_index[c] for c in inst.clbits],
+        )
+        for inst in circuit.instructions
+    ]
+    links = topology_links(topology, cores)
+    chip_edges = topology_links(chip, qubits_per_core)
+    start = time.perf_counter()
+    (
+        initial,
+        assignments,
+        timeslices,
+        communications,
+        moved,
+        physical,
+        initial_layout,
+        final_layout,
+        swaps,
+        teleportations,
+    ) = _core.map_and_route(
+        raw, len(qubits), cores, qubits_per_core, method, links, chip_edges, trials, seed
+    )
+    seconds = time.perf_counter() - start
+    mapping = CoreMapping(
+        method=method,
+        cores=cores,
+        qubits_per_core=qubits_per_core,
+        qubits=qubits,
+        initial=initial,
+        assignments=assignments,
+        timeslices=[[tuple(g) for g in s] for s in timeslices],
+        links=sorted({(min(a, b), max(a, b)) for a, b in links}),
+        communications=communications,
+        moved_qubits=moved,
+        seconds=seconds,
+    )
+    out = Circuit(
+        num_qubits=cores * qubits_per_core,
+        num_clbits=circuit.num_clbits,
+        qreg_sizes={"q": cores * qubits_per_core},
+        creg_sizes=dict(circuit.creg_sizes),
+        instructions=[
+            Instruction(
+                name,
+                tuple(Qubit("q", p) for p in qs),
+                tuple(params),
+                tuple(clbits[c] for c in cs),
+            )
+            for name, qs, params, cs in physical
+        ],
+    )
+    return CoreCircuit(
+        mapping=mapping,
+        circuit=out,
+        chip=sorted({(min(a, b), max(a, b)) for a, b in chip_edges}),
+        initial_layout=initial_layout,
+        final_layout=final_layout,
+        swaps=swaps,
+        teleportations=teleportations,
+        seconds=seconds,
+    )
+
+
 def topology_links(topology: Topology, cores: int) -> list[tuple[int, int]]:
-    """The links between ``cores`` cores for a ``topology`` name or list of links."""
+    """The links between ``cores`` cores for a ``topology`` name or list of links.
+
+    The same names describe how the qubits inside a core are coupled.
+    """
     if not isinstance(topology, str):
         return [(int(a), int(b)) for a, b in topology]
     name, _, shape = topology.partition(":")

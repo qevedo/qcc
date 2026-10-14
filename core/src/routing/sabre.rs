@@ -1,0 +1,574 @@
+//! SABRE: SWAP-based bidirectional heuristic search, from G. Li, Y. Ding and
+//! Y. Xie, "Tackling the Qubit Mapping Problem for NISQ-Era Quantum Devices"
+//! (ASPLOS 2019), with the release valve of Qiskit's implementation.
+//!
+//! Routing walks the circuit's dependency graph. Gates whose qubits are
+//! coupled, and every single-qubit gate, run as soon as their predecessors
+//! have. When every gate in the front layer is blocked, one SWAP is inserted:
+//! the one, among SWAPs that touch a qubit of the front layer, that most
+//! reduces
+//!
+//! ```text
+//! H = max(decay(p₁), decay(p₂)) · ( Σ_front d / |front| + W · Σ_ext d / |ext| )
+//! ```
+//!
+//! where `d` is the coupling distance between a gate's two qubits, `ext` is
+//! the next gates after the front layer (the extended set), and `decay` grows
+//! for qubits just swapped, so SWAPs spread out and can run in parallel. If
+//! no gate runs for many SWAPs in a row (the release valve), the closest front
+//! gate is routed along a shortest path.
+//!
+//! The initial layout is found by routing the circuit forwards and backwards
+//! from a random layout, a few times: each pass starts from where the previous
+//! one ended, so the layout settles where the start of the circuit wants it.
+//! The best of several random starts is kept.
+
+use super::coupling::CouplingGraph;
+use crate::ir::Instruction;
+use crate::rng::Rng;
+
+/// Tuning of SABRE; the defaults follow the paper and Qiskit.
+#[derive(Clone, Copy, Debug)]
+pub struct SabreOptions {
+    /// Random initial layouts tried by [`layout_and_route`].
+    pub trials: usize,
+    /// Forward–backward passes per trial.
+    pub iterations: usize,
+    /// Routings of each trial's layout, with different tie-breaking.
+    pub swap_trials: usize,
+    /// Gates in the extended set.
+    pub extended_set: usize,
+    /// Weight `W` of the extended set.
+    pub extended_weight: f64,
+    /// How much a SWAP raises the decay of its qubits.
+    pub decay: f64,
+    pub seed: u64,
+}
+
+impl Default for SabreOptions {
+    fn default() -> SabreOptions {
+        SabreOptions {
+            trials: 8,
+            iterations: 3,
+            swap_trials: 4,
+            extended_set: 20,
+            extended_weight: 0.5,
+            decay: 0.001,
+            seed: 1,
+        }
+    }
+}
+
+/// A routed circuit on physical qubits.
+#[derive(Clone, Debug)]
+pub struct Routed {
+    /// The circuit on physical qubits, with SWAPs inserted (named "swap").
+    pub instructions: Vec<Instruction>,
+    /// `initial_layout[q]`: the physical qubit of logical qubit `q` at the start.
+    pub initial_layout: Vec<usize>,
+    /// `final_layout[q]`: where logical qubit `q` ends up.
+    pub final_layout: Vec<usize>,
+    pub swaps: usize,
+}
+
+/// Route `circuit` (on logical qubits `0..logical`) onto `graph`, starting
+/// from `initial` (`initial[q]` is the physical qubit of logical qubit `q`).
+pub fn route(
+    circuit: &[Instruction],
+    logical: usize,
+    graph: &CouplingGraph,
+    initial: &[usize],
+    options: &SabreOptions,
+) -> Result<Routed, String> {
+    check(circuit, logical, graph)?;
+    if initial.len() != logical {
+        return Err(format!(
+            "the layout places {} qubits, the circuit has {logical}",
+            initial.len()
+        ));
+    }
+    Router::new(circuit, logical, graph, initial, options).run()
+}
+
+/// Find an initial layout with SABRE's forward–backward search and route.
+pub fn layout_and_route(
+    circuit: &[Instruction],
+    logical: usize,
+    graph: &CouplingGraph,
+    options: &SabreOptions,
+) -> Result<Routed, String> {
+    check(circuit, logical, graph)?;
+    // Only two-qubit gates matter for the layout.
+    let two_qubit: Vec<Instruction> = circuit
+        .iter()
+        .filter(|i| needs_coupling(i))
+        .cloned()
+        .collect();
+    let reversed: Vec<Instruction> = two_qubit.iter().rev().cloned().collect();
+    let mut best: Option<Routed> = None;
+    for trial in 0..options.trials.max(1) {
+        let mut rng = Rng::new(options.seed.wrapping_add(trial as u64 * 0x9E37_79B9));
+        let mut physical: Vec<usize> = (0..graph.qubits()).collect();
+        for i in (1..physical.len()).rev() {
+            physical.swap(i, rng.below(i + 1));
+        }
+        let mut layout = physical[..logical].to_vec();
+        let pass_options = SabreOptions {
+            seed: rng.next_u64(),
+            ..*options
+        };
+        for _ in 0..options.iterations {
+            layout = Router::new(&two_qubit, logical, graph, &layout, &pass_options)
+                .run()?
+                .final_layout;
+            layout = Router::new(&reversed, logical, graph, &layout, &pass_options)
+                .run()?
+                .final_layout;
+        }
+        // Route the layout a few times with different tie-breaking, keep the best.
+        for swap_trial in 0..options.swap_trials.max(1) {
+            let route_options = SabreOptions {
+                seed: pass_options.seed.wrapping_add(swap_trial as u64),
+                ..*options
+            };
+            let routed = Router::new(circuit, logical, graph, &layout, &route_options).run()?;
+            if best.as_ref().is_none_or(|b| routed.swaps < b.swaps) {
+                best = Some(routed);
+            }
+        }
+    }
+    Ok(best.expect("at least one trial"))
+}
+
+fn needs_coupling(inst: &Instruction) -> bool {
+    inst.is_gate() && inst.qubits.len() == 2
+}
+
+fn check(circuit: &[Instruction], logical: usize, graph: &CouplingGraph) -> Result<(), String> {
+    if logical > graph.qubits() {
+        return Err(format!(
+            "{logical} qubits do not fit on a chip of {}",
+            graph.qubits()
+        ));
+    }
+    for inst in circuit {
+        if let Some(&q) = inst.qubits.iter().find(|&&q| q >= logical) {
+            return Err(format!(
+                "'{}' uses qubit {q}, beyond the {logical} of the circuit",
+                inst.name
+            ));
+        }
+        if inst.is_gate() && inst.qubits.len() > 2 {
+            return Err(format!(
+                "'{}' acts on {} qubits: decompose the circuit into one- and two-qubit gates first",
+                inst.name,
+                inst.qubits.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+struct Router<'a> {
+    circuit: &'a [Instruction],
+    graph: &'a CouplingGraph,
+    options: &'a SabreOptions,
+    /// `physical[q]`: where logical qubit `q` is now.
+    physical: Vec<usize>,
+    /// `logical[p]`: the logical qubit on physical qubit `p`, if any.
+    logical: Vec<Option<usize>>,
+    decay: Vec<f64>,
+    rng: Rng,
+    out: Vec<Instruction>,
+    swaps: usize,
+    initial: Vec<usize>,
+}
+
+impl<'a> Router<'a> {
+    fn new(
+        circuit: &'a [Instruction],
+        logical: usize,
+        graph: &'a CouplingGraph,
+        initial: &[usize],
+        options: &'a SabreOptions,
+    ) -> Router<'a> {
+        let mut at = vec![None; graph.qubits()];
+        for (q, &p) in initial.iter().enumerate() {
+            at[p] = Some(q);
+        }
+        debug_assert!(initial.len() == logical);
+        Router {
+            circuit,
+            graph,
+            options,
+            physical: initial.to_vec(),
+            logical: at,
+            decay: vec![1.0; graph.qubits()],
+            rng: Rng::new(options.seed),
+            out: Vec::with_capacity(circuit.len()),
+            swaps: 0,
+            initial: initial.to_vec(),
+        }
+    }
+
+    fn run(mut self) -> Result<Routed, String> {
+        let n = self.circuit.len();
+        // The dependency graph: each instruction follows the previous one on
+        // each of its qubits.
+        let mut remaining = vec![0usize; n];
+        let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut last: Vec<Option<usize>> = vec![None; self.physical.len()];
+        for (i, inst) in self.circuit.iter().enumerate() {
+            for &q in &inst.qubits {
+                if let Some(j) = last[q] {
+                    if !successors[j].contains(&i) {
+                        successors[j].push(i);
+                        remaining[i] += 1;
+                    }
+                }
+                last[q] = Some(i);
+            }
+        }
+        let mut front: Vec<usize> = (0..n).filter(|&i| remaining[i] == 0).collect();
+        let mut done = 0;
+        let mut stalled = 0;
+        let release_after = 10 * self.graph.qubits().max(10);
+        loop {
+            // Run everything that can run.
+            let mut progressed = false;
+            loop {
+                let mut next = Vec::with_capacity(front.len());
+                let mut ran = false;
+                for &node in &front {
+                    if self.can_run(node) {
+                        self.emit(node);
+                        done += 1;
+                        ran = true;
+                        for &s in &successors[node] {
+                            remaining[s] -= 1;
+                            if remaining[s] == 0 {
+                                next.push(s);
+                            }
+                        }
+                    } else {
+                        next.push(node);
+                    }
+                }
+                front = next;
+                progressed |= ran;
+                if !ran {
+                    break;
+                }
+            }
+            if done == n {
+                break;
+            }
+            if progressed {
+                self.decay.iter_mut().for_each(|d| *d = 1.0);
+                stalled = 0;
+            }
+            if stalled >= release_after {
+                self.release_valve(&front);
+                stalled = 0;
+                continue;
+            }
+            let extended = self.extended_set(&front, &successors, &remaining);
+            let (a, b) = self.best_swap(&front, &extended);
+            self.swap(a, b);
+            stalled += 1;
+            if self.swaps.is_multiple_of(5) {
+                self.decay.iter_mut().for_each(|d| *d = 1.0);
+            }
+        }
+        Ok(Routed {
+            instructions: self.out,
+            initial_layout: self.initial,
+            final_layout: self.physical,
+            swaps: self.swaps,
+        })
+    }
+
+    fn can_run(&self, node: usize) -> bool {
+        let inst = &self.circuit[node];
+        !needs_coupling(inst)
+            || self
+                .graph
+                .coupled(self.physical[inst.qubits[0]], self.physical[inst.qubits[1]])
+    }
+
+    fn emit(&mut self, node: usize) {
+        let inst = &self.circuit[node];
+        self.out.push(Instruction {
+            name: inst.name.clone(),
+            qubits: inst.qubits.iter().map(|&q| self.physical[q]).collect(),
+            params: inst.params.clone(),
+            clbits: inst.clbits.clone(),
+        });
+    }
+
+    fn swap(&mut self, a: usize, b: usize) {
+        self.out.push(Instruction::gate("swap", vec![a, b], vec![]));
+        let (qa, qb) = (self.logical[a], self.logical[b]);
+        self.logical[a] = qb;
+        self.logical[b] = qa;
+        if let Some(q) = qa {
+            self.physical[q] = b;
+        }
+        if let Some(q) = qb {
+            self.physical[q] = a;
+        }
+        self.decay[a] += self.options.decay;
+        self.decay[b] += self.options.decay;
+        self.swaps += 1;
+    }
+
+    /// The qubit pairs of the next two-qubit gates after the front layer.
+    fn extended_set(
+        &self,
+        front: &[usize],
+        successors: &[Vec<usize>],
+        remaining: &[usize],
+    ) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut seen = vec![false; self.circuit.len()];
+        let mut queue: std::collections::VecDeque<usize> = front.iter().copied().collect();
+        // Track the predecessors met so far, so only gates whose blocking
+        // predecessors are all in the front layer or the set count early.
+        let mut pending = remaining.to_vec();
+        while let Some(node) = queue.pop_front() {
+            for &s in &successors[node] {
+                pending[s] = pending[s].saturating_sub(1);
+                if pending[s] == 0 && !seen[s] {
+                    seen[s] = true;
+                    let inst = &self.circuit[s];
+                    if needs_coupling(inst) {
+                        out.push((inst.qubits[0], inst.qubits[1]));
+                        if out.len() >= self.options.extended_set {
+                            return out;
+                        }
+                    }
+                    queue.push_back(s);
+                }
+            }
+        }
+        out
+    }
+
+    fn best_swap(&mut self, front: &[usize], extended: &[(usize, usize)]) -> (usize, usize) {
+        let gates: Vec<(usize, usize)> = front
+            .iter()
+            .map(|&g| &self.circuit[g])
+            .filter(|i| needs_coupling(i))
+            .map(|i| (i.qubits[0], i.qubits[1]))
+            .collect();
+        let mut candidates: Vec<(usize, usize)> = Vec::new();
+        for &(a, b) in &gates {
+            for q in [a, b] {
+                let p = self.physical[q];
+                for &nb in self.graph.neighbours(p) {
+                    let edge = (p.min(nb), p.max(nb));
+                    if !candidates.contains(&edge) {
+                        candidates.push(edge);
+                    }
+                }
+            }
+        }
+        let mut best: Vec<(usize, usize)> = Vec::new();
+        let mut best_score = f64::INFINITY;
+        for &(p1, p2) in &candidates {
+            let at = |q: usize| {
+                let p = self.physical[q];
+                if p == p1 {
+                    p2
+                } else if p == p2 {
+                    p1
+                } else {
+                    p
+                }
+            };
+            let cost = |pairs: &[(usize, usize)]| -> f64 {
+                if pairs.is_empty() {
+                    return 0.0;
+                }
+                pairs
+                    .iter()
+                    .map(|&(a, b)| self.graph.distance(at(a), at(b)) as f64)
+                    .sum::<f64>()
+                    / pairs.len() as f64
+            };
+            let score = self.decay[p1].max(self.decay[p2])
+                * (cost(&gates) + self.options.extended_weight * cost(extended));
+            if score < best_score - 1e-12 {
+                best_score = score;
+                best.clear();
+                best.push((p1, p2));
+            } else if (score - best_score).abs() <= 1e-12 {
+                best.push((p1, p2));
+            }
+        }
+        best[self.rng.below(best.len())]
+    }
+
+    /// Route the closest front gate along a shortest path.
+    fn release_valve(&mut self, front: &[usize]) {
+        let (a, b) = front
+            .iter()
+            .map(|&g| &self.circuit[g])
+            .filter(|i| needs_coupling(i))
+            .map(|i| (self.physical[i.qubits[0]], self.physical[i.qubits[1]]))
+            .min_by_key(|&(a, b)| self.graph.distance(a, b))
+            .expect("a blocked gate");
+        let path = self.graph.path(a, b);
+        for w in path.windows(2).take(path.len().saturating_sub(2)) {
+            self.swap(w[0], w[1]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{Rng as TestRng, circuit_unitary, dense_equal_up_to_phase};
+
+    fn random_circuit(rng: &mut TestRng, n: usize, gates: usize) -> Vec<Instruction> {
+        (0..gates)
+            .map(|_| {
+                if rng.below(3) == 0 {
+                    return Instruction::gate("rz", vec![rng.below(n)], vec![rng.range(-3.0, 3.0)]);
+                }
+                let a = rng.below(n);
+                let b = (a + 1 + rng.below(n - 1)) % n;
+                match rng.below(3) {
+                    0 => Instruction::gate("cx", vec![a, b], vec![]),
+                    1 => Instruction::gate("cz", vec![a, b], vec![]),
+                    _ => Instruction::gate("rzz", vec![a, b], vec![0.7]),
+                }
+            })
+            .collect()
+    }
+
+    /// The permutation that puts logical qubit `q` on physical qubit `layout[q]`,
+    /// as a function on basis indices (qubit 0 most significant).
+    fn permute(index: usize, layout: &[usize], n: usize) -> usize {
+        let mut out = 0;
+        for (q, &p) in layout.iter().enumerate() {
+            if index >> (n - 1 - q) & 1 == 1 {
+                out |= 1 << (n - 1 - p);
+            }
+        }
+        out
+    }
+
+    /// U_routed · P_initial = P_final · U_logical.
+    fn check_equivalent(logical: &[Instruction], routed: &Routed, n: usize) {
+        let u = circuit_unitary(logical, n);
+        let r = circuit_unitary(&routed.instructions, n);
+        let dim = 1 << n;
+        // Columns: r applied to P_initial |j⟩ must be P_final applied to u |j⟩.
+        let mut lhs = vec![vec![crate::linalg::ZERO; dim]; dim];
+        let mut rhs = vec![vec![crate::linalg::ZERO; dim]; dim];
+        for j in 0..dim {
+            let pj = permute(j, &routed.initial_layout, n);
+            for i in 0..dim {
+                lhs[i][j] = r[i][pj];
+                rhs[permute(i, &routed.final_layout, n)][j] = u[i][j];
+            }
+        }
+        assert!(dense_equal_up_to_phase(&lhs, &rhs, 1e-9));
+    }
+
+    #[test]
+    fn routed_circuits_respect_the_coupling_and_are_equivalent() {
+        let mut rng = TestRng::new(2);
+        for graph in [
+            CouplingGraph::line(5),
+            CouplingGraph::ring(6),
+            CouplingGraph::grid(2, 3),
+            CouplingGraph::line(4),
+        ] {
+            let n = graph.qubits();
+            for trial in 0..10 {
+                let circuit = random_circuit(&mut rng, n, 30);
+                let options = SabreOptions {
+                    seed: trial,
+                    ..SabreOptions::default()
+                };
+                for routed in [
+                    route(&circuit, n, &graph, &(0..n).collect::<Vec<_>>(), &options).unwrap(),
+                    layout_and_route(&circuit, n, &graph, &options).unwrap(),
+                ] {
+                    for inst in &routed.instructions {
+                        if inst.qubits.len() == 2 {
+                            assert!(graph.coupled(inst.qubits[0], inst.qubits[1]), "{inst:?}");
+                        }
+                    }
+                    let non_swaps = routed
+                        .instructions
+                        .iter()
+                        .filter(|i| i.name != "swap")
+                        .count();
+                    assert_eq!(
+                        (non_swaps, routed.instructions.len() - non_swaps),
+                        (circuit.len(), routed.swaps)
+                    );
+                    check_equivalent(&circuit, &routed, n);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fewer_logical_than_physical_qubits() {
+        let mut rng = TestRng::new(3);
+        let graph = CouplingGraph::grid(3, 4);
+        let circuit = random_circuit(&mut rng, 7, 200);
+        let routed = layout_and_route(&circuit, 7, &graph, &SabreOptions::default()).unwrap();
+        assert!(
+            routed
+                .instructions
+                .iter()
+                .all(|i| i.qubits.len() < 2 || graph.coupled(i.qubits[0], i.qubits[1]))
+        );
+        let mut used = routed.final_layout.clone();
+        used.sort();
+        used.dedup();
+        assert_eq!(used.len(), 7);
+    }
+
+    #[test]
+    fn the_layout_search_beats_a_fixed_layout_on_average() {
+        let mut rng = TestRng::new(4);
+        let graph = CouplingGraph::grid(4, 4);
+        let (mut fixed, mut searched) = (0, 0);
+        for seed in 0..6 {
+            let circuit = random_circuit(&mut rng, 16, 150);
+            let options = SabreOptions {
+                seed,
+                ..SabreOptions::default()
+            };
+            fixed += route(&circuit, 16, &graph, &(0..16).collect::<Vec<_>>(), &options)
+                .unwrap()
+                .swaps;
+            searched += layout_and_route(&circuit, 16, &graph, &options)
+                .unwrap()
+                .swaps;
+        }
+        assert!(searched < fixed, "searched {searched}, fixed {fixed}");
+    }
+
+    #[test]
+    fn errors() {
+        let graph = CouplingGraph::line(3);
+        let wide = vec![Instruction::gate("ccx", vec![0, 1, 2], vec![])];
+        assert!(
+            layout_and_route(&wide, 3, &graph, &SabreOptions::default())
+                .unwrap_err()
+                .contains("decompose")
+        );
+        assert!(
+            layout_and_route(&[], 4, &graph, &SabreOptions::default())
+                .unwrap_err()
+                .contains("do not fit")
+        );
+    }
+}

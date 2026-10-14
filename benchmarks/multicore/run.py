@@ -16,8 +16,14 @@ and one the papers do not have:
   teleportation per link. HQA counts links in its cost; "hqa-uniform-cost"
   is HQA with the papers' cost (every move is one), to show what that gains.
 
+and one more that takes the circuits down to physical qubits:
+
+* routing: 100 qubits on 10 cores of 10, with the qubits of each core coupled
+  all to all, in a 2 × 5 grid or in a line. Each core is routed with SABRE
+  between teleportations (map_and_route), counting SWAPs as well.
+
 Every mapper starts from the same OEE placement. Results go to
-results/multicore.csv; plot.py draws them.
+results/multicore.csv and results/routing.csv; plot.py draws the first.
 """
 
 from __future__ import annotations
@@ -31,11 +37,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from circuits import BENCHMARKS, two_qubit_gates  # noqa: E402
-from qevedo.compiler.multicore import map_to_cores  # noqa: E402
+from qevedo.compiler.multicore import map_and_route, map_to_cores  # noqa: E402
 
 METHODS = ("hqa", "fgp-roee", "naive")
 TOPOLOGY_METHODS = ("hqa", "hqa-uniform-cost", "fgp-roee", "naive")
 OUT = Path(__file__).parent / "results" / "multicore.csv"
+ROUTING_OUT = Path(__file__).parent / "results" / "routing.csv"
+CHIPS = ("all-to-all", "grid:2x5", "line")
 
 
 def experiments(quick: bool):
@@ -85,12 +93,45 @@ def main() -> None:
                     f"{method:16} {mapping.communications:7} comms {mapping.seconds:8.3f} s",
                     flush=True,
                 )
-    OUT.parent.mkdir(exist_ok=True)
-    with OUT.open("w", newline="") as handle:
+    write(OUT, rows)
+    write(ROUTING_OUT, routing())
+
+
+def routing() -> list[dict]:
+    """The routing experiment: teleportations and SWAPs per method and chip."""
+    rows = []
+    for chip in CHIPS:
+        for benchmark in BENCHMARKS:
+            n, pairs = two_qubit_gates(benchmark, 100)
+            for method in METHODS:
+                result = map_and_route(pairs, 10, 10, chip=chip, method=method, num_qubits=n)
+                rows.append(
+                    {
+                        "benchmark": benchmark,
+                        "chip": chip,
+                        "qubits": n,
+                        "two_qubit_gates": len(pairs),
+                        "method": method,
+                        "teleportations": result.teleportations,
+                        "swaps": result.swaps,
+                        "seconds": round(result.seconds, 6),
+                    }
+                )
+                print(
+                    f"routing  {chip:10} {benchmark:15} {method:16} {result.teleportations:7} "
+                    f"teleportations {result.swaps:7} swaps {result.seconds:8.3f} s",
+                    flush=True,
+                )
+    return rows
+
+
+def write(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(exist_ok=True)
+    with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    print(f"\nwrote {OUT} ({len(rows)} rows) on {platform.processor() or platform.machine()}")
+    print(f"\nwrote {path} ({len(rows)} rows) on {platform.processor() or platform.machine()}")
 
 
 if __name__ == "__main__":

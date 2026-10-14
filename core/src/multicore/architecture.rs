@@ -3,8 +3,9 @@
 /// A multi-core quantum computer: `cores` cores of `qubits_per_core` physical
 /// qubits each, connected by quantum links.
 ///
-/// Every core is all-to-all inside (any two of its qubits can interact
-/// directly). A two-qubit gate can only run when both of its qubits are in the
+/// The mappers take every core as all-to-all inside (any two of its qubits
+/// can interact directly); [`super::physical_circuit`] then routes each core
+/// on its real coupling graph. A two-qubit gate can only run when both of its qubits are in the
 /// same core, and moving a qubit's state over one link is one teleportation,
 /// one *non-local communication*; moving it between cores that are not linked
 /// takes one per link on the shortest path (`hops`).

@@ -14,6 +14,7 @@ pub mod numeric;
 pub mod one_qubit;
 pub mod passes;
 pub mod rng;
+pub mod routing;
 #[cfg(test)]
 pub(crate) mod testing;
 pub mod two_qubit;
