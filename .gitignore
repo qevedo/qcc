@@ -42,3 +42,4 @@ target/
 
 # Benchmark caches
 benchmarks/multicore/cache/
+__pycache__/
