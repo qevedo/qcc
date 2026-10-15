@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.87"
 description = "The QCC core for browsers: the decomposition playground on qevedo.com"
 license = "MIT"
-repository = "https://github.com/qevedo/qevedo-compiler"
+repository = "https://github.com/qevedo/qcc"
 publish = false
 
 [lib]

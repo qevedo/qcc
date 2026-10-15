@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.87"
 description = "Python bindings of the QCC core (qevedo.compiler._core)"
 license = "MIT"
-repository = "https://github.com/qevedo/qevedo-compiler"
+repository = "https://github.com/qevedo/qcc"
 publish = false
 
 [lib]

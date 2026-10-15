@@ -24,8 +24,8 @@ dev = ["pytest>=7.0", "qevedo-simulator>=0.1"]
 qcc = "qevedo.compiler.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/qevedo/qevedo-compiler"
-Repository = "https://github.com/qevedo/qevedo-compiler"
+Homepage = "https://github.com/qevedo/qcc"
+Repository = "https://github.com/qevedo/qcc"
 
 [tool.maturin]
 # The Rust core (../core, through the bindings in src/) is the module
