@@ -67,11 +67,19 @@ pub use physical::{PhysicalCircuit, map_and_route, physical_circuit};
 pub use schedule::{Schedule, Timing, schedule};
 pub use timeslices::Timeslices;
 
+/// The weight of [`Method::HqaLatency`]'s delay term, in teleportations per
+/// teleportation of delay. Chosen on the benchmarks: 0.25 to 1 all give
+/// durations within 2% of each other.
+pub const LATENCY_WEIGHT: f64 = 0.5;
+
 /// A mapping algorithm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
     /// Hungarian Qubit Assignment with look-ahead attraction (the default).
     Hqa,
+    /// HQA that also weighs how much later each placement lets its gate start
+    /// (not in the papers): a few more teleportations, a shorter circuit.
+    HqaLatency,
     /// HQA without the attraction term.
     HqaWithoutLookahead,
     /// HQA that counts every move as one teleportation, ignoring how many
@@ -87,13 +95,14 @@ impl Method {
     pub fn parse(name: &str) -> Result<Method, String> {
         Ok(match name {
             "hqa" => Method::Hqa,
+            "hqa-latency" => Method::HqaLatency,
             "hqa-no-lookahead" => Method::HqaWithoutLookahead,
             "hqa-uniform-cost" => Method::HqaUniformCost,
             "fgp-roee" => Method::FgpRoee,
             "naive" => Method::Naive,
             other => {
                 return Err(format!(
-                    "unknown mapping method '{other}' (hqa, hqa-no-lookahead, hqa-uniform-cost, fgp-roee or naive)"
+                    "unknown mapping method '{other}' (hqa, hqa-latency, hqa-no-lookahead, hqa-uniform-cost, fgp-roee or naive)"
                 ));
             }
         })
@@ -178,13 +187,22 @@ pub fn map(slices: &Timeslices, arch: &Architecture, method: Method) -> Result<M
     let initial = initial_placement(slices, arch);
     let mapping = match method {
         Method::Hqa => hqa(slices, arch, &initial, HqaOptions::default()),
+        Method::HqaLatency => hqa(
+            slices,
+            arch,
+            &initial,
+            HqaOptions {
+                latency: LATENCY_WEIGHT,
+                ..HqaOptions::default()
+            },
+        ),
         Method::HqaWithoutLookahead => hqa(
             slices,
             arch,
             &initial,
             HqaOptions {
                 lookahead: false,
-                hops: true,
+                ..HqaOptions::default()
             },
         ),
         Method::HqaUniformCost => hqa(
@@ -192,8 +210,8 @@ pub fn map(slices: &Timeslices, arch: &Architecture, method: Method) -> Result<M
             arch,
             &initial,
             HqaOptions {
-                lookahead: true,
                 hops: false,
+                ..HqaOptions::default()
             },
         ),
         Method::FgpRoee => fgp_roee(slices, arch, &initial),
@@ -235,6 +253,7 @@ mod tests {
                 .fitted_to(&arch);
             for method in [
                 Method::Hqa,
+                Method::HqaLatency,
                 Method::HqaWithoutLookahead,
                 Method::FgpRoee,
                 Method::Naive,

@@ -50,6 +50,7 @@ fn main() {
     println!("{:<20} {:>15} {:>10}", "method", "communications", "time");
     for method in [
         Method::Hqa,
+        Method::HqaLatency,
         Method::HqaWithoutLookahead,
         Method::HqaUniformCost,
         Method::FgpRoee,

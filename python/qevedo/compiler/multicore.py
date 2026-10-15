@@ -18,6 +18,9 @@ Methods (all in the Rust core):
   Before each timeslice, the gates split across cores are assigned to cores
   with the Hungarian algorithm, using a cost that counts teleportations and
   favours cores where the qubits will be needed next. The default.
+* ``"hqa-latency"``: HQA that also weighs how much later each placement
+  lets its gate start, favouring moves of qubits that have been idle: a few
+  more teleportations, a shorter circuit (not in the papers).
 * ``"hqa-no-lookahead"``: HQA without the look-ahead term.
 * ``"hqa-uniform-cost"``: HQA counting every move as one teleportation, as in
   the papers, even when the cores it crosses are not linked directly.
@@ -62,7 +65,7 @@ __all__ = [
     "topology_links",
 ]
 
-METHODS = ("hqa", "hqa-no-lookahead", "hqa-uniform-cost", "fgp-roee", "naive")
+METHODS = ("hqa", "hqa-latency", "hqa-no-lookahead", "hqa-uniform-cost", "fgp-roee", "naive")
 
 #: A ``topology``: a name, or the links between cores as pairs of core indices.
 Topology = str | Sequence[tuple[int, int]]

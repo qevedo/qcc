@@ -42,13 +42,15 @@ qubit pairs, and a `method`:
 | method | what it does |
 |---|---|
 | `"hqa"` (default) | Hungarian Qubit Assignment with look-ahead attraction |
+| `"hqa-latency"` | HQA that also weighs how much each move delays its gate (not in the papers; see below) |
 | `"hqa-no-lookahead"` | HQA without the attraction term |
 | `"hqa-uniform-cost"` | HQA counting every move as one teleportation (the papers' cost), even across unlinked cores |
 | `"fgp-roee"` | Fine-Grained Partitioning with relaxed Overall Extreme Exchange |
 | `"naive"` | move one qubit of each split gate to the other's core |
 
 From Rust, `qcc::multicore::{Architecture, Timeslices, map, Method}` (and
-`map_and_route` with a `qcc::routing::CouplingGraph` for the chip), with
+`map_and_route` with a `qcc::routing::CouplingGraph` for the chip; `hqa`
+with `HqaOptions` sets the latency weight and the teleportation time), with
 `Architecture::new` (all to all), `line`, `ring`, `grid` or `with_links` (see
 `core/examples/multicore.rs`, run with
 `cargo run --release --example multicore -- 100 10`).
@@ -296,16 +298,16 @@ a line, scheduled with the default timing and 1, 2, 4 or unlimited channels
 per link (`results/latency.csv`). Mean, over the five benchmarks, of each
 method's duration over HQA's (above 1: HQA finishes first):
 
-| links | channels | FGP-rOEE / HQA | naive / HQA |
-|---|---|---|---|
-| all to all | 1 | 1.25× | 1.71× |
-| | 2 | 1.01× | 1.29× |
-| | 4 | 0.97× | 1.07× |
-| | unlimited | 0.96× | 1.03× |
-| line | 1 | 2.14× | 2.97× |
-| | 2 | 1.71× | 2.40× |
-| | 4 | 1.41× | 2.03× |
-| | unlimited | 1.20× | 1.51× |
+| links | channels | HQA-latency / HQA | FGP-rOEE / HQA | naive / HQA |
+|---|---|---|---|---|
+| all to all | 1 | **0.96×** | 1.25× | 1.71× |
+| | 2 | **0.93×** | 1.01× | 1.29× |
+| | 4 | **0.93×** | 0.97× | 1.07× |
+| | unlimited | **0.93×** | 0.96× | 1.03× |
+| line | 1 | **0.97×** | 2.14× | 2.97× |
+| | 2 | **0.98×** | 1.71× | 2.40× |
+| | 4 | **0.96×** | 1.41× | 2.03× |
+| | unlimited | **0.90×** | 1.20× | 1.51× |
 
 - When pairs are scarce, fewer teleportations means a shorter circuit:
   with one channel per link HQA finishes 1.25× sooner than FGP-rOEE with
@@ -315,7 +317,23 @@ method's duration over HQA's (above 1: HQA finishes first):
   count matters less: with all cores linked to all and four channels or
   more, FGP-rOEE and even the naive mapper finish about as soon as HQA, or
   slightly sooner. HQA minimizes teleportations, not the length of the
-  critical path; a latency-aware cost is a natural next step.
+  critical path.
+- **HQA-latency** (`"hqa-latency"`, not in the papers) closes that gap. HQA
+  keeps, for every qubit, when it would be free if everything ran as soon as
+  possible, and adds to the cost of putting a gate in a core how much later
+  the gate could start than if nothing moved (weighted 0.5, in
+  teleportations; 0.25 to 1 give durations within 2%). Between moving one
+  qubit or the other, it moves the one that has been idle, whose
+  teleportation overlaps other gates. It needs 6% more teleportations than
+  HQA with cores linked all to all (10% on a line), and gives the shortest
+  circuits on average in every configuration, 2–10% shorter than HQA. It is
+  not the best on every benchmark: on a line with few channels, its extra
+  teleportations make random circuits and Quantum Volume 8–18% longer than
+  with HQA, and with all cores linked and links to spare, the naive mapper
+  (QFT, Draper, Quantum Volume) or FGP-rOEE (random circuits) is still
+  shortest on several benchmarks.
+- Making HQA's time estimate also count how busy each link is (when its next
+  EPR pair is ready) gave longer circuits, not shorter, so it was left out.
 
 ![Sparse links](../benchmarks/multicore/charts/topology.svg)
 ![Strong scaling](../benchmarks/multicore/charts/strong.svg)

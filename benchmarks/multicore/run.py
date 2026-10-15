@@ -23,7 +23,8 @@ and one more that takes the circuits down to physical qubits:
   between teleportations (map_and_route), counting SWAPs as well.
 * latency: the same circuits, cores in a 2 × 5 grid, linked all to all or in
   a line, scheduled with 1, 2, 4 or unlimited channels (EPR pairs at once)
-  per link, with the default timing of CoreCircuit.schedule.
+  per link, with the default timing of CoreCircuit.schedule; with
+  "hqa-latency", HQA weighing how much each move delays its gate.
 
 Every mapper starts from the same OEE placement. Results go to
 results/multicore.csv, results/routing.csv and results/latency.csv; plot.py
@@ -45,6 +46,7 @@ from qevedo.compiler.multicore import map_and_route, map_to_cores  # noqa: E402
 
 METHODS = ("hqa", "fgp-roee", "naive")
 TOPOLOGY_METHODS = ("hqa", "hqa-uniform-cost", "fgp-roee", "naive")
+LATENCY_METHODS = ("hqa", "hqa-latency", "fgp-roee", "naive")
 OUT = Path(__file__).parent / "results" / "multicore.csv"
 ROUTING_OUT = Path(__file__).parent / "results" / "routing.csv"
 LATENCY_OUT = Path(__file__).parent / "results" / "latency.csv"
@@ -139,7 +141,7 @@ def latency() -> list[dict]:
     for topology in ("all-to-all", "line"):
         for benchmark in BENCHMARKS:
             n, pairs = two_qubit_gates(benchmark, 100)
-            for method in METHODS:
+            for method in LATENCY_METHODS:
                 result = map_and_route(
                     pairs, 10, 10, chip="grid:2x5", method=method, num_qubits=n, topology=topology
                 )

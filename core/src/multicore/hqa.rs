@@ -48,6 +48,16 @@
 //! * Ties in the Hungarian algorithm go to the lower-numbered gate and core.
 //! * Attraction looks [`HORIZON`](super::lookahead::HORIZON) slices ahead,
 //!   past which its terms are below rounding.
+//!
+//! Beyond the papers, the cost can also weigh time (`HqaOptions::latency`).
+//! The papers count teleportations, but a teleportation also delays the gate
+//! that needs it, and only delays on the critical path make a circuit
+//! longer. HQA keeps, for every qubit, when it would be free if gates and
+//! teleportations ran as soon as possible (two-qubit gates take 1, a hop
+//! `teleport_time`), and adds to the cost of putting a gate in a core
+//! `latency × (how much later the gate can start than if nothing moved)`, in
+//! teleportations. Between moving one qubit or the other, that favours the
+//! one that has been idle, whose teleportation overlaps other gates.
 
 use super::architecture::Architecture;
 use super::assignment::{Assignment, Mapping, occupancy};
@@ -64,13 +74,18 @@ use super::timeslices::Timeslices;
 const MOVE_TIE_BREAK: f64 = 0.01;
 
 /// Which terms the HQA cost uses.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HqaOptions {
     /// Attraction to where qubits are needed next (the papers' default).
     pub lookahead: bool,
     /// Count the links a qubit crosses to reach a core. Without it, every
     /// move costs one, as with all cores linked to all.
     pub hops: bool,
+    /// Weight of the delay a placement adds to its gate, in teleportations
+    /// (0: ignore time, as the papers do).
+    pub latency: f64,
+    /// A teleportation hop's duration, in two-qubit gates, for that delay.
+    pub teleport_time: f64,
 }
 
 impl Default for HqaOptions {
@@ -78,6 +93,8 @@ impl Default for HqaOptions {
         HqaOptions {
             lookahead: true,
             hops: true,
+            latency: 0.0,
+            teleport_time: 5.0,
         }
     }
 }
@@ -93,6 +110,9 @@ pub fn hqa(
     arch.check_fits(slices.qubits())?;
     let mut current = initial.clone();
     let mut assignments = Vec::with_capacity(slices.len());
+    // `ready[q]`: when qubit `q` is free, in two-qubit gate times, if gates
+    // and teleportations ran as soon as possible.
+    let mut ready = vec![0.0f64; slices.qubits()];
     for t in 0..slices.len() {
         let unfeasible: Vec<(usize, usize)> = slices
             .slice(t)
@@ -101,7 +121,16 @@ pub fn hqa(
             .copied()
             .collect();
         if !unfeasible.is_empty() {
-            current = place(slices, arch, t, &current, unfeasible, options)?;
+            let next = place(slices, arch, t, &current, unfeasible, &ready, options)?;
+            for q in 0..ready.len() {
+                ready[q] += options.teleport_time * arch.hops(current[q], next[q]) as f64;
+            }
+            current = next;
+        }
+        for &(a, b) in slices.slice(t) {
+            let start = ready[a].max(ready[b]);
+            ready[a] = start + 1.0;
+            ready[b] = start + 1.0;
         }
         assignments.push(current.clone());
     }
@@ -120,6 +149,7 @@ fn place(
     t: usize,
     previous: &[usize],
     mut gates: Vec<(usize, usize)>,
+    ready: &[f64],
     options: HqaOptions,
 ) -> Result<Assignment, String> {
     let mut core_of: Vec<Option<usize>> = previous.iter().map(|&c| Some(c)).collect();
@@ -161,6 +191,7 @@ fn place(
         gates,
         &mut core_of,
         &mut free,
+        ready,
         options,
     )?;
     for q in singles {
@@ -195,6 +226,7 @@ fn place_gates(
     mut gates: Vec<(usize, usize)>,
     core_of: &mut [Option<usize>],
     free: &mut [usize],
+    ready: &[f64],
     options: HqaOptions,
 ) -> Result<(), String> {
     let mut attr_a = vec![0.0; arch.cores];
@@ -239,7 +271,17 @@ fn place_gates(
                         } else {
                             0.0
                         };
-                    base - (attr_a[c] + attr_b[c]) / 2.0
+                    // How much later the gate can start than if nothing moved,
+                    // in teleportations.
+                    let delay = if options.latency > 0.0 {
+                        let arrive = |q: usize| {
+                            ready[q] + options.teleport_time * arch.hops(previous[q], c) as f64
+                        };
+                        (arrive(a).max(arrive(b)) - ready[a].max(ready[b])) / options.teleport_time
+                    } else {
+                        0.0
+                    };
+                    base - (attr_a[c] + attr_b[c]) / 2.0 + options.latency * delay
                 })
                 .collect();
             cost.push(row);
@@ -359,7 +401,7 @@ mod tests {
                 for lookahead in [true, false] {
                     let options = HqaOptions {
                         lookahead,
-                        hops: true,
+                        ..HqaOptions::default()
                     };
                     let mapping = hqa(&slices, &arch, &initial, options).unwrap();
                     mapping.validate(&arch, &slices).unwrap();
@@ -379,7 +421,7 @@ mod tests {
             &vec![0, 0, 1, 1],
             HqaOptions {
                 lookahead: false,
-                hops: true,
+                ..HqaOptions::default()
             },
         )
         .unwrap();
@@ -398,12 +440,34 @@ mod tests {
             &vec![0, 0, 1, 1],
             HqaOptions {
                 lookahead: false,
-                hops: true,
+                ..HqaOptions::default()
             },
         )
         .unwrap();
         mapping.validate(&arch, &slices).unwrap();
         assert_eq!(mapping.communications(), 2);
+    }
+
+    #[test]
+    fn the_latency_term_moves_the_qubit_that_has_been_idle() {
+        // q2 is busy in slice 0, q0 is not: for (q0, q2) in slice 1, moving
+        // q0 to q2's core overlaps q2's gate. Without the latency term the
+        // two choices tie and the lower core (q0's) wins.
+        let arch = Architecture::new(2, 3).unwrap();
+        let slices = Timeslices::from_pairs(4, &[(2, 3), (0, 2)]).unwrap();
+        let place = |latency: f64| {
+            let options = HqaOptions {
+                lookahead: false,
+                latency,
+                ..HqaOptions::default()
+            };
+            let mapping = hqa(&slices, &arch, &vec![0, 0, 1, 1], options).unwrap();
+            mapping.validate(&arch, &slices).unwrap();
+            assert_eq!(mapping.communications(), 1);
+            mapping.slices[1][0]
+        };
+        assert_eq!(place(0.0), 0);
+        assert_eq!(place(0.5), 1);
     }
 
     #[test]
