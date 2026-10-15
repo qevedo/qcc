@@ -36,9 +36,27 @@ use super::timeslices::Timeslices;
 use crate::ir::Instruction;
 use crate::routing::{CouplingGraph, SabreOptions, layout_and_route, route, route_ahead};
 
-/// How many timeslices past an epoch SABRE looks at, at most. Chosen on the
-/// benchmarks; 1 to 64 all give totals within 2%.
-const LOOK_AHEAD_SLICES: usize = 4;
+/// How to route inside the cores.
+#[derive(Clone, Copy, Debug)]
+pub struct PhysicalOptions {
+    pub sabre: SabreOptions,
+    /// Put a qubit arriving in a core next to its next partner (or where its
+    /// partner can land next to it). Without it, it takes the first free slot.
+    pub partner_slots: bool,
+    /// How many timeslices past an epoch SABRE looks at (0: none). The default,
+    /// 4, was chosen on the benchmarks; 1 to 64 all give totals within 2%.
+    pub look_ahead: usize,
+}
+
+impl Default for PhysicalOptions {
+    fn default() -> PhysicalOptions {
+        PhysicalOptions {
+            sabre: SabreOptions::default(),
+            partner_slots: true,
+            look_ahead: 4,
+        }
+    }
+}
 
 /// A multi-core circuit on physical qubits, ready to run.
 #[derive(Clone, Debug)]
@@ -68,7 +86,7 @@ pub fn physical_circuit(
     mapping: &Mapping,
     slices: &Timeslices,
     chip: &CouplingGraph,
-    options: &SabreOptions,
+    options: &PhysicalOptions,
 ) -> Result<PhysicalCircuit, String> {
     let arch = &mapping.architecture;
     if chip.qubits() != arch.qubits_per_core {
@@ -132,7 +150,7 @@ pub fn map_and_route(
     chip: &CouplingGraph,
     method: super::Method,
     timing: &super::Timing,
-    options: &SabreOptions,
+    options: &PhysicalOptions,
 ) -> Result<(Mapping, PhysicalCircuit), String> {
     let slices = Timeslices::from_instructions(qubits, circuit)?.fitted_to(arch);
     if method == super::Method::HqaLatency {
@@ -218,7 +236,7 @@ fn epochs(mapping: &Mapping) -> Vec<(usize, usize)> {
 struct Builder<'a> {
     arch: &'a Architecture,
     chip: &'a CouplingGraph,
-    options: &'a SabreOptions,
+    options: &'a PhysicalOptions,
     /// `slot_of[q]`: the physical qubit of circuit qubit `q` now.
     slot_of: Vec<usize>,
     /// `occupant[p]`: the circuit qubit on physical qubit `p`, if any.
@@ -233,7 +251,7 @@ impl<'a> Builder<'a> {
     fn new(
         arch: &'a Architecture,
         chip: &'a CouplingGraph,
-        options: &'a SabreOptions,
+        options: &'a PhysicalOptions,
         qubits: usize,
     ) -> Builder<'a> {
         Builder {
@@ -272,9 +290,15 @@ impl<'a> Builder<'a> {
             let local = local_circuit(work, &members);
             let routed = if local.is_empty() {
                 let in_order: Vec<usize> = (0..members.len()).collect();
-                route(&local, members.len(), self.chip, &in_order, self.options)?
+                route(
+                    &local,
+                    members.len(),
+                    self.chip,
+                    &in_order,
+                    &self.options.sabre,
+                )?
             } else {
-                layout_and_route(&local, members.len(), self.chip, self.options)?
+                layout_and_route(&local, members.len(), self.chip, &self.options.sabre)?
             };
             for (i, &q) in members.iter().enumerate() {
                 self.slot_of[q] = core * k + routed.initial_layout[i];
@@ -342,7 +366,7 @@ impl<'a> Builder<'a> {
                 self.chip,
                 &layout,
                 &ahead,
-                self.options,
+                &self.options.sabre,
             )?;
             self.emit_routed(core, &members, routed);
         }
@@ -365,14 +389,14 @@ impl<'a> Builder<'a> {
             local[q] = Some(i);
         }
         let mut out = Vec::new();
-        for t in end..slices.len().min(end + LOOK_AHEAD_SLICES) {
+        for t in end..slices.len().min(end + self.options.look_ahead) {
             for &(a, b) in slices.slice(t) {
                 if let (Some(la), Some(lb)) = (local[a], local[b])
                     && mapping.slices[t][a] == core
                     && mapping.slices[t][b] == core
                 {
                     out.push((la, lb));
-                    if out.len() == self.options.extended_set {
+                    if out.len() == self.options.sabre.extended_set {
                         return out;
                     }
                 }
@@ -440,6 +464,7 @@ impl<'a> Builder<'a> {
             let candidates = (core * k..(core + 1) * k).filter(|&p| free[p]);
             let local = |p: usize| p - core * k;
             let p = match partner_slot {
+                _ if !self.options.partner_slots => candidates.min(),
                 Some(s) => candidates.min_by_key(|&p| self.chip.distance(local(p), local(s))),
                 // No partner there yet: the free slot with most free
                 // neighbours, so that the partner can land next to it.
@@ -636,6 +661,17 @@ mod tests {
         out
     }
 
+    /// Default options with fewer layout trials, for speed.
+    fn quick() -> PhysicalOptions {
+        PhysicalOptions {
+            sabre: SabreOptions {
+                trials: 2,
+                ..SabreOptions::default()
+            },
+            ..PhysicalOptions::default()
+        }
+    }
+
     /// Run the physical circuit and the original on the same input and
     /// compare, checking that gates and SWAPs stay on coupled qubits of one
     /// core and teleportations go between cores.
@@ -645,11 +681,8 @@ mod tests {
         arch: &Architecture,
         chip: &CouplingGraph,
         method: Method,
+        options: &PhysicalOptions,
     ) {
-        let options = SabreOptions {
-            trials: 2,
-            ..SabreOptions::default()
-        };
         let (mapping, physical) = map_and_route(
             circuit,
             qubits,
@@ -657,7 +690,7 @@ mod tests {
             chip,
             method,
             &Timing::default(),
-            &options,
+            options,
         )
         .unwrap();
         let k = arch.qubits_per_core;
@@ -718,8 +751,15 @@ mod tests {
                 let qubits = arch.capacity() - trial % 3;
                 let circuit = random_circuit(&mut rng, qubits, 40);
                 for method in [Method::Hqa, Method::FgpRoee, Method::Naive] {
-                    check(&circuit, qubits, arch, chip, method);
+                    check(&circuit, qubits, arch, chip, method, &quick());
                 }
+                // Without the slot choice and the look-ahead, too.
+                let plain = PhysicalOptions {
+                    partner_slots: false,
+                    look_ahead: 0,
+                    ..quick()
+                };
+                check(&circuit, qubits, arch, chip, Method::Hqa, &plain);
             }
         }
     }
@@ -727,10 +767,7 @@ mod tests {
     #[test]
     fn hqa_latency_runs_no_slower_than_hqa() {
         let mut rng = TestRng::new(8);
-        let options = SabreOptions {
-            trials: 2,
-            ..SabreOptions::default()
-        };
+        let options = quick();
         for (arch, capacity) in [
             (Architecture::new(4, 4).unwrap(), 1),
             (Architecture::line(4, 4).unwrap(), 3),
@@ -764,7 +801,7 @@ mod tests {
             Instruction::gate("barrier", vec![0, 1, 2], vec![]),
             Instruction::gate("x", vec![2], vec![]),
         ];
-        check(&circuit, 3, &arch, &chip, Method::Hqa);
+        check(&circuit, 3, &arch, &chip, Method::Hqa, &quick());
         let measured = vec![
             Instruction::gate("cx", vec![0, 1], vec![]),
             Instruction {
@@ -774,7 +811,7 @@ mod tests {
                 clbits: vec![0],
             },
         ];
-        let options = SabreOptions::default();
+        let options = PhysicalOptions::default();
         let (_, physical) = map_and_route(
             &measured,
             2,
@@ -791,7 +828,7 @@ mod tests {
     #[test]
     fn errors() {
         let arch = Architecture::new(2, 3).unwrap();
-        let options = SabreOptions::default();
+        let options = PhysicalOptions::default();
         let wide = vec![Instruction::gate("ccx", vec![0, 1, 2], vec![])];
         assert!(
             map_and_route(

@@ -263,6 +263,8 @@ def map_and_route(
     timing: Timing | None = None,
     trials: int = 8,
     seed: int = 1,
+    partner_slots: bool = True,
+    look_ahead: int = 4,
 ) -> CoreCircuit:
     """Map ``circuit`` onto cores, as :func:`map_to_cores`, and route it inside them.
 
@@ -279,6 +281,11 @@ def map_and_route(
     free slot closest to its next partner. ``timing`` is what
     ``"hqa-latency"`` plans for, and what :meth:`CoreCircuit.schedule` uses
     by default.
+
+    For ablation experiments: ``partner_slots=False`` puts an arriving qubit
+    in the first free slot instead of next to its next partner, and
+    ``look_ahead`` is how many timeslices past each epoch SABRE looks at
+    (0: none).
 
     Raises ``ValueError`` as :func:`map_to_cores` does, and when the chip's
     couplings do not connect its qubits.
@@ -340,6 +347,8 @@ def map_and_route(
         astuple(timing or Timing()),
         trials,
         seed,
+        partner_slots,
+        look_ahead,
     )
     seconds = time.perf_counter() - start
     mapping = CoreMapping(

@@ -63,7 +63,7 @@ pub use baselines::{fgp_roee, naive};
 pub use bounds::random_circuit_bounds;
 pub use hqa::{HqaOptions, hqa};
 pub use lookahead::{HORIZON, attraction};
-pub use physical::{PhysicalCircuit, map_and_route, physical_circuit};
+pub use physical::{PhysicalCircuit, PhysicalOptions, map_and_route, physical_circuit};
 pub use schedule::{Schedule, Timing, mapping_duration, schedule};
 pub use timeslices::Timeslices;
 

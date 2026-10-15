@@ -171,7 +171,7 @@ fn route(
 /// timeslice, communications, moved qubits, instructions on physical qubits,
 /// initial layout, final layout, SWAPs, teleportations).
 #[pyfunction]
-#[pyo3(signature = (instructions, qubits, cores, qubits_per_core, method, links, chip_edges, timing=None, trials=8, seed=1))]
+#[pyo3(signature = (instructions, qubits, cores, qubits_per_core, method, links, chip_edges, timing=None, trials=8, seed=1, partner_slots=true, look_ahead=4))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn map_and_route(
     py: Python<'_>,
@@ -185,6 +185,8 @@ fn map_and_route(
     timing: Option<RawTiming>,
     trials: usize,
     seed: u64,
+    partner_slots: bool,
+    look_ahead: usize,
 ) -> PyResult<(
     Vec<usize>,
     Vec<Vec<usize>>,
@@ -204,10 +206,14 @@ fn map_and_route(
         Architecture::with_links(cores, qubits_per_core, &links).map_err(PyValueError::new_err)?;
     let chip = CouplingGraph::new(qubits_per_core, &chip_edges).map_err(PyValueError::new_err)?;
     let instructions = from_raw(instructions);
-    let options = SabreOptions {
-        trials,
-        seed,
-        ..SabreOptions::default()
+    let options = qcc::multicore::PhysicalOptions {
+        sabre: SabreOptions {
+            trials,
+            seed,
+            ..SabreOptions::default()
+        },
+        partner_slots,
+        look_ahead,
     };
     let (mapping, physical) = py
         .detach(|| {

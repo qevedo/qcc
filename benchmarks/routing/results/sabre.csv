@@ -1,0 +1,13 @@
+chip,benchmark,qubits,two_qubit_gates,qiskit_swaps,qevedo_swaps,qiskit_seconds,qevedo_seconds
+line 20,qft,20,380,185,179,0.0207,0.0336
+line 20,random,20,262,448,434,0.0046,0.0607
+line 20,quantum_volume,20,600,607,619,0.0073,0.1064
+line 20,cuccaro,20,145,35,46,0.002,0.0062
+grid 5x5,qft,25,600,206,196,0.0066,0.0523
+grid 5x5,random,25,375,246,232,0.0041,0.0628
+grid 5x5,quantum_volume,25,900,355,357,0.0051,0.1044
+grid 5x5,cuccaro,24,177,49,47,0.0032,0.0094
+heavy-hex 19,qft,19,342,170,146,0.0028,0.0313
+heavy-hex 19,random,19,259,218,213,0.003,0.0348
+heavy-hex 19,quantum_volume,19,513,252,259,0.0028,0.0581
+heavy-hex 19,cuccaro,18,129,35,46,0.002,0.0055

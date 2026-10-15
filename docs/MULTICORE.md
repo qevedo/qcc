@@ -136,7 +136,10 @@ as the original.
 The SABRE router is a module of its own (`core/src/routing/`) and routes any
 circuit on any connected chip; on 20-qubit lines, 5 × 5 grids and 19-qubit
 heavy-hex chips it inserts about as many SWAPs as Qiskit's `SabreLayout`
-(2774 against 2806 over QFT, random, Quantum Volume and Cuccaro circuits).
+(2774 against 2806 over QFT, random, Quantum Volume and Cuccaro circuits;
+`benchmarks/routing/vs_qiskit.py`, results in
+`benchmarks/routing/results/sabre.csv`). It is slower than Qiskit's, which
+is also written in Rust: 5–110 ms per circuit against 2–21 ms.
 
 ## Time on links of limited capacity
 
@@ -292,9 +295,10 @@ all), now with the qubits of each core coupled in a 2 × 5 grid or a line
   proposed. The exception is again the Cuccaro adder, where FGP-rOEE needs
   fewer teleportations (114 against 156), and on a line also fewer SWAPs.
 - Choosing the slot of an arriving qubit by its next partner, rather than
-  the first free slot, saves 20% of the SWAPs over all these runs; looking
+  the first free slot, saves 18% of the SWAPs over all these runs; looking
   at the next timeslices saves 10% more (any horizon from 1 to 64 slices
-  gives totals within 2%).
+  gives totals within 2%). `results/ablation.csv` has each variant
+  (`map_and_route(..., partner_slots=False, look_ahead=0)`).
 
 ### Duration with links of limited capacity
 

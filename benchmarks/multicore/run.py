@@ -25,10 +25,13 @@ and one more that takes the circuits down to physical qubits:
   a line, scheduled with 1, 2, 4 or unlimited channels (EPR pairs at once)
   per link, with the default Timing otherwise; "hqa-latency" (HQA weighing
   how much each move delays its gate) is mapped for each capacity.
+* ablation: the routing experiment's grid and line chips without choosing
+  the slot of an arriving qubit by its next partner, and with SABRE looking
+  0 to 64 timeslices past each epoch.
 
 Every mapper starts from the same OEE placement. Results go to
-results/multicore.csv, results/routing.csv and results/latency.csv; plot.py
-draws the first.
+results/{multicore,routing,latency,ablation}.csv; plot.py draws the
+first.
 """
 
 from __future__ import annotations
@@ -50,6 +53,9 @@ LATENCY_METHODS = ("hqa", "hqa-latency", "fgp-roee", "naive")
 OUT = Path(__file__).parent / "results" / "multicore.csv"
 ROUTING_OUT = Path(__file__).parent / "results" / "routing.csv"
 LATENCY_OUT = Path(__file__).parent / "results" / "latency.csv"
+ABLATION_OUT = Path(__file__).parent / "results" / "ablation.csv"
+#: (slot by next partner, timeslices SABRE looks past an epoch); (True, 4) is the default.
+ABLATIONS = ((False, 0), (True, 0), (True, 1), (True, 2), (True, 4), (True, 8), (True, 16), (True, 64))
 #: Channels per link; None is unlimited.
 CAPACITIES = (1, 2, 4, None)
 CHIPS = ("all-to-all", "grid:2x5", "line")
@@ -105,6 +111,7 @@ def main() -> None:
     write(OUT, rows)
     write(ROUTING_OUT, routing())
     write(LATENCY_OUT, latency())
+    write(ABLATION_OUT, ablation())
 
 
 def routing() -> list[dict]:
@@ -174,6 +181,42 @@ def latency() -> list[dict]:
                 print(
                     f"latency  {topology:10} {benchmark:15} {method:16} "
                     + " ".join(f"{r['duration']:8.0f}" for r in rows[-len(CAPACITIES) :]),
+                    flush=True,
+                )
+    return rows
+
+
+def ablation() -> list[dict]:
+    """The ablation experiment: SWAPs without the routing choices."""
+    rows = []
+    for chip in CHIPS[1:]:
+        for benchmark in BENCHMARKS:
+            n, pairs = two_qubit_gates(benchmark, 100)
+            for method in METHODS:
+                for partner_slots, look_ahead in ABLATIONS:
+                    result = map_and_route(
+                        pairs,
+                        10,
+                        10,
+                        chip=chip,
+                        method=method,
+                        num_qubits=n,
+                        partner_slots=partner_slots,
+                        look_ahead=look_ahead,
+                    )
+                    rows.append(
+                        {
+                            "benchmark": benchmark,
+                            "chip": chip,
+                            "method": method,
+                            "partner_slots": partner_slots,
+                            "look_ahead": look_ahead,
+                            "swaps": result.swaps,
+                        }
+                    )
+                print(
+                    f"ablation {chip:10} {benchmark:15} {method:16} "
+                    + " ".join(f"{r['swaps']:6}" for r in rows[-len(ABLATIONS) :]),
                     flush=True,
                 )
     return rows
