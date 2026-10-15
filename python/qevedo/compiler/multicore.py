@@ -55,6 +55,7 @@ __all__ = [
     "METHODS",
     "CoreCircuit",
     "CoreMapping",
+    "CoreSchedule",
     "map_and_route",
     "map_to_cores",
     "random_circuit_bounds",
@@ -175,6 +176,67 @@ class CoreCircuit:
     teleportations: int
     #: Time mapping and routing took, in seconds.
     seconds: float
+
+    def schedule(
+        self,
+        one_qubit: float = 0.1,
+        two_qubit: float = 1.0,
+        swap: float = 3.0,
+        measure: float = 5.0,
+        epr_pair: float = 10.0,
+        teleport: float = 5.0,
+        link_capacity: int = 1,
+    ) -> CoreSchedule:
+        """How long the circuit takes when links make EPR pairs at a limited rate.
+
+        Each operation takes a fixed time by kind. Each link between cores
+        has ``link_capacity`` channels; a channel holds one EPR pair and
+        makes a new one in ``epr_pair`` once its pair is used. A teleportation
+        uses one pair per link it crosses and then takes ``teleport`` per
+        link. Operations start as soon as their qubits (and, for
+        teleportations, a pair) are ready. The defaults are illustrative, in
+        units of a two-qubit gate: set them for the hardware at hand.
+        """
+        from qevedo.compiler import _core
+
+        raw = [
+            (inst.name, [q.index for q in inst.qubits], list(inst.params), [])
+            for inst in self.circuit.instructions
+        ]
+        start, duration, epr_wait, link_hops = _core.schedule(
+            raw,
+            self.mapping.cores,
+            self.mapping.qubits_per_core,
+            self.mapping.links,
+            one_qubit,
+            two_qubit,
+            swap,
+            measure,
+            epr_pair,
+            teleport,
+            link_capacity,
+        )
+        return CoreSchedule(
+            start=start,
+            duration=duration,
+            epr_wait=epr_wait,
+            link_hops={tuple(link): hops for link, hops in link_hops},
+        )
+
+
+@dataclass
+class CoreSchedule:
+    """When each instruction of a :class:`CoreCircuit` runs."""
+
+    #: ``start[i]``: when ``circuit.instructions[i]`` starts.
+    start: list[float]
+    #: When the last instruction ends.
+    duration: float
+    #: Total time teleportations waited for an EPR pair, beyond waiting for
+    #: their qubit.
+    epr_wait: float
+    #: How many teleportation hops crossed each link.
+    link_hops: dict[tuple[int, int], int]
 
 
 def map_and_route(

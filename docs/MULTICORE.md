@@ -31,6 +31,9 @@ mapping = map_to_cores(circuit, cores=4, qubits_per_core=10, topology=[(0, 1), (
 result = map_and_route(circuit, cores=4, qubits_per_core=9, chip="grid:3x3")
 print(result.teleportations, result.swaps)
 print(result.circuit.instructions[:5])   # cx, swap and teleport on q[0..35]
+
+# How long it takes when each link holds two EPR pairs at a time.
+print(result.schedule(link_capacity=2).duration)
 ```
 
 `map_to_cores` also takes a parsed `Circuit` or a list of two-qubit gates as
@@ -106,7 +109,9 @@ qubits of a core are coupled in a line, a grid or any other graph (the
    and measurements included, routed on its chip with **SABRE** (Li, Ding and
    Xie, ASPLOS 2019), which inserts SWAPs. Each core starts where the
    previous epoch left its qubits; the first epoch's layout comes from
-   SABRE's forward–backward layout search.
+   SABRE's forward–backward layout search. SABRE also looks at the gates
+   the core's qubits have together in the next four timeslices, so an
+   epoch ends with them ready.
 3. Between epochs, the qubits that change core are **teleported**. A qubit
    arriving in a core takes the free slot closest to the qubit it interacts
    with next, or, if that one has not arrived yet, the free slot with most
@@ -126,6 +131,27 @@ circuit on any connected chip; on 20-qubit lines, 5 × 5 grids and 19-qubit
 heavy-hex chips it inserts about as many SWAPs as Qiskit's `SabreLayout`
 (2774 against 2806 over QFT, random, Quantum Volume and Cuccaro circuits).
 
+## Time on links of limited capacity
+
+Counting teleportations treats every one alike, but a link makes EPR pairs
+at a limited rate, a few at a time: when many qubits cross the same link
+together, they wait. `CoreCircuit.schedule` (Rust: `multicore::schedule`)
+schedules the routed circuit as soon as possible under a simple model:
+
+- each operation takes a fixed time by kind (single- and two-qubit gates,
+  SWAPs, measurements);
+- each link has `link_capacity` channels; a channel holds one EPR pair and
+  makes a new one in `epr_pair` once its pair is used;
+- a teleportation uses one pair per link it crosses, one after the other,
+  and then takes `teleport` per link; the teleportations before a timeslice
+  run at once, as long as there are pairs.
+
+The defaults (in units of a two-qubit gate: SWAP 3, measurement 5, EPR pair
+10, the rest of a teleportation 5, one channel) are illustrative; set them
+for the hardware at hand. The result has the total duration, each
+instruction's start, the time teleportations waited for pairs and the hops
+per link.
+
 ## Code
 
 Rust, in `core/src/multicore/`, one concept per file:
@@ -142,13 +168,14 @@ Rust, in `core/src/multicore/`, one concept per file:
 | `hqa.rs` | Hungarian Qubit Assignment |
 | `baselines.rs` | the naive and FGP-rOEE mappers |
 | `physical.rs` | routing inside cores and teleportations: a circuit that runs |
+| `schedule.rs` | timing: how long that circuit takes on links of limited capacity |
 | `bounds.rs` | theoretical bounds for random circuits |
 
 and in `core/src/routing/`, `coupling.rs` (chips: coupling graphs and their
 distances) and `sabre.rs` (the SABRE router and layout search).
 
 Python: `python/qevedo/compiler/multicore.py` (API) and the
-`map_to_cores` and `map_and_route` bindings in `python/src/lib.rs`. Tests: the `tests` module of
+`map_to_cores`, `map_and_route` and `schedule` bindings in `python/src/lib.rs`. Tests: the `tests` module of
 each Rust file (including a randomized test of every method on 300 random
 architectures and circuits) and `python/tests/test_multicore.py`.
 
@@ -241,24 +268,54 @@ all), now with the qubits of each core coupled in a 2 × 5 grid or a line
 
 | chip | method | teleportations | SWAPs |
 |---|---|---|---|
-| 2 × 5 grid | HQA | **10193** | 16105 |
-| | FGP-rOEE | 13023 | 15020 |
-| | naive | 17790 | 11464 |
-| line | HQA | **10193** | 29459 |
-| | FGP-rOEE | 13023 | 29138 |
-| | naive | 17790 | 22938 |
+| 2 × 5 grid | HQA | **10193** | 13628 |
+| | FGP-rOEE | 13023 | 12411 |
+| | naive | 17790 | 10106 |
+| line | HQA | **10193** | 26943 |
+| | FGP-rOEE | 13023 | 25028 |
+| | naive | 17790 | 23480 |
 
 - Fewer teleportations can cost SWAPs: the naive mapper moves a qubit only
   to meet its partner, so it lands next to it, while HQA also moves qubits
   ahead of time, before their partners are there.
 - Still, HQA has the lowest total wherever one teleportation costs more than
-  2.1 SWAPs (the largest break-even over every benchmark and both chips),
+  1.4 SWAPs (the largest break-even over every benchmark and both chips),
   and a teleportation, which consumes an EPR pair shared across a link and
   needs a Bell measurement, costs far more than a local SWAP on any hardware
   proposed. The exception is again the Cuccaro adder, where FGP-rOEE needs
-  fewer teleportations (114 against 156) and HQA fewer SWAPs.
+  fewer teleportations (114 against 156), and on a line also fewer SWAPs.
 - Choosing the slot of an arriving qubit by its next partner, rather than
-  the first free slot, saves 18% of the SWAPs over all these runs.
+  the first free slot, saves 20% of the SWAPs over all these runs; looking
+  at the next timeslices saves 10% more (any horizon from 1 to 64 slices
+  gives totals within 2%).
+
+### Duration with links of limited capacity
+
+The same circuits routed on 2 × 5-grid cores, cores linked all to all or in
+a line, scheduled with the default timing and 1, 2, 4 or unlimited channels
+per link (`results/latency.csv`). Mean, over the five benchmarks, of each
+method's duration over HQA's (above 1: HQA finishes first):
+
+| links | channels | FGP-rOEE / HQA | naive / HQA |
+|---|---|---|---|
+| all to all | 1 | 1.25× | 1.71× |
+| | 2 | 1.01× | 1.29× |
+| | 4 | 0.97× | 1.07× |
+| | unlimited | 0.96× | 1.03× |
+| line | 1 | 2.14× | 2.97× |
+| | 2 | 1.71× | 2.40× |
+| | 4 | 1.41× | 2.03× |
+| | unlimited | 1.20× | 1.51× |
+
+- When pairs are scarce, fewer teleportations means a shorter circuit:
+  with one channel per link HQA finishes 1.25× sooner than FGP-rOEE with
+  cores linked all to all, and 2.1× sooner on a line, where every crossing
+  shares the few links (except, again, the Cuccaro adder).
+- When links have pairs to spare, teleportations run in parallel and the
+  count matters less: with all cores linked to all and four channels or
+  more, FGP-rOEE and even the naive mapper finish about as soon as HQA, or
+  slightly sooner. HQA minimizes teleportations, not the length of the
+  critical path; a latency-aware cost is a natural next step.
 
 ![Sparse links](../benchmarks/multicore/charts/topology.svg)
 ![Strong scaling](../benchmarks/multicore/charts/strong.svg)

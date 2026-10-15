@@ -210,6 +210,43 @@ fn map_and_route(
     ))
 }
 
+/// Schedule a multi-core circuit on physical qubits (as `map_and_route`
+/// returns it) on cores linked by `links`, under a timing model (see
+/// `qcc::multicore::Timing`). Returns (start of each instruction, duration,
+/// time teleportations waited for EPR pairs, hops per link).
+#[pyfunction]
+#[pyo3(signature = (instructions, cores, qubits_per_core, links, one_qubit, two_qubit, swap, measure, epr_pair, teleport, link_capacity))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn schedule(
+    instructions: Vec<Raw>,
+    cores: usize,
+    qubits_per_core: usize,
+    links: Vec<(usize, usize)>,
+    one_qubit: f64,
+    two_qubit: f64,
+    swap: f64,
+    measure: f64,
+    epr_pair: f64,
+    teleport: f64,
+    link_capacity: usize,
+) -> PyResult<(Vec<f64>, f64, f64, Vec<((usize, usize), usize)>)> {
+    use qcc::multicore::{Architecture, Timing};
+    let arch =
+        Architecture::with_links(cores, qubits_per_core, &links).map_err(PyValueError::new_err)?;
+    let timing = Timing {
+        one_qubit,
+        two_qubit,
+        swap,
+        measure,
+        epr_pair,
+        teleport,
+        link_capacity,
+    };
+    let s = qcc::multicore::schedule(&from_raw(instructions), &arch, &timing)
+        .map_err(PyValueError::new_err)?;
+    Ok((s.start, s.duration, s.epr_wait, s.link_hops))
+}
+
 /// Lower and upper bounds on non-local communications for a random circuit
 /// with `two_qubit_gates` gates on `qubits` qubits over `cores` cores.
 #[pyfunction]
@@ -225,5 +262,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(random_circuit_bounds, m)?)?;
     m.add_function(wrap_pyfunction!(route, m)?)?;
     m.add_function(wrap_pyfunction!(map_and_route, m)?)?;
+    m.add_function(wrap_pyfunction!(schedule, m)?)?;
     Ok(())
 }

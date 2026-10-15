@@ -90,6 +90,29 @@ pub fn route(
     Router::new(circuit, logical, graph, initial, options).run()
 }
 
+/// [`route`], also looking at `ahead`: two-qubit gates (pairs of logical
+/// qubits) that will run after `circuit`. They are not routed, but they join
+/// the extended set when the circuit's own gates run out, so the last SWAPs
+/// also prepare for what comes next.
+pub fn route_ahead(
+    circuit: &[Instruction],
+    logical: usize,
+    graph: &CouplingGraph,
+    initial: &[usize],
+    ahead: &[(usize, usize)],
+    options: &SabreOptions,
+) -> Result<Routed, String> {
+    check(circuit, logical, graph)?;
+    if initial.len() != logical || ahead.iter().any(|&(a, b)| a.max(b) >= logical) {
+        return Err(format!(
+            "the layout or the gates ahead do not match the {logical} qubits of the circuit"
+        ));
+    }
+    let mut router = Router::new(circuit, logical, graph, initial, options);
+    router.ahead = ahead;
+    router.run()
+}
+
 /// Find an initial layout with SABRE's forward–backward search and route.
 pub fn layout_and_route(
     circuit: &[Instruction],
@@ -182,6 +205,8 @@ struct Router<'a> {
     out: Vec<Instruction>,
     swaps: usize,
     initial: Vec<usize>,
+    /// Gates after the circuit, for the extended set only.
+    ahead: &'a [(usize, usize)],
 }
 
 impl<'a> Router<'a> {
@@ -208,6 +233,7 @@ impl<'a> Router<'a> {
             out: Vec::with_capacity(circuit.len()),
             swaps: 0,
             initial: initial.to_vec(),
+            ahead: &[],
         }
     }
 
@@ -351,6 +377,8 @@ impl<'a> Router<'a> {
                 }
             }
         }
+        let room = self.options.extended_set - out.len();
+        out.extend(self.ahead.iter().take(room));
         out
     }
 
@@ -515,6 +543,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn gates_ahead_steer_but_are_not_routed() {
+        let mut rng = TestRng::new(6);
+        let graph = CouplingGraph::grid(2, 3);
+        let identity: Vec<usize> = (0..6).collect();
+        for seed in 0..5 {
+            let circuit = random_circuit(&mut rng, 6, 20);
+            let ahead: Vec<(usize, usize)> = (0..6).map(|q| (q, (q + 3) % 6)).collect();
+            let options = SabreOptions {
+                seed,
+                ..SabreOptions::default()
+            };
+            let routed = route_ahead(&circuit, 6, &graph, &identity, &ahead, &options).unwrap();
+            assert_eq!(routed.instructions.len(), circuit.len() + routed.swaps);
+            check_equivalent(&circuit, &routed, 6);
+        }
+        assert!(
+            route_ahead(
+                &[],
+                6,
+                &graph,
+                &identity,
+                &[(0, 6)],
+                &SabreOptions::default()
+            )
+            .is_err()
+        );
     }
 
     #[test]

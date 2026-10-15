@@ -22,7 +22,9 @@
 //!    qubits when the cores are not all-to-all inside: SWAPs routed with
 //!    SABRE inside each core and teleportations between cores
 //!    ([`map_and_route`] does steps 2 to 5 at once).
-//! 6. [`random_circuit_bounds`] gives the theoretical bounds for random
+//! 6. [`schedule`] works out how long that circuit takes when each link
+//!    makes EPR pairs at a limited rate, on a limited number of channels.
+//! 7. [`random_circuit_bounds`] gives the theoretical bounds for random
 //!    circuits, to put the numbers in context.
 //!
 //! [`map`] runs the whole pipeline for a [`Method`].
@@ -40,6 +42,7 @@
 //! | `hqa.rs` | Hungarian Qubit Assignment |
 //! | `baselines.rs` | the naive and FGP-rOEE mappers |
 //! | `physical.rs` | routing inside cores and teleportations: a circuit that runs |
+//! | `schedule.rs` | timing: how long that circuit takes on links of limited capacity |
 //! | `bounds.rs` | theoretical bounds for random circuits |
 
 mod architecture;
@@ -51,6 +54,7 @@ pub mod hungarian;
 mod lookahead;
 pub mod oee;
 mod physical;
+mod schedule;
 mod timeslices;
 
 pub use architecture::Architecture;
@@ -60,6 +64,7 @@ pub use bounds::random_circuit_bounds;
 pub use hqa::{HqaOptions, hqa};
 pub use lookahead::{HORIZON, attraction};
 pub use physical::{PhysicalCircuit, map_and_route, physical_circuit};
+pub use schedule::{Schedule, Timing, schedule};
 pub use timeslices::Timeslices;
 
 /// A mapping algorithm.

@@ -221,3 +221,18 @@ def test_chip_errors():
     with pytest.raises(ValueError, match="unknown mapping method"):
         map_and_route(QFT_LIKE, cores=2, qubits_per_core=4, method="magic")
     assert topology_links("grid:2x2", 4) == [(0, 1), (0, 2), (1, 3), (2, 3)]
+
+
+def test_schedules_wait_for_epr_pairs_on_busy_links():
+    # Every gate splits the two cores at first: qubits must cross the link.
+    pairs = [(0, 4), (1, 5), (2, 6), (3, 7), (0, 1), (2, 3), (4, 5), (6, 7)] * 3
+    result = map_and_route(pairs, cores=2, qubits_per_core=4, chip="all-to-all")
+    one = result.schedule(link_capacity=1)
+    many = result.schedule(link_capacity=8)
+    assert len(one.start) == len(result.circuit.instructions)
+    assert sum(one.link_hops.values()) == result.teleportations
+    assert result.teleportations > 1
+    assert one.duration > many.duration
+    assert many.epr_wait < one.epr_wait
+    with pytest.raises(ValueError, match="channel"):
+        result.schedule(link_capacity=0)

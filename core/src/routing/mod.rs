@@ -6,7 +6,8 @@
 //! every two-qubit gate runs on coupled qubits, with as few SWAPs as it can.
 //!
 //! [`layout_and_route`] chooses the layout and routes with SABRE
-//! ([`sabre`]); [`route`] routes from a given layout. Both return a
+//! ([`sabre`]); [`route`] routes from a given layout, and [`route_ahead`]
+//! also prepares for gates that come after the circuit. Both return a
 //! [`Routed`] circuit on physical qubits with the initial and final layouts.
 //!
 //! | file | what it holds |
@@ -18,4 +19,4 @@ mod coupling;
 pub mod sabre;
 
 pub use coupling::CouplingGraph;
-pub use sabre::{Routed, SabreOptions, layout_and_route, route};
+pub use sabre::{Routed, SabreOptions, layout_and_route, route, route_ahead};

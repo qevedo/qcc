@@ -21,9 +21,13 @@ and one more that takes the circuits down to physical qubits:
 * routing: 100 qubits on 10 cores of 10, with the qubits of each core coupled
   all to all, in a 2 × 5 grid or in a line. Each core is routed with SABRE
   between teleportations (map_and_route), counting SWAPs as well.
+* latency: the same circuits, cores in a 2 × 5 grid, linked all to all or in
+  a line, scheduled with 1, 2, 4 or unlimited channels (EPR pairs at once)
+  per link, with the default timing of CoreCircuit.schedule.
 
 Every mapper starts from the same OEE placement. Results go to
-results/multicore.csv and results/routing.csv; plot.py draws the first.
+results/multicore.csv, results/routing.csv and results/latency.csv; plot.py
+draws the first.
 """
 
 from __future__ import annotations
@@ -43,6 +47,9 @@ METHODS = ("hqa", "fgp-roee", "naive")
 TOPOLOGY_METHODS = ("hqa", "hqa-uniform-cost", "fgp-roee", "naive")
 OUT = Path(__file__).parent / "results" / "multicore.csv"
 ROUTING_OUT = Path(__file__).parent / "results" / "routing.csv"
+LATENCY_OUT = Path(__file__).parent / "results" / "latency.csv"
+#: Channels per link; None is unlimited.
+CAPACITIES = (1, 2, 4, None)
 CHIPS = ("all-to-all", "grid:2x5", "line")
 
 
@@ -95,6 +102,7 @@ def main() -> None:
                 )
     write(OUT, rows)
     write(ROUTING_OUT, routing())
+    write(LATENCY_OUT, latency())
 
 
 def routing() -> list[dict]:
@@ -120,6 +128,39 @@ def routing() -> list[dict]:
                 print(
                     f"routing  {chip:10} {benchmark:15} {method:16} {result.teleportations:7} "
                     f"teleportations {result.swaps:7} swaps {result.seconds:8.3f} s",
+                    flush=True,
+                )
+    return rows
+
+
+def latency() -> list[dict]:
+    """The latency experiment: how long each mapping takes per link capacity."""
+    rows = []
+    for topology in ("all-to-all", "line"):
+        for benchmark in BENCHMARKS:
+            n, pairs = two_qubit_gates(benchmark, 100)
+            for method in METHODS:
+                result = map_and_route(
+                    pairs, 10, 10, chip="grid:2x5", method=method, num_qubits=n, topology=topology
+                )
+                for capacity in CAPACITIES:
+                    schedule = result.schedule(link_capacity=capacity or len(pairs))
+                    rows.append(
+                        {
+                            "benchmark": benchmark,
+                            "topology": topology,
+                            "chip": "grid:2x5",
+                            "method": method,
+                            "link_capacity": capacity or "unlimited",
+                            "teleportations": result.teleportations,
+                            "swaps": result.swaps,
+                            "duration": schedule.duration,
+                            "epr_wait": schedule.epr_wait,
+                        }
+                    )
+                print(
+                    f"latency  {topology:10} {benchmark:15} {method:16} "
+                    + " ".join(f"{r['duration']:8.0f}" for r in rows[-len(CAPACITIES) :]),
                     flush=True,
                 )
     return rows

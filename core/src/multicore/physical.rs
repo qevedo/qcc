@@ -10,7 +10,8 @@
 //!    qubit changes core.
 //! 2. Inside each epoch, each core runs its part of the circuit on its own
 //!    chip, routed with SABRE ([`crate::routing`]), which inserts SWAPs. Each
-//!    core starts where the previous epoch left its qubits.
+//!    core starts where the previous epoch left its qubits, and SABRE also
+//!    looks at the gates its qubits have next, in the following epochs.
 //! 3. Between epochs, the qubits that change core are teleported. A qubit
 //!    arriving in a core takes a free slot close to the qubit it will interact
 //!    with next.
@@ -33,7 +34,11 @@ use super::architecture::Architecture;
 use super::assignment::Mapping;
 use super::timeslices::Timeslices;
 use crate::ir::Instruction;
-use crate::routing::{CouplingGraph, SabreOptions, layout_and_route, route};
+use crate::routing::{CouplingGraph, SabreOptions, layout_and_route, route, route_ahead};
+
+/// How many timeslices past an epoch SABRE looks at, at most. Chosen on the
+/// benchmarks; 1 to 64 all give totals within 2%.
+const LOOK_AHEAD_SLICES: usize = 4;
 
 /// A multi-core circuit on physical qubits, ready to run.
 #[derive(Clone, Debug)]
@@ -97,13 +102,13 @@ pub fn physical_circuit(
     }
 
     let assignment_at = |t: usize| mapping.slices.get(t).unwrap_or(&mapping.initial);
-    for (e, &(start, _)) in epochs.iter().enumerate() {
+    for (e, &(start, end)) in epochs.iter().enumerate() {
         let assignment = assignment_at(start);
         if e == 0 {
             builder.first_epoch(&work[0], assignment, &mapping.initial)?;
         } else {
             builder.teleport(assignment, slices, start);
-            builder.epoch(&work[e], assignment)?;
+            builder.epoch(&work[e], assignment, mapping, slices, end)?;
         }
     }
     Ok(PhysicalCircuit {
@@ -295,7 +300,14 @@ impl<'a> Builder<'a> {
     }
 
     /// A later epoch: route each core from where its qubits are.
-    fn epoch(&mut self, work: &[&Instruction], assignment: &[usize]) -> Result<(), String> {
+    fn epoch(
+        &mut self,
+        work: &[&Instruction],
+        assignment: &[usize],
+        mapping: &Mapping,
+        slices: &Timeslices,
+        end: usize,
+    ) -> Result<(), String> {
         let k = self.arch.qubits_per_core;
         for core in 0..self.arch.cores {
             let members = Self::members(assignment, core);
@@ -307,10 +319,50 @@ impl<'a> Builder<'a> {
                 .iter()
                 .map(|&q| self.slot_of[q] - core * k)
                 .collect();
-            let routed = route(&local, members.len(), self.chip, &layout, self.options)?;
+            let ahead = self.ahead(&members, core, mapping, slices, end);
+            let routed = route_ahead(
+                &local,
+                members.len(),
+                self.chip,
+                &layout,
+                &ahead,
+                self.options,
+            )?;
             self.emit_routed(core, &members, routed);
         }
         Ok(())
+    }
+
+    /// The next gates, from timeslice `end` on, between `members` of `core`
+    /// that are still in it then, relabelled to `0..members.len()`: SABRE
+    /// looks at them to leave the core ready for the next epochs.
+    fn ahead(
+        &self,
+        members: &[usize],
+        core: usize,
+        mapping: &Mapping,
+        slices: &Timeslices,
+        end: usize,
+    ) -> Vec<(usize, usize)> {
+        let mut local = vec![None; mapping.initial.len()];
+        for (i, &q) in members.iter().enumerate() {
+            local[q] = Some(i);
+        }
+        let mut out = Vec::new();
+        for t in end..slices.len().min(end + LOOK_AHEAD_SLICES) {
+            for &(a, b) in slices.slice(t) {
+                if let (Some(la), Some(lb)) = (local[a], local[b])
+                    && mapping.slices[t][a] == core
+                    && mapping.slices[t][b] == core
+                {
+                    out.push((la, lb));
+                    if out.len() == self.options.extended_set {
+                        return out;
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Emit a core's routed circuit on physical qubits and follow its SWAPs.
