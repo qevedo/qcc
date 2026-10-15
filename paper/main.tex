@@ -80,9 +80,9 @@ extends them towards circuits that can run:
   physical qubits with SWAPs and teleportations (Section~\ref{sec:routing});
 \item a timing model of links with a limited supply of EPR pairs, and a
   latency-aware HQA (Section~\ref{sec:latency});
-\item a comparison with TeleSABRE~\cite{russo2025telesabre}, a recent
-  multi-core router, using its reference implementation
-  (Section~\ref{sec:telesabre}).
+\item communication through fixed ports, and a comparison with
+  TeleSABRE~\cite{russo2025telesabre}, a recent multi-core router, using its
+  reference implementation (Section~\ref{sec:telesabre}).
 \end{itemize}
 
 Everything is in the \texttt{qevedo-compiler} package (repository
@@ -307,49 +307,68 @@ with at most \latencyExtraTeleportations{} more teleportations than HQA. The
 naive mapper remains faster on some benchmarks when links have pairs to
 spare, and FGP-rOEE on the Cuccaro adder.
 
-\section{Comparison with TeleSABRE}
+\section{Communication qubits and TeleSABRE}
 \label{sec:telesabre}
 
-TeleSABRE~\cite{russo2025telesabre} extends SABRE to multi-core chips: next
-to SWAPs, it can teleport a qubit or run a remote gate (telegate) through
-communication qubits at fixed places, each using one EPR pair. We ran its
-reference implementation, with its default configuration, on its device~H
-(6 cores of $4\times4$ qubits in a $2\times3$ grid of cores, one link between
-neighbouring cores) and mapped the same circuits onto the same machine with
-our toolkit. The circuits are TeleSABRE's own 64-qubit MQT Bench circuits and
-the 64-qubit circuits of Section~\ref{sec:reproduction}.
-Table~\ref{tab:telesabre} compares the EPR pairs used. The comparison
-favours our model in one respect: it leaves communication qubits abstract, so
-a qubit can teleport from any slot, which is why we do not compare SWAPs.
+So far a qubit could teleport from any slot of its core to any free slot of
+another, as if every qubit could reach every link. On hardware, a link ends
+at a few communication qubits. With \emph{ports}, each link meets each of its
+two cores at one physical qubit: to cross a link, a qubit is routed with
+SWAPs onto its core's port, and it lands on the other core's port, which is
+emptied first by moving the nearest free slot there. A move between cores
+that are not linked crosses the links one by one. As in
+TeleSABRE~\cite{russo2025telesabre}, the mapper keeps one slot free in every
+core, so a core can take a qubit in before another leaves. The moves before a
+timeslice run one after another, each when its next core, on any shortest
+path, has room. When every next core is full (two qubits crossing between
+full cores, say), two qubits exchange places across a link, with a
+teleportation each way at once; if they are not both moving that way, one
+moves back later, at the cost of teleportations the mapping did not count.
+In a test on 60 random machines and circuits filled to capacity, with three
+mappers each, no teleportations were added. Our tests simulate these
+circuits too.
+
+TeleSABRE extends SABRE to multi-core chips: next to SWAPs, it can teleport a
+qubit or run a remote gate (telegate) through communication qubits at fixed
+places, each using one EPR pair. We ran its reference implementation, with
+its default configuration, on its device~H: 6 cores of $4\times4$ qubits in a
+$2\times3$ grid of cores, one link between neighbouring cores. We mapped the
+same circuits onto the same machine with ports at the same physical qubits
+as device~H's links. The circuits are TeleSABRE's own 64-qubit MQT Bench
+circuits and the 64-qubit circuits of Section~\ref{sec:reproduction}.
+Table~\ref{tab:telesabre} compares EPR pairs and SWAPs.
 
 \begin{table}[t]
 \centering
+\small
 \input{generated/table-telesabre}
-\caption{EPR pairs used on TeleSABRE's device~H (teleportations and
-telegates for TeleSABRE, teleportations for our mappers). ``fails'': every
-one of TeleSABRE's 100 attempts deadlocked.}
+\caption{EPR pairs / SWAPs on TeleSABRE's device~H (teleportations plus
+telegates for TeleSABRE). Our mappers route through ports at device~H's
+communication qubits; the last column is HQA with abstract communication
+(EPR pairs only). $^*$: TeleSABRE's MQT Bench circuits. ``fails'': every one
+of TeleSABRE's 100 attempts deadlocked.}
 \label{tab:telesabre}
 \end{table}
 
-TeleSABRE does not complete \telesabreFailed{} of the \telesabreCircuits{}
-circuits, the random circuits and Quantum Volume, where every attempt
-deadlocks. On the others, HQA uses \telesabreHqaRatio{} as many EPR pairs as
-TeleSABRE (geometric mean), and fewer on every circuit. This differs from
-TeleSABRE's own comparison, in which it needs 28\% fewer inter-core
-operations than HQA on a similar 96-qubit machine. We expect most of the gap to come from
-the models rather than the algorithms: ours lets a qubit teleport from any
-slot and any number of qubits cross a link before a timeslice, while
-TeleSABRE must bring each qubit next to the one communication qubit of a
-link and keep a free qubit in every core, constraints that can cost
-teleportations as well as SWAPs. Our counts are therefore optimistic for
-such hardware; modelling communication qubits explicitly, and routing to
-them, is the next step for a like-for-like comparison. HQA-latency minimizes
-time rather than EPR pairs, so it uses more than HQA on some circuits.
+TeleSABRE completes \telesabreCompleted{} of the \telesabreCircuits{} circuits;
+on the random circuits and Quantum Volume every attempt deadlocks. On the
+\telesabreCompleted{}, HQA with ports uses \telesabreEprRatio{} as many EPR
+pairs and \telesabreSwapRatio{} as many SWAPs as TeleSABRE (geometric means),
+and fewer of both on every circuit. TeleSABRE's own comparison found the
+opposite, 28\% fewer inter-core operations than HQA on a similar 96-qubit
+machine; we cannot tell from the paper how HQA's mapping was turned into
+operations there. Two differences remain between the models: TeleSABRE
+needs its communication qubits free when they teleport, while our ports can
+hold data between teleportations, and our exchanges between full cores
+assume a teleportation each way at once.
 
 \section{Discussion and limitations}
 
-The timing model ignores noise, the time to route inside a core, and the
-communication qubits' own placement; durations should be read as relative.
+The timing model ignores noise, and its durations, with illustrative
+values, should be read as relative. Sections~\ref{sec:routing}
+and~\ref{sec:latency} leave communication qubits abstract; with ports
+(Section~\ref{sec:telesabre}) qubits need many more SWAPs, which the latency
+experiments do not include yet.
 The benchmarks are those of~\cite{escofet2025revisiting}; other circuit
 families may behave differently, as the Cuccaro adder already does. Our
 choices for odd core sizes and sparse links are ours, not the original

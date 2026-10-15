@@ -286,16 +286,16 @@ def sabre(numbers: Numbers) -> None:
 
 
 def telesabre(numbers: Numbers) -> None:
-    """EPR pairs against TeleSABRE's reference implementation, on its device H."""
+    """EPR pairs and SWAPs against TeleSABRE's reference implementation, on its device H."""
     rows = load(HERE.parent / "benchmarks" / "telesabre" / "results" / "telesabre.csv")
     names = {
-        "ae": "Amplitude estimation",
+        "ae": "Amplitude est.",
         "ghz": "GHZ",
         "graphstate": "Graph state",
         "qnn": "QNN",
         **BENCHMARKS,
     }
-    methods = ("telesabre", "hqa", "hqa-latency", "fgp-roee")
+    methods = ("telesabre", "hqa+ports", "hqa-latency+ports", "fgp-roee+ports", "hqa")
     by = defaultdict(dict)
     order = []
     for r in rows:
@@ -304,7 +304,7 @@ def telesabre(numbers: Numbers) -> None:
             order.append(key)
         by[key][r["method"]] = r
     lines = []
-    ratios = []
+    epr, swaps = [], []
     failed = 0
     for k, key in enumerate(order):
         suite, circuit = key
@@ -313,23 +313,31 @@ def telesabre(numbers: Numbers) -> None:
         cells = []
         for m in methods:
             r = by[key][m]
-            cells.append(r["epr_pairs"] if r["success"] == "True" else "fails")
-        ts = by[key]["telesabre"]
+            if r["success"] != "True":
+                cells.append("fails")
+            elif m == "hqa":
+                cells.append(r["epr_pairs"])
+            else:
+                cells.append(f"{r['epr_pairs']} / {r['swaps']}")
+        ts, ours = by[key]["telesabre"], by[key]["hqa+ports"]
         if ts["success"] == "True":
-            ratios.append(int(by[key]["hqa"]["epr_pairs"]) / int(ts["epr_pairs"]))
+            epr.append(int(ours["epr_pairs"]) / int(ts["epr_pairs"]))
+            swaps.append(int(ours["swaps"]) / int(ts["swaps"]))
         else:
             failed += 1
-        source = "MQT Bench" if suite == "telesabre" else "ours"
-        lines.append(f"{names[circuit]} ({source}) & " + " & ".join(cells) + " \\\\")
+        source = "$^*$" if suite == "telesabre" else ""
+        lines.append(f"{names[circuit]}{source} & " + " & ".join(cells) + " \\\\")
     table(
         "table-telesabre",
-        "Circuit & TeleSABRE & HQA & HQA-latency & FGP-rOEE",
-        "lrrrr",
+        "Circuit & TeleSABRE & HQA & HQA-latency & FGP-rOEE & HQA, abstract",
+        "lrrrrr",
         lines,
     )
-    numbers.add("telesabreHqaRatio", times(statistics.geometric_mean(ratios)))
+    numbers.add("telesabreEprRatio", times(statistics.geometric_mean(epr)))
+    numbers.add("telesabreSwapRatio", times(statistics.geometric_mean(swaps)))
     numbers.add("telesabreFailed", str(failed))
     numbers.add("telesabreCircuits", str(len(order)))
+    numbers.add("telesabreCompleted", str(len(epr)))
 
 
 def main() -> None:

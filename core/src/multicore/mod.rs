@@ -42,6 +42,7 @@
 //! | `hqa.rs` | Hungarian Qubit Assignment |
 //! | `baselines.rs` | the naive and FGP-rOEE mappers |
 //! | `physical.rs` | routing inside cores and teleportations: a circuit that runs |
+//! | `ports.rs` | communication through fixed ports, one per link in each core |
 //! | `schedule.rs` | timing: how long that circuit takes on links of limited capacity |
 //! | `bounds.rs` | theoretical bounds for random circuits |
 
@@ -54,6 +55,7 @@ pub mod hungarian;
 mod lookahead;
 pub mod oee;
 mod physical;
+mod ports;
 mod schedule;
 mod timeslices;
 
@@ -64,6 +66,7 @@ pub use bounds::random_circuit_bounds;
 pub use hqa::{HqaOptions, hqa};
 pub use lookahead::{HORIZON, attraction};
 pub use physical::{PhysicalCircuit, PhysicalOptions, map_and_route, physical_circuit};
+pub use ports::Ports;
 pub use schedule::{Schedule, Timing, mapping_duration, schedule};
 pub use timeslices::Timeslices;
 

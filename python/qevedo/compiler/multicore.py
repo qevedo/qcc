@@ -265,6 +265,7 @@ def map_and_route(
     seed: int = 1,
     partner_slots: bool = True,
     look_ahead: int = 4,
+    ports: str | dict[tuple[int, int], tuple[int, int]] | None = None,
 ) -> CoreCircuit:
     """Map ``circuit`` onto cores, as :func:`map_to_cores`, and route it inside them.
 
@@ -281,6 +282,14 @@ def map_and_route(
     free slot closest to its next partner. ``timing`` is what
     ``"hqa-latency"`` plans for, and what :meth:`CoreCircuit.schedule` uses
     by default.
+
+    ``ports`` fixes where links meet the cores, as on hardware: a qubit must
+    then be routed onto its core's port of a link to teleport, and lands on
+    the other core's port; the mapper keeps one slot free in every core.
+    ``"central"`` puts the ports on the most central slots of each chip; a
+    dict maps each link ``(a, b)`` to the slots of its port in cores ``a`` and
+    ``b``. By default (``None``), a qubit teleports from any slot to any free
+    one.
 
     For ablation experiments: ``partner_slots=False`` puts an arriving qubit
     in the first free slot instead of next to its next partner, and
@@ -324,6 +333,7 @@ def map_and_route(
     ]
     links = topology_links(topology, cores)
     chip_edges = topology_links(chip, qubits_per_core)
+    port_slots = _port_slots(ports, links)
     start = time.perf_counter()
     (
         initial,
@@ -349,6 +359,8 @@ def map_and_route(
         seed,
         partner_slots,
         look_ahead,
+        port_slots,
+        ports == "central",
     )
     seconds = time.perf_counter() - start
     mapping = CoreMapping(
@@ -390,6 +402,26 @@ def map_and_route(
         seconds=seconds,
         timing=timing or Timing(),
     )
+
+
+def _port_slots(
+    ports: str | dict[tuple[int, int], tuple[int, int]] | None, links: list[tuple[int, int]]
+) -> list[tuple[int, int]] | None:
+    """Port slots per link, in the core's order of links (sorted, smaller core first)."""
+    if ports is None or ports == "central":
+        return None
+    if isinstance(ports, str):
+        raise ValueError(f"unknown ports {ports!r}: use 'central' or a dict of links to slots")
+    out = []
+    for a, b in sorted({(min(a, b), max(a, b)) for a, b in links}):
+        if (a, b) in ports:
+            out.append(tuple(ports[(a, b)]))
+        elif (b, a) in ports:
+            sb, sa = ports[(b, a)]
+            out.append((sa, sb))
+        else:
+            raise ValueError(f"no port for the link ({a}, {b})")
+    return out
 
 
 def topology_links(topology: Topology, cores: int) -> list[tuple[int, int]]:

@@ -29,15 +29,19 @@
 //! possible, which only fails when qubits swap places between full cores.
 //! A teleportation between cores that are not linked is one instruction, but
 //! counts one teleportation per link it crosses.
+//!
+//! With [`Ports`] ([`PhysicalOptions::ports`]), communication happens at fixed
+//! places instead, as on hardware: see [`super::ports`].
 
 use super::architecture::Architecture;
 use super::assignment::Mapping;
+use super::ports::Ports;
 use super::timeslices::Timeslices;
 use crate::ir::Instruction;
 use crate::routing::{CouplingGraph, SabreOptions, layout_and_route, route, route_ahead};
 
 /// How to route inside the cores.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PhysicalOptions {
     pub sabre: SabreOptions,
     /// Put a qubit arriving in a core next to its next partner (or where its
@@ -46,6 +50,11 @@ pub struct PhysicalOptions {
     /// How many timeslices past an epoch SABRE looks at (0: none). The default,
     /// 4, was chosen on the benchmarks; 1 to 64 all give totals within 2%.
     pub look_ahead: usize,
+    /// Where each link meets each core's chip ([`Ports`]). With ports, a qubit
+    /// must be routed onto its core's port of a link to teleport, and lands on
+    /// the other core's port; the mapper then keeps a slot free in every core.
+    /// Without (the default), a qubit teleports from any slot to any free one.
+    pub ports: Option<Ports>,
 }
 
 impl Default for PhysicalOptions {
@@ -54,6 +63,7 @@ impl Default for PhysicalOptions {
             sabre: SabreOptions::default(),
             partner_slots: true,
             look_ahead: 4,
+            ports: None,
         }
     }
 }
@@ -89,12 +99,22 @@ pub fn physical_circuit(
     options: &PhysicalOptions,
 ) -> Result<PhysicalCircuit, String> {
     let arch = &mapping.architecture;
-    if chip.qubits() != arch.qubits_per_core {
+    // With ports, the mapper leaves a slot free in every core.
+    let reserved = usize::from(options.ports.is_some());
+    if chip.qubits() < arch.qubits_per_core + reserved {
         return Err(format!(
-            "the chip has {} qubits, the cores {}",
+            "the chip has {} qubits, the mapping fills {} per core{}",
             chip.qubits(),
-            arch.qubits_per_core
+            arch.qubits_per_core,
+            if reserved == 1 {
+                " and ports need one free"
+            } else {
+                ""
+            }
         ));
+    }
+    if let Some(ports) = &options.ports {
+        ports.check(arch, chip)?;
     }
     if mapping.slices.len() != slices.len() {
         return Err(format!(
@@ -122,11 +142,21 @@ pub fn physical_circuit(
     let assignment_at = |t: usize| mapping.slices.get(t).unwrap_or(&mapping.initial);
     for (e, &(start, end)) in epochs.iter().enumerate() {
         let assignment = assignment_at(start);
-        if e == 0 {
-            builder.first_epoch(&work[0], assignment, &mapping.initial)?;
-        } else {
-            builder.teleport(assignment, slices, start);
-            builder.epoch(&work[e], assignment, mapping, slices, end)?;
+        match (e, &options.ports) {
+            (0, None) => builder.first_epoch(&work[0], assignment, &mapping.initial)?,
+            (0, Some(ports)) => {
+                builder.place_initial(&work[0], assignment, &mapping.initial, ports)?;
+                builder.teleport_through_ports(assignment, ports)?;
+                builder.epoch(&work[0], assignment, mapping, slices, end)?;
+            }
+            (_, None) => {
+                builder.teleport(assignment, slices, start);
+                builder.epoch(&work[e], assignment, mapping, slices, end)?;
+            }
+            (_, Some(ports)) => {
+                builder.teleport_through_ports(assignment, ports)?;
+                builder.epoch(&work[e], assignment, mapping, slices, end)?;
+            }
         }
     }
     Ok(PhysicalCircuit {
@@ -152,13 +182,25 @@ pub fn map_and_route(
     timing: &super::Timing,
     options: &PhysicalOptions,
 ) -> Result<(Mapping, PhysicalCircuit), String> {
-    let slices = Timeslices::from_instructions(qubits, circuit)?.fitted_to(arch);
+    if chip.qubits() != arch.qubits_per_core {
+        return Err(format!(
+            "the chip has {} qubits, the cores {}",
+            chip.qubits(),
+            arch.qubits_per_core
+        ));
+    }
+    // With ports, the mapper plans for one slot fewer per core.
+    let planning = match options.ports {
+        Some(_) => Architecture::with_links(arch.cores, arch.qubits_per_core - 1, arch.links())?,
+        None => arch.clone(),
+    };
+    let slices = Timeslices::from_instructions(qubits, circuit)?.fitted_to(&planning);
     if method == super::Method::HqaLatency {
         // Route every candidate and keep the one that runs fastest, SWAPs
         // included (the mapper's own estimate leaves them out).
-        let initial = super::initial_placement(&slices, arch);
+        let initial = super::initial_placement(&slices, &planning);
         let mut routed = Vec::new();
-        for mapping in super::latency_candidates(&slices, arch, &initial, timing)? {
+        for mapping in super::latency_candidates(&slices, &planning, &initial, timing)? {
             let physical = physical_circuit(circuit, &mapping, &slices, chip, options)?;
             let duration = super::schedule(&physical.instructions, arch, timing)?.duration;
             routed.push((duration, mapping, physical));
@@ -166,7 +208,7 @@ pub fn map_and_route(
         let (_, mapping, physical) = super::fastest(routed, |(d, m, _)| (*d, m.communications()));
         return Ok((mapping, physical));
     }
-    let mapping = super::map_timed(&slices, arch, method, timing)?;
+    let mapping = super::map_timed(&slices, &planning, method, timing)?;
     let physical = physical_circuit(circuit, &mapping, &slices, chip, options)?;
     Ok((mapping, physical))
 }
@@ -233,18 +275,20 @@ fn epochs(mapping: &Mapping) -> Vec<(usize, usize)> {
 }
 
 /// The physical circuit as it is built, epoch by epoch.
-struct Builder<'a> {
-    arch: &'a Architecture,
-    chip: &'a CouplingGraph,
-    options: &'a PhysicalOptions,
+pub(super) struct Builder<'a> {
+    pub(super) arch: &'a Architecture,
+    pub(super) chip: &'a CouplingGraph,
+    pub(super) options: &'a PhysicalOptions,
+    /// Physical qubits per core: the chip's.
+    pub(super) k: usize,
     /// `slot_of[q]`: the physical qubit of circuit qubit `q` now.
-    slot_of: Vec<usize>,
+    pub(super) slot_of: Vec<usize>,
     /// `occupant[p]`: the circuit qubit on physical qubit `p`, if any.
-    occupant: Vec<Option<usize>>,
-    initial_layout: Vec<usize>,
-    out: Vec<Instruction>,
-    swaps: usize,
-    teleportations: usize,
+    pub(super) occupant: Vec<Option<usize>>,
+    pub(super) initial_layout: Vec<usize>,
+    pub(super) out: Vec<Instruction>,
+    pub(super) swaps: usize,
+    pub(super) teleportations: usize,
 }
 
 impl<'a> Builder<'a> {
@@ -258,8 +302,9 @@ impl<'a> Builder<'a> {
             arch,
             chip,
             options,
+            k: chip.qubits(),
             slot_of: vec![0; qubits],
-            occupant: vec![None; arch.capacity()],
+            occupant: vec![None; arch.cores * chip.qubits()],
             initial_layout: Vec::new(),
             out: Vec::new(),
             swaps: 0,
@@ -268,7 +313,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The circuit qubits in `core` under `assignment`.
-    fn members(assignment: &[usize], core: usize) -> Vec<usize> {
+    pub(super) fn members(assignment: &[usize], core: usize) -> Vec<usize> {
         (0..assignment.len())
             .filter(|&q| assignment[q] == core)
             .collect()
@@ -283,7 +328,7 @@ impl<'a> Builder<'a> {
         assignment: &[usize],
         initial: &[usize],
     ) -> Result<(), String> {
-        let k = self.arch.qubits_per_core;
+        let k = self.k;
         let mut routed_cores = Vec::new();
         for core in 0..self.arch.cores {
             let members = Self::members(assignment, core);
@@ -308,7 +353,7 @@ impl<'a> Builder<'a> {
         // Before the first timeslice, the qubits that stay keep their slots;
         // the ones that move start in a slot their initial core does not use.
         let mut start = self.slot_of.clone();
-        let mut used = vec![false; self.arch.capacity()];
+        let mut used = vec![false; self.occupant.len()];
         for q in 0..start.len() {
             if initial[q] == assignment[q] {
                 used[start[q]] = true;
@@ -340,7 +385,7 @@ impl<'a> Builder<'a> {
     }
 
     /// A later epoch: route each core from where its qubits are.
-    fn epoch(
+    pub(super) fn epoch(
         &mut self,
         work: &[&Instruction],
         assignment: &[usize],
@@ -348,7 +393,7 @@ impl<'a> Builder<'a> {
         slices: &Timeslices,
         end: usize,
     ) -> Result<(), String> {
-        let k = self.arch.qubits_per_core;
+        let k = self.k;
         for core in 0..self.arch.cores {
             let members = Self::members(assignment, core);
             let local = local_circuit(work, &members);
@@ -407,7 +452,7 @@ impl<'a> Builder<'a> {
 
     /// Emit a core's routed circuit on physical qubits and follow its SWAPs.
     fn emit_routed(&mut self, core: usize, members: &[usize], routed: crate::routing::Routed) {
-        let base = core * self.arch.qubits_per_core;
+        let base = core * self.k;
         for inst in routed.instructions {
             self.out.push(Instruction {
                 qubits: inst.qubits.iter().map(|&p| base + p).collect(),
@@ -415,7 +460,7 @@ impl<'a> Builder<'a> {
             });
         }
         self.swaps += routed.swaps;
-        for p in base..base + self.arch.qubits_per_core {
+        for p in base..base + self.k {
             self.occupant[p] = None;
         }
         for (i, &q) in members.iter().enumerate() {
@@ -429,13 +474,13 @@ impl<'a> Builder<'a> {
     /// timeslice `t`. Each arriving qubit takes the free slot of its new core
     /// closest to its next partner.
     fn teleport(&mut self, assignment: &[usize], slices: &Timeslices, t: usize) {
-        let k = self.arch.qubits_per_core;
+        let k = self.k;
         let core_of = |p: usize| p / k;
         let arriving: Vec<usize> = (0..assignment.len())
             .filter(|&q| core_of(self.slot_of[q]) != assignment[q])
             .collect();
         // Free slots: empty, or left by a qubit that moves away.
-        let mut free = vec![false; self.arch.capacity()];
+        let mut free = vec![false; self.occupant.len()];
         for (p, f) in free.iter_mut().enumerate() {
             *f = self.occupant[p].is_none_or(|q| assignment[q] != core_of(p));
         }
@@ -489,7 +534,7 @@ impl<'a> Builder<'a> {
     /// Emit teleportations `(qubit, from, to)`, all before the same timeslice,
     /// each when its destination is free if possible.
     fn apply_moves(&mut self, mut moves: Vec<(usize, usize, usize)>) {
-        let k = self.arch.qubits_per_core;
+        let k = self.k;
         while !moves.is_empty() {
             let i = moves
                 .iter()
@@ -510,7 +555,7 @@ impl<'a> Builder<'a> {
 
 /// The instructions of `work` on the qubits `members`, relabelled to
 /// `0..members.len()`.
-fn local_circuit(work: &[&Instruction], members: &[usize]) -> Vec<Instruction> {
+pub(super) fn local_circuit(work: &[&Instruction], members: &[usize]) -> Vec<Instruction> {
     let mut index = std::collections::HashMap::new();
     for (i, &q) in members.iter().enumerate() {
         index.insert(q, i);
@@ -529,7 +574,7 @@ mod tests {
     use super::*;
     use crate::gates::{matrix_1q, matrix_2q};
     use crate::linalg::{C, ZERO};
-    use crate::multicore::{Method, Timing};
+    use crate::multicore::{Method, Ports, Timing};
     use crate::testing::Rng as TestRng;
 
     /// Simulate `instructions` on `n` qubits from `state` (qubit 0 most
@@ -698,6 +743,12 @@ mod tests {
             if let [a, b] = inst.qubits[..] {
                 if inst.name == "teleport" {
                     assert_ne!(a / k, b / k);
+                    if let Some(ports) = &options.ports {
+                        // From one port of a link to its other port.
+                        assert_eq!(arch.hops(a / k, b / k), 1);
+                        assert_eq!(a % k, ports.slot(&mapping.architecture, a / k, b / k));
+                        assert_eq!(b % k, ports.slot(&mapping.architecture, b / k, a / k));
+                    }
                 } else {
                     assert_eq!(a / k, b / k, "{inst:?}");
                     assert!(chip.coupled(a % k, b % k), "{inst:?}");
@@ -712,10 +763,21 @@ mod tests {
                 .count()
         };
         assert_eq!(count("swap"), physical.swaps);
-        assert_eq!(count("teleport"), mapping.moved_qubits());
-        assert_eq!(physical.teleportations, mapping.communications());
+        // Through ports, a move between unlinked cores is one teleportation
+        // per link; otherwise it is one instruction.
+        match options.ports {
+            // Exchanges between full cores may add teleportations.
+            Some(_) => {
+                assert_eq!(count("teleport"), physical.teleportations);
+                assert!(physical.teleportations >= mapping.communications());
+            }
+            None => {
+                assert_eq!(count("teleport"), mapping.moved_qubits());
+                assert_eq!(physical.teleportations, mapping.communications());
+            }
+        }
         assert_eq!(
-            physical.instructions.len() - physical.swaps - count("teleport"),
+            physical.instructions.len() - physical.swaps - count("teleport") - count("barrier"),
             circuit.iter().filter(|i| i.name != "barrier").count()
         );
 
@@ -760,6 +822,37 @@ mod tests {
                     ..quick()
                 };
                 check(&circuit, qubits, arch, chip, Method::Hqa, &plain);
+            }
+        }
+    }
+
+    #[test]
+    fn circuits_through_ports_are_equivalent() {
+        let mut rng = TestRng::new(9);
+        let cases = [
+            (Architecture::new(3, 4).unwrap(), CouplingGraph::line(4)),
+            (Architecture::line(3, 5).unwrap(), CouplingGraph::line(5)),
+            (Architecture::ring(4, 3).unwrap(), CouplingGraph::line(3)),
+            (Architecture::grid(2, 2, 3).unwrap(), CouplingGraph::ring(3)),
+        ];
+        for (arch, chip) in &cases {
+            let options = PhysicalOptions {
+                ports: Some(Ports::central(arch, chip)),
+                ..quick()
+            };
+            // The mapper keeps a slot free in every core.
+            let most = arch.cores * (arch.qubits_per_core - 1);
+            for trial in 0..5 {
+                let qubits = most - trial % 2;
+                let circuit = random_circuit(&mut rng, qubits, 40);
+                for method in [
+                    Method::Hqa,
+                    Method::HqaLatency,
+                    Method::FgpRoee,
+                    Method::Naive,
+                ] {
+                    check(&circuit, qubits, arch, chip, method, &options);
+                }
             }
         }
     }

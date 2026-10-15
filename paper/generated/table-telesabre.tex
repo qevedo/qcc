@@ -1,18 +1,18 @@
-\begin{tabular}{lrrrr}
+\begin{tabular}{lrrrrr}
 \toprule
-Circuit & TeleSABRE & HQA & HQA-latency & FGP-rOEE \\
+Circuit & TeleSABRE & HQA & HQA-latency & FGP-rOEE & HQA, abstract \\
 \midrule
-Amplitude estimation (MQT Bench) & 595 & 214 & 239 & 304 \\
-GHZ (MQT Bench) & 116 & 13 & 13 & 24 \\
-Graph state (MQT Bench) & 92 & 30 & 30 & 18 \\
-QFT (MQT Bench) & 514 & 370 & 260 & 338 \\
-QNN (MQT Bench) & 1560 & 741 & 750 & 1306 \\
-Random (MQT Bench) & fails & 787 & 804 & 734 \\
+Amplitude est.$^*$ & 595 / 2321 & 217 / 1451 & 344 / 1967 & 376 / 1656 & 214 \\
+GHZ$^*$ & 116 / 421 & 15 / 98 & 16 / 103 & 24 / 136 & 13 \\
+Graph state$^*$ & 92 / 382 & 11 / 102 & 11 / 102 & 19 / 138 & 30 \\
+QFT$^*$ & 514 / 2072 & 266 / 1687 & 330 / 1879 & 386 / 1862 & 370 \\
+QNN$^*$ & 1560 / 6841 & 792 / 5162 & 1073 / 6183 & 1339 / 8317 & 741 \\
+Random$^*$ & fails & 801 / 4072 & 838 / 4255 & 842 / 4466 & 787 \\
 \midrule
-QFT (ours) & 1053 & 379 & 528 & 492 \\
-Draper adder (ours) & 641 & 344 & 363 & 398 \\
-Cuccaro adder (ours) & 202 & 38 & 111 & 68 \\
-Random (ours) & fails & 1593 & 1655 & 1384 \\
-Quantum Volume (ours) & fails & 2194 & 2194 & 1708 \\
+QFT & 1053 / 4163 & 496 / 3085 & 458 / 2509 & 857 / 4896 & 379 \\
+Draper adder & 641 / 2861 & 362 / 2367 & 362 / 2367 & 515 / 3356 & 344 \\
+Cuccaro adder & 202 / 813 & 12 / 242 & 12 / 242 & 16 / 267 & 38 \\
+Random & fails & 1540 / 7603 & 1540 / 7603 & 1594 / 8065 & 1593 \\
+Quantum Volume & fails & 2224 / 10235 & 2512 / 11176 & 2576 / 11876 & 2194 \\
 \bottomrule
 \end{tabular}

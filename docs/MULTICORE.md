@@ -354,6 +354,29 @@ method's duration over HQA's (above 1: HQA finishes first):
 - Making the delay term also count how busy each link is (when its next
   EPR pair is ready) gave longer circuits, not shorter, so it was left out.
 
+### Communication through ports
+
+By default a qubit teleports from any slot of its core to any free slot of
+another, as if every qubit could reach every link. With ports
+(`map_and_route(..., ports="central")`, or a dict giving, for each link
+`(a, b)`, the slots of its port in cores `a` and `b`; `Ports` in Rust), each
+link meets each core at one physical qubit, as on hardware:
+
+- to cross a link, a qubit is routed with SWAPs onto its core's port and
+  lands on the other core's port, which is emptied first by moving the
+  nearest free slot there; a move between unlinked cores crosses the links
+  one by one;
+- the mapper keeps one slot free in every core (as TeleSABRE does), so a
+  core can take a qubit in before another leaves;
+- the moves before a timeslice run one after another, each when its next
+  core, on any shortest path, has room. When every next core is full (two
+  qubits crossing between full cores), two qubits exchange places across a
+  link, a teleportation each way at once; if they are not both moving that
+  way, one moves back later, costing teleportations the mapping did not
+  count (none in a test of 60 random machines filled to capacity).
+
+The code is in `core/src/multicore/ports.rs`.
+
 ### Against TeleSABRE
 
 TeleSABRE (Russo et al., IEEE QCE 2025) routes onto multi-core chips with
@@ -361,35 +384,37 @@ SWAPs, teleportations and remote gates (telegates) through communication
 qubits at fixed places. `benchmarks/telesabre/compare.py` runs its reference
 implementation (default configuration) on its device H, 6 cores of 4 × 4
 qubits in a 2 × 3 grid of cores, and maps the same circuits onto the same
-machine with `map_and_route`, comparing EPR pairs (teleportations plus
-telegates; `results/telesabre.csv`):
+machine with `map_and_route`, with ports at device H's communication qubits.
+EPR pairs / SWAPs (`results/telesabre.csv`; * TeleSABRE's MQT Bench circuits):
 
-| circuit | TeleSABRE | HQA | HQA-latency | FGP-rOEE |
-|---|---|---|---|---|
-| Amplitude estimation (MQT Bench) | 595 | 214 | 239 | 304 |
-| GHZ (MQT Bench) | 116 | 13 | 13 | 24 |
-| Graph state (MQT Bench) | 92 | 30 | 30 | 18 |
-| QFT (MQT Bench) | 514 | 370 | 260 | 338 |
-| QNN (MQT Bench) | 1560 | 741 | 750 | 1306 |
-| Random (MQT Bench) | fails | 787 | 804 | 734 |
-| QFT | 1053 | 379 | 528 | 492 |
-| Draper adder | 641 | 344 | 363 | 398 |
-| Cuccaro adder | 202 | 38 | 111 | 68 |
-| Random | fails | 1593 | 1655 | 1384 |
-| Quantum Volume | fails | 2194 | 2194 | 1708 |
+| circuit | TeleSABRE | HQA | HQA-latency | FGP-rOEE | HQA, abstract |
+|---|---|---|---|---|---|
+| Amplitude estimation* | 595 / 2321 | 217 / 1451 | 344 / 1967 | 376 / 1656 | 214 |
+| GHZ* | 116 / 421 | 15 / 98 | 16 / 103 | 24 / 136 | 13 |
+| Graph state* | 92 / 382 | 11 / 102 | 11 / 102 | 19 / 138 | 30 |
+| QFT* | 514 / 2072 | 266 / 1687 | 330 / 1879 | 386 / 1862 | 370 |
+| QNN* | 1560 / 6841 | 792 / 5162 | 1073 / 6183 | 1339 / 8317 | 741 |
+| Random* | fails | 801 / 4072 | 838 / 4255 | 842 / 4466 | 787 |
+| QFT | 1053 / 4163 | 496 / 3085 | 458 / 2509 | 857 / 4896 | 379 |
+| Draper adder | 641 / 2861 | 362 / 2367 | 362 / 2367 | 515 / 3356 | 344 |
+| Cuccaro adder | 202 / 813 | 12 / 242 | 12 / 242 | 16 / 267 | 38 |
+| Random | fails | 1540 / 7603 | 1540 / 7603 | 1594 / 8065 | 1593 |
+| Quantum Volume | fails | 2224 / 10235 | 2512 / 11176 | 2576 / 11876 | 2194 |
 
 - TeleSABRE deadlocks on every one of its 100 attempts on the random
-  circuits and Quantum Volume. On the other circuits HQA uses 0.34× as many
-  EPR pairs (geometric mean), fewer on every one.
+  circuits and Quantum Volume. On the other eight, HQA with ports uses 0.26×
+  as many EPR pairs and 0.51× as many SWAPs (geometric means), fewer of both
+  on every circuit. Mapping and routing take at most 30 ms per circuit
+  (parsing aside), against 0.1–43 s for TeleSABRE's completed runs,
+  retries included.
 - TeleSABRE's paper reports 28% fewer inter-core operations than HQA on a
-  similar machine. Most of the gap is probably in the models: ours lets a
-  qubit teleport from any slot and any number of qubits cross a link before
-  a timeslice, while TeleSABRE must bring each qubit next to a link's one
-  communication qubit and keep a free qubit in every core. Our counts are
-  optimistic for such hardware, and SWAP counts are not comparable at all;
-  modelling communication qubits explicitly is the next step for a
-  like-for-like comparison.
-- HQA-latency minimizes time, not EPR pairs, so it can use more than HQA.
+  similar machine; how HQA's mapping was turned into operations there is
+  not described in enough detail to reproduce.
+- Two differences remain: TeleSABRE needs its communication qubits free
+  when they teleport, while our ports can hold data in between, and our
+  exchanges between full cores assume a teleportation each way at once.
+- Ports cost many SWAPs: compare with the last column, where communication
+  is abstract. HQA-latency minimizes time, not EPR pairs or SWAPs.
 
 ![Sparse links](../benchmarks/multicore/charts/topology.svg)
 ![Strong scaling](../benchmarks/multicore/charts/strong.svg)

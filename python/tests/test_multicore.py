@@ -254,3 +254,41 @@ def test_hqa_latency_plans_for_the_timing_and_is_no_slower(capacity):
     assert hqa.schedule(Timing(teleport=0.0, epr_pair=0.0)).epr_wait == 0
     mapped = map_to_cores(pairs, 4, 6, method="hqa-latency", timing=timing)
     check(mapped)
+
+
+@pytest.mark.parametrize("ports", ["central", {(0, 1): (3, 0), (1, 2): (3, 0)}])
+def test_teleportations_through_ports(ports):
+    result = map_and_route(QFT_LIKE, cores=3, qubits_per_core=4, chip="line", topology="line", ports=ports)
+    k = 4
+    physical = []
+    for inst in result.circuit.instructions:
+        qs = [q.index for q in inst.qubits]
+        if inst.name == "teleport":
+            a, b = qs
+            assert abs(a // k - b // k) == 1  # one link at a time
+            if isinstance(ports, dict):
+                link = (min(a // k, b // k), max(a // k, b // k))
+                slot = dict(zip(link, ports[link]))
+                assert (a % k, b % k) == (slot[a // k], slot[b // k])
+        if inst.name != "measure":
+            physical.append((inst.name, qs, list(inst.params)))
+    assert sum(i.name == "teleport" for i in result.circuit.instructions) == result.teleportations
+    from qevedo.compiler.frontend.qasm import parse_qasm
+    from qevedo.compiler.passes.decompose import DecomposeToNative
+
+    logical = DecomposeToNative().run(parse_qasm(source=QFT_LIKE))
+    index = {q: i for i, q in enumerate(result.mapping.qubits)}
+    expected = simulate(
+        [
+            (inst.name, [index[q] for q in inst.qubits], list(inst.params))
+            for inst in logical.instructions
+            if inst.name != "measure"
+        ],
+        7,
+    )
+    got = simulate(physical, 12)
+    order = list(result.final_layout) + [p for p in range(12) if p not in result.final_layout]
+    got = np.transpose(got, order)[(Ellipsis,) + (0,) * 5]
+    assert abs(abs(np.vdot(expected.ravel(), got.ravel())) - 1) < 1e-9
+    with pytest.raises(ValueError, match="no port"):
+        map_and_route(QFT_LIKE, cores=3, qubits_per_core=4, topology="line", ports={(0, 1): (0, 0)})

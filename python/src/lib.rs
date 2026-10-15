@@ -171,7 +171,7 @@ fn route(
 /// timeslice, communications, moved qubits, instructions on physical qubits,
 /// initial layout, final layout, SWAPs, teleportations).
 #[pyfunction]
-#[pyo3(signature = (instructions, qubits, cores, qubits_per_core, method, links, chip_edges, timing=None, trials=8, seed=1, partner_slots=true, look_ahead=4))]
+#[pyo3(signature = (instructions, qubits, cores, qubits_per_core, method, links, chip_edges, timing=None, trials=8, seed=1, partner_slots=true, look_ahead=4, ports=None, central_ports=false))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn map_and_route(
     py: Python<'_>,
@@ -187,6 +187,8 @@ fn map_and_route(
     seed: u64,
     partner_slots: bool,
     look_ahead: usize,
+    ports: Option<Vec<(usize, usize)>>,
+    central_ports: bool,
 ) -> PyResult<(
     Vec<usize>,
     Vec<Vec<usize>>,
@@ -214,6 +216,11 @@ fn map_and_route(
         },
         partner_slots,
         look_ahead,
+        ports: match ports {
+            Some(slots) => Some(qcc::multicore::Ports::new(slots)),
+            None if central_ports => Some(qcc::multicore::Ports::central(&arch, &chip)),
+            None => None,
+        },
     };
     let (mapping, physical) = py
         .detach(|| {
@@ -230,7 +237,7 @@ fn map_and_route(
         .map_err(PyValueError::new_err)?;
     let slices = Timeslices::from_instructions(qubits, &instructions)
         .map_err(PyValueError::new_err)?
-        .fitted_to(&arch);
+        .fitted_to(&mapping.architecture);
     let gates = (0..slices.len())
         .map(|t| slices.slice(t).to_vec())
         .collect();
