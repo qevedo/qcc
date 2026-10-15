@@ -78,7 +78,10 @@ extends them towards circuits that can run:
 \item routing inside each core on its coupling graph, producing a circuit on
   physical qubits with SWAPs and teleportations (Section~\ref{sec:routing});
 \item a timing model of links with a limited supply of EPR pairs, and a
-  latency-aware HQA (Section~\ref{sec:latency}).
+  latency-aware HQA (Section~\ref{sec:latency});
+\item a comparison with TeleSABRE~\cite{russo2025telesabre}, a recent
+  multi-core router, using its reference implementation
+  (Section~\ref{sec:telesabre}).
 \end{itemize}
 
 Everything is in the \texttt{qevedo-compiler} package (repository
@@ -303,6 +306,45 @@ with at most \latencyExtraTeleportations{} more teleportations than HQA. The
 naive mapper remains faster on some benchmarks when links have pairs to
 spare, and FGP-rOEE on the Cuccaro adder.
 
+\section{Comparison with TeleSABRE}
+\label{sec:telesabre}
+
+TeleSABRE~\cite{russo2025telesabre} extends SABRE to multi-core chips: next
+to SWAPs, it can teleport a qubit or run a remote gate (telegate) through
+communication qubits at fixed places, each using one EPR pair. We ran its
+reference implementation, with its default configuration, on its device~H
+(6 cores of $4\times4$ qubits in a $2\times3$ grid of cores, one link between
+neighbouring cores) and mapped the same circuits onto the same machine with
+our toolkit. The circuits are TeleSABRE's own 64-qubit MQT Bench circuits and
+the 64-qubit circuits of Section~\ref{sec:reproduction}.
+Table~\ref{tab:telesabre} compares the EPR pairs used. The comparison
+favours our model in one respect: it leaves communication qubits abstract, so
+a qubit can teleport from any slot, which is why we do not compare SWAPs.
+
+\begin{table}[t]
+\centering
+\input{generated/table-telesabre}
+\caption{EPR pairs used on TeleSABRE's device~H (teleportations and
+telegates for TeleSABRE, teleportations for our mappers). ``fails'': every
+one of TeleSABRE's 100 attempts deadlocked.}
+\label{tab:telesabre}
+\end{table}
+
+TeleSABRE does not complete \telesabreFailed{} of the \telesabreCircuits{}
+circuits, the random circuits and Quantum Volume, where every attempt
+deadlocks. On the others, HQA uses \telesabreHqaRatio{} as many EPR pairs as
+TeleSABRE (geometric mean), and fewer on every circuit. This differs from
+TeleSABRE's own comparison, in which it needs 28\% fewer inter-core
+operations than HQA on a similar 96-qubit machine. We expect most of the gap to come from
+the models rather than the algorithms: ours lets a qubit teleport from any
+slot and any number of qubits cross a link before a timeslice, while
+TeleSABRE must bring each qubit next to the one communication qubit of a
+link and keep a free qubit in every core, constraints that can cost
+teleportations as well as SWAPs. Our counts are therefore optimistic for
+such hardware; modelling communication qubits explicitly, and routing to
+them, is the next step for a like-for-like comparison. HQA-latency minimizes
+time rather than EPR pairs, so it uses more than HQA on some circuits.
+
 \section{Discussion and limitations}
 
 The timing model ignores noise, the time to route inside a core, and the
@@ -310,7 +352,9 @@ communication qubits' own placement; durations should be read as relative.
 The benchmarks are those of~\cite{escofet2025revisiting}; other circuit
 families may behave differently, as the Cuccaro adder already does. Our
 choices for odd core sizes and sparse links are ours, not the original
-authors'. \todo{compare with further mappers from the literature (planned)}
+authors'. Route-Forcing~\cite{escofet2024routeforcing}, a scalable router
+that moves qubits between cores by SWAPs, is not compared here because our
+model moves them by teleportation.
 
 \section{Availability}
 
@@ -319,7 +363,8 @@ qevedo-compiler}. The mappers, the router and the scheduler are in the Rust
 core (\nolinkurl{core/src/multicore/} and \nolinkurl{core/src/routing/}); the
 Python functions \texttt{map\_to\_cores} and \texttt{map\_and\_route} expose
 them. \nolinkurl{benchmarks/multicore/run.py} and
-\nolinkurl{benchmarks/routing/vs_qiskit.py} produce the results, and
+\nolinkurl{benchmarks/routing/vs_qiskit.py} and
+\nolinkurl{benchmarks/telesabre/compare.py} produce the results, and
 \nolinkurl{paper/make.py} every table, number and figure of this paper.
 \todo{cite a tagged release and archive it (e.g.\ Zenodo DOI)}
 

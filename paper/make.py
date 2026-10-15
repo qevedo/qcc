@@ -250,7 +250,7 @@ def latency_figure(means: dict) -> None:
     axes[0].set_ylabel("duration / HQA's")
     axes[1].legend(fontsize=7)
     fig.tight_layout()
-    fig.savefig(OUT / "fig-latency.pdf")
+    fig.savefig(OUT / "fig-latency.pdf", metadata={"CreationDate": None})
     plt.close(fig)
 
 
@@ -274,7 +274,7 @@ def scaling_figure() -> None:
     axes[0].set_ylabel("communications", fontsize=7)
     axes[0].legend(fontsize=5)
     fig.tight_layout()
-    fig.savefig(OUT / "fig-strong.pdf")
+    fig.savefig(OUT / "fig-strong.pdf", metadata={"CreationDate": None})
     plt.close(fig)
 
 
@@ -285,6 +285,53 @@ def sabre(numbers: Numbers) -> None:
     numbers.add("sabreCircuits", str(len(rows)))
 
 
+def telesabre(numbers: Numbers) -> None:
+    """EPR pairs against TeleSABRE's reference implementation, on its device H."""
+    rows = load(HERE.parent / "benchmarks" / "telesabre" / "results" / "telesabre.csv")
+    names = {
+        "ae": "Amplitude estimation",
+        "ghz": "GHZ",
+        "graphstate": "Graph state",
+        "qnn": "QNN",
+        **BENCHMARKS,
+    }
+    methods = ("telesabre", "hqa", "hqa-latency", "fgp-roee")
+    by = defaultdict(dict)
+    order = []
+    for r in rows:
+        key = (r["suite"], r["circuit"])
+        if key not in by:
+            order.append(key)
+        by[key][r["method"]] = r
+    lines = []
+    ratios = []
+    failed = 0
+    for k, key in enumerate(order):
+        suite, circuit = key
+        if k and suite != order[k - 1][0]:
+            lines.append("\\midrule")
+        cells = []
+        for m in methods:
+            r = by[key][m]
+            cells.append(r["epr_pairs"] if r["success"] == "True" else "fails")
+        ts = by[key]["telesabre"]
+        if ts["success"] == "True":
+            ratios.append(int(by[key]["hqa"]["epr_pairs"]) / int(ts["epr_pairs"]))
+        else:
+            failed += 1
+        source = "MQT Bench" if suite == "telesabre" else "ours"
+        lines.append(f"{names[circuit]} ({source}) & " + " & ".join(cells) + " \\\\")
+    table(
+        "table-telesabre",
+        "Circuit & TeleSABRE & HQA & HQA-latency & FGP-rOEE",
+        "lrrrr",
+        lines,
+    )
+    numbers.add("telesabreHqaRatio", times(statistics.geometric_mean(ratios)))
+    numbers.add("telesabreFailed", str(failed))
+    numbers.add("telesabreCircuits", str(len(order)))
+
+
 def main() -> None:
     OUT.mkdir(exist_ok=True)
     numbers = Numbers()
@@ -293,6 +340,7 @@ def main() -> None:
     routing(numbers)
     latency(numbers)
     sabre(numbers)
+    telesabre(numbers)
     scaling_figure()
     numbers.write()
     print(f"wrote {OUT}: " + ", ".join(sorted(p.name for p in OUT.iterdir())))

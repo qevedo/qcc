@@ -354,6 +354,43 @@ method's duration over HQA's (above 1: HQA finishes first):
 - Making the delay term also count how busy each link is (when its next
   EPR pair is ready) gave longer circuits, not shorter, so it was left out.
 
+### Against TeleSABRE
+
+TeleSABRE (Russo et al., IEEE QCE 2025) routes onto multi-core chips with
+SWAPs, teleportations and remote gates (telegates) through communication
+qubits at fixed places. `benchmarks/telesabre/compare.py` runs its reference
+implementation (default configuration) on its device H, 6 cores of 4 × 4
+qubits in a 2 × 3 grid of cores, and maps the same circuits onto the same
+machine with `map_and_route`, comparing EPR pairs (teleportations plus
+telegates; `results/telesabre.csv`):
+
+| circuit | TeleSABRE | HQA | HQA-latency | FGP-rOEE |
+|---|---|---|---|---|
+| Amplitude estimation (MQT Bench) | 595 | 214 | 239 | 304 |
+| GHZ (MQT Bench) | 116 | 13 | 13 | 24 |
+| Graph state (MQT Bench) | 92 | 30 | 30 | 18 |
+| QFT (MQT Bench) | 514 | 370 | 260 | 338 |
+| QNN (MQT Bench) | 1560 | 741 | 750 | 1306 |
+| Random (MQT Bench) | fails | 787 | 804 | 734 |
+| QFT | 1053 | 379 | 528 | 492 |
+| Draper adder | 641 | 344 | 363 | 398 |
+| Cuccaro adder | 202 | 38 | 111 | 68 |
+| Random | fails | 1593 | 1655 | 1384 |
+| Quantum Volume | fails | 2194 | 2194 | 1708 |
+
+- TeleSABRE deadlocks on every one of its 100 attempts on the random
+  circuits and Quantum Volume. On the other circuits HQA uses 0.34× as many
+  EPR pairs (geometric mean), fewer on every one.
+- TeleSABRE's paper reports 28% fewer inter-core operations than HQA on a
+  similar machine. Most of the gap is probably in the models: ours lets a
+  qubit teleport from any slot and any number of qubits cross a link before
+  a timeslice, while TeleSABRE must bring each qubit next to a link's one
+  communication qubit and keep a free qubit in every core. Our counts are
+  optimistic for such hardware, and SWAP counts are not comparable at all;
+  modelling communication qubits explicitly is the next step for a
+  like-for-like comparison.
+- HQA-latency minimizes time, not EPR pairs, so it can use more than HQA.
+
 ![Sparse links](../benchmarks/multicore/charts/topology.svg)
 ![Strong scaling](../benchmarks/multicore/charts/strong.svg)
 ![Weak scaling](../benchmarks/multicore/charts/weak.svg)
