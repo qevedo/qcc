@@ -23,8 +23,8 @@ and one more that takes the circuits down to physical qubits:
   between teleportations (map_and_route), counting SWAPs as well.
 * latency: the same circuits, cores in a 2 × 5 grid, linked all to all or in
   a line, scheduled with 1, 2, 4 or unlimited channels (EPR pairs at once)
-  per link, with the default timing of CoreCircuit.schedule; with
-  "hqa-latency", HQA weighing how much each move delays its gate.
+  per link, with the default Timing otherwise; "hqa-latency" (HQA weighing
+  how much each move delays its gate) is mapped for each capacity.
 
 Every mapper starts from the same OEE placement. Results go to
 results/multicore.csv, results/routing.csv and results/latency.csv; plot.py
@@ -42,7 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from circuits import BENCHMARKS, two_qubit_gates  # noqa: E402
-from qevedo.compiler.multicore import map_and_route, map_to_cores  # noqa: E402
+from qevedo.compiler.multicore import Timing, map_and_route, map_to_cores  # noqa: E402
 
 METHODS = ("hqa", "fgp-roee", "naive")
 TOPOLOGY_METHODS = ("hqa", "hqa-uniform-cost", "fgp-roee", "naive")
@@ -142,11 +142,22 @@ def latency() -> list[dict]:
         for benchmark in BENCHMARKS:
             n, pairs = two_qubit_gates(benchmark, 100)
             for method in LATENCY_METHODS:
-                result = map_and_route(
-                    pairs, 10, 10, chip="grid:2x5", method=method, num_qubits=n, topology=topology
-                )
+                result = None
                 for capacity in CAPACITIES:
-                    schedule = result.schedule(link_capacity=capacity or len(pairs))
+                    timing = Timing(link_capacity=capacity or len(pairs))
+                    # hqa-latency plans for the timing, so it maps again per capacity.
+                    if result is None or method == "hqa-latency":
+                        result = map_and_route(
+                            pairs,
+                            10,
+                            10,
+                            chip="grid:2x5",
+                            method=method,
+                            num_qubits=n,
+                            topology=topology,
+                            timing=timing,
+                        )
+                    schedule = result.schedule(timing)
                     rows.append(
                         {
                             "benchmark": benchmark,

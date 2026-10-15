@@ -18,6 +18,27 @@ fn from_raw(instructions: Vec<Raw>) -> Vec<qcc::Instruction> {
         .collect()
 }
 
+/// A timing model as Python passes it: (one_qubit, two_qubit, swap, measure,
+/// epr_pair, teleport, link_capacity).
+type RawTiming = (f64, f64, f64, f64, f64, f64, usize);
+
+fn timing(raw: Option<RawTiming>) -> qcc::multicore::Timing {
+    match raw {
+        None => qcc::multicore::Timing::default(),
+        Some((one_qubit, two_qubit, swap, measure, epr_pair, teleport, link_capacity)) => {
+            qcc::multicore::Timing {
+                one_qubit,
+                two_qubit,
+                swap,
+                measure,
+                epr_pair,
+                teleport,
+                link_capacity,
+            }
+        }
+    }
+}
+
 fn to_raw(instructions: Vec<qcc::Instruction>) -> Vec<Raw> {
     instructions
         .into_iter()
@@ -58,12 +79,13 @@ fn run_passes(
 /// Map a circuit, given by its two-qubit gates in program order, onto a
 /// multi-core architecture with `method` ("hqa", "hqa-no-lookahead",
 /// "hqa-uniform-cost", "fgp-roee" or "naive"). The cores are linked by `links`
-/// (pairs of cores), or all to all when it is None. Returns (initial
-/// assignment, assignment per timeslice, gates per timeslice,
-/// communications, moved qubits).
+/// (pairs of cores), or all to all when it is None; "hqa-latency" plans for
+/// `timing` (the default timing when None). Returns (initial assignment,
+/// assignment per timeslice, gates per timeslice, communications, moved
+/// qubits).
 #[pyfunction]
-#[pyo3(signature = (pairs, qubits, cores, qubits_per_core, method, links=None))]
-#[allow(clippy::type_complexity)]
+#[pyo3(signature = (pairs, qubits, cores, qubits_per_core, method, links=None, timing=None))]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn map_to_cores(
     py: Python<'_>,
     pairs: Vec<(usize, usize)>,
@@ -72,6 +94,7 @@ fn map_to_cores(
     qubits_per_core: usize,
     method: &str,
     links: Option<Vec<(usize, usize)>>,
+    timing: Option<RawTiming>,
 ) -> PyResult<(
     Vec<usize>,
     Vec<Vec<usize>>,
@@ -79,7 +102,8 @@ fn map_to_cores(
     usize,
     usize,
 )> {
-    use qcc::multicore::{Architecture, Method, Timeslices, map};
+    use qcc::multicore::{Architecture, Method, Timeslices, map_timed};
+    let timing = self::timing(timing);
     let method = Method::parse(method).map_err(PyValueError::new_err)?;
     let arch = match links {
         Some(links) => Architecture::with_links(cores, qubits_per_core, &links),
@@ -91,7 +115,7 @@ fn map_to_cores(
         .map_err(PyValueError::new_err)?
         .fitted_to(&arch);
     let mapping = py
-        .detach(|| map(&slices, &arch, method))
+        .detach(|| map_timed(&slices, &arch, method, &timing))
         .map_err(PyValueError::new_err)?;
     let gates = (0..slices.len())
         .map(|t| slices.slice(t).to_vec())
@@ -147,7 +171,7 @@ fn route(
 /// timeslice, communications, moved qubits, instructions on physical qubits,
 /// initial layout, final layout, SWAPs, teleportations).
 #[pyfunction]
-#[pyo3(signature = (instructions, qubits, cores, qubits_per_core, method, links, chip_edges, trials=8, seed=1))]
+#[pyo3(signature = (instructions, qubits, cores, qubits_per_core, method, links, chip_edges, timing=None, trials=8, seed=1))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn map_and_route(
     py: Python<'_>,
@@ -158,6 +182,7 @@ fn map_and_route(
     method: &str,
     links: Vec<(usize, usize)>,
     chip_edges: Vec<(usize, usize)>,
+    timing: Option<RawTiming>,
     trials: usize,
     seed: u64,
 ) -> PyResult<(
@@ -186,7 +211,15 @@ fn map_and_route(
     };
     let (mapping, physical) = py
         .detach(|| {
-            qcc::multicore::map_and_route(&instructions, qubits, &arch, &chip, method, &options)
+            qcc::multicore::map_and_route(
+                &instructions,
+                qubits,
+                &arch,
+                &chip,
+                method,
+                &self::timing(timing),
+                &options,
+            )
         })
         .map_err(PyValueError::new_err)?;
     let slices = Timeslices::from_instructions(qubits, &instructions)
@@ -211,37 +244,21 @@ fn map_and_route(
 }
 
 /// Schedule a multi-core circuit on physical qubits (as `map_and_route`
-/// returns it) on cores linked by `links`, under a timing model (see
+/// returns it) on cores linked by `links`, under `timing` (see
 /// `qcc::multicore::Timing`). Returns (start of each instruction, duration,
 /// time teleportations waited for EPR pairs, hops per link).
 #[pyfunction]
-#[pyo3(signature = (instructions, cores, qubits_per_core, links, one_qubit, two_qubit, swap, measure, epr_pair, teleport, link_capacity))]
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 fn schedule(
     instructions: Vec<Raw>,
     cores: usize,
     qubits_per_core: usize,
     links: Vec<(usize, usize)>,
-    one_qubit: f64,
-    two_qubit: f64,
-    swap: f64,
-    measure: f64,
-    epr_pair: f64,
-    teleport: f64,
-    link_capacity: usize,
+    timing: RawTiming,
 ) -> PyResult<(Vec<f64>, f64, f64, Vec<((usize, usize), usize)>)> {
-    use qcc::multicore::{Architecture, Timing};
-    let arch =
-        Architecture::with_links(cores, qubits_per_core, &links).map_err(PyValueError::new_err)?;
-    let timing = Timing {
-        one_qubit,
-        two_qubit,
-        swap,
-        measure,
-        epr_pair,
-        teleport,
-        link_capacity,
-    };
+    let arch = qcc::multicore::Architecture::with_links(cores, qubits_per_core, &links)
+        .map_err(PyValueError::new_err)?;
+    let timing = self::timing(Some(timing));
     let s = qcc::multicore::schedule(&from_raw(instructions), &arch, &timing)
         .map_err(PyValueError::new_err)?;
     Ok((s.start, s.duration, s.epr_wait, s.link_hops))

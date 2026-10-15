@@ -122,17 +122,33 @@ pub fn physical_circuit(
 
 /// Map `circuit` onto `arch` with `method` and route it inside the cores,
 /// whose qubits are coupled as in `chip`. Gates on three or more qubits must
-/// be decomposed first.
+/// be decomposed first. With [`Method::HqaLatency`](super::Method), every
+/// latency weight's mapping is routed and the one whose circuit runs fastest
+/// under `timing` is kept.
 pub fn map_and_route(
     circuit: &[Instruction],
     qubits: usize,
     arch: &Architecture,
     chip: &CouplingGraph,
     method: super::Method,
+    timing: &super::Timing,
     options: &SabreOptions,
 ) -> Result<(Mapping, PhysicalCircuit), String> {
     let slices = Timeslices::from_instructions(qubits, circuit)?.fitted_to(arch);
-    let mapping = super::map(&slices, arch, method)?;
+    if method == super::Method::HqaLatency {
+        // Route every candidate and keep the one that runs fastest, SWAPs
+        // included (the mapper's own estimate leaves them out).
+        let initial = super::initial_placement(&slices, arch);
+        let mut routed = Vec::new();
+        for mapping in super::latency_candidates(&slices, arch, &initial, timing)? {
+            let physical = physical_circuit(circuit, &mapping, &slices, chip, options)?;
+            let duration = super::schedule(&physical.instructions, arch, timing)?.duration;
+            routed.push((duration, mapping, physical));
+        }
+        let (_, mapping, physical) = super::fastest(routed, |(d, m, _)| (*d, m.communications()));
+        return Ok((mapping, physical));
+    }
+    let mapping = super::map_timed(&slices, arch, method, timing)?;
     let physical = physical_circuit(circuit, &mapping, &slices, chip, options)?;
     Ok((mapping, physical))
 }
@@ -488,7 +504,7 @@ mod tests {
     use super::*;
     use crate::gates::{matrix_1q, matrix_2q};
     use crate::linalg::{C, ZERO};
-    use crate::multicore::Method;
+    use crate::multicore::{Method, Timing};
     use crate::testing::Rng as TestRng;
 
     /// Simulate `instructions` on `n` qubits from `state` (qubit 0 most
@@ -634,8 +650,16 @@ mod tests {
             trials: 2,
             ..SabreOptions::default()
         };
-        let (mapping, physical) =
-            map_and_route(circuit, qubits, arch, chip, method, &options).unwrap();
+        let (mapping, physical) = map_and_route(
+            circuit,
+            qubits,
+            arch,
+            chip,
+            method,
+            &Timing::default(),
+            &options,
+        )
+        .unwrap();
         let k = arch.qubits_per_core;
         for inst in &physical.instructions {
             if let [a, b] = inst.qubits[..] {
@@ -701,6 +725,37 @@ mod tests {
     }
 
     #[test]
+    fn hqa_latency_runs_no_slower_than_hqa() {
+        let mut rng = TestRng::new(8);
+        let options = SabreOptions {
+            trials: 2,
+            ..SabreOptions::default()
+        };
+        for (arch, capacity) in [
+            (Architecture::new(4, 4).unwrap(), 1),
+            (Architecture::line(4, 4).unwrap(), 3),
+        ] {
+            let timing = Timing {
+                link_capacity: capacity,
+                ..Timing::default()
+            };
+            let chip = CouplingGraph::grid(2, 2);
+            for _ in 0..4 {
+                let circuit = random_circuit(&mut rng, 16, 120);
+                let duration = |method| {
+                    let (_, physical) =
+                        map_and_route(&circuit, 16, &arch, &chip, method, &timing, &options)
+                            .unwrap();
+                    crate::multicore::schedule(&physical.instructions, &arch, &timing)
+                        .unwrap()
+                        .duration
+                };
+                assert!(duration(Method::HqaLatency) <= duration(Method::Hqa) + 1e-9);
+            }
+        }
+    }
+
+    #[test]
     fn single_qubit_circuits_and_measurements() {
         let arch = Architecture::new(2, 2).unwrap();
         let chip = CouplingGraph::line(2);
@@ -720,8 +775,16 @@ mod tests {
             },
         ];
         let options = SabreOptions::default();
-        let (_, physical) =
-            map_and_route(&measured, 2, &arch, &chip, Method::Hqa, &options).unwrap();
+        let (_, physical) = map_and_route(
+            &measured,
+            2,
+            &arch,
+            &chip,
+            Method::Hqa,
+            &Timing::default(),
+            &options,
+        )
+        .unwrap();
         assert_eq!(physical.instructions.last().unwrap().name, "measure");
     }
 
@@ -737,6 +800,7 @@ mod tests {
                 &arch,
                 &CouplingGraph::line(3),
                 Method::Hqa,
+                &Timing::default(),
                 &options
             )
             .unwrap_err()
@@ -749,6 +813,7 @@ mod tests {
                 &arch,
                 &CouplingGraph::line(4),
                 Method::Hqa,
+                &Timing::default(),
                 &options
             )
             .unwrap_err()

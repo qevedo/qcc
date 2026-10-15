@@ -28,6 +28,8 @@
 //! slot does not wait for the qubit leaving it.
 
 use super::architecture::Architecture;
+use super::assignment::Mapping;
+use super::timeslices::Timeslices;
 use crate::ir::Instruction;
 
 /// Durations and link resources, in any one time unit.
@@ -88,13 +90,9 @@ pub fn schedule(
         return Err("each link needs at least one channel".into());
     }
     let k = arch.qubits_per_core;
-    let links = arch.links();
-    // `pair_ready[l][c]`: when channel `c` of link `l` has a pair.
-    let mut pair_ready = vec![vec![0.0f64; timing.link_capacity]; links.len()];
-    let mut hops = vec![0usize; links.len()];
+    let mut links = Links::new(arch, timing);
     let mut free = vec![0.0f64; arch.capacity()];
     let mut start = Vec::with_capacity(instructions.len());
-    let mut epr_wait = 0.0;
     let mut duration = 0.0f64;
     if let Some(inst) = instructions
         .iter()
@@ -132,19 +130,7 @@ pub fn schedule(
         for inst in &instructions[i..i + run] {
             let (from, to) = (inst.qubits[0], inst.qubits[1]);
             let begin = free[from].max(free[to]);
-            let mut t = begin;
-            for link in path(arch, from / k, to / k) {
-                let l = links.binary_search(&link).expect("a path follows links");
-                let channel = &mut pair_ready[l];
-                let c = (0..channel.len())
-                    .min_by(|&a, &b| channel[a].total_cmp(&channel[b]))
-                    .expect("at least one channel");
-                let hop_start = t.max(channel[c]);
-                epr_wait += hop_start - t;
-                channel[c] = hop_start + timing.epr_pair;
-                hops[l] += 1;
-                t = hop_start + timing.teleport;
-            }
+            let t = links.teleport(arch, timing, from / k, to / k, begin);
             start.push(begin);
             ends.push(t);
             duration = duration.max(t);
@@ -162,9 +148,93 @@ pub fn schedule(
     Ok(Schedule {
         start,
         duration,
-        epr_wait,
-        link_hops: links.iter().copied().zip(hops).collect(),
+        epr_wait: links.epr_wait,
+        link_hops: arch.links().iter().copied().zip(links.hops).collect(),
     })
+}
+
+/// How long a mapping would take under `timing`, before routing inside the
+/// cores: each two-qubit gate takes `two_qubit`, each move a teleportation
+/// per link, sharing the links' channels as in [`schedule`], and everything
+/// starts as soon as its qubits are free. Mappers use it to compare
+/// mappings by time.
+pub fn mapping_duration(mapping: &Mapping, slices: &Timeslices, timing: &Timing) -> f64 {
+    let arch = &mapping.architecture;
+    let mut links = Links::new(arch, timing);
+    let mut free = vec![0.0f64; mapping.initial.len()];
+    let mut previous = &mapping.initial;
+    let mut duration = 0.0f64;
+    for (t, assignment) in mapping.slices.iter().enumerate() {
+        for q in 0..free.len() {
+            if previous[q] != assignment[q] {
+                free[q] = links.teleport(arch, timing, previous[q], assignment[q], free[q]);
+            }
+        }
+        for &(a, b) in slices.slice(t) {
+            let end = free[a].max(free[b]) + timing.two_qubit;
+            free[a] = end;
+            free[b] = end;
+            duration = duration.max(end);
+        }
+        previous = assignment;
+    }
+    free.iter().copied().fold(duration, f64::max)
+}
+
+/// The EPR pairs of every link.
+///
+/// A channel holds one pair and makes the next in `epr_pair` once it is used,
+/// so two uses of a channel are at least `epr_pair` apart. Uses are booked in
+/// the order operations are scheduled, which is not always the order in time,
+/// so a use can go in a gap between earlier bookings.
+struct Links {
+    /// `uses[l][c]`: when channel `c` of link `l` hands out a pair, sorted.
+    uses: Vec<Vec<Vec<f64>>>,
+    hops: Vec<usize>,
+    epr_wait: f64,
+}
+
+impl Links {
+    fn new(arch: &Architecture, timing: &Timing) -> Links {
+        Links {
+            uses: vec![vec![Vec::new(); timing.link_capacity.max(1)]; arch.links().len()],
+            hops: vec![0; arch.links().len()],
+            epr_wait: 0.0,
+        }
+    }
+
+    /// Teleport a qubit, free at `t`, from core `a` to core `b`, one hop per
+    /// link, each with the first pair ready on it. Returns when it arrives.
+    fn teleport(
+        &mut self,
+        arch: &Architecture,
+        timing: &Timing,
+        a: usize,
+        b: usize,
+        t: f64,
+    ) -> f64 {
+        let mut t = t;
+        for link in path(arch, a, b) {
+            let l = arch
+                .links()
+                .binary_search(&link)
+                .expect("a path follows links");
+            let channels = &mut self.uses[l];
+            let (c, hop_start) = channels
+                .iter()
+                .map(|uses| earliest_use(uses, t, timing.epr_pair))
+                .enumerate()
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .expect("at least one channel");
+            let uses = &mut channels[c];
+            let at = uses.partition_point(|&x| x <= hop_start);
+            uses.insert(at, hop_start);
+            self.epr_wait += hop_start - t;
+            self.hops[l] += 1;
+            t = hop_start + timing.teleport;
+        }
+        t
+    }
 }
 
 fn duration_of(inst: &Instruction, timing: &Timing) -> f64 {
@@ -175,6 +245,19 @@ fn duration_of(inst: &Instruction, timing: &Timing) -> f64 {
         (_, 0 | 1) => timing.one_qubit,
         _ => timing.two_qubit,
     }
+}
+
+/// The earliest time from `t` when a channel with these sorted `uses` can hand
+/// out a pair: at least `gap` away from every other use.
+fn earliest_use(uses: &[f64], t: f64, gap: f64) -> f64 {
+    let mut h = t;
+    for &x in &uses[uses.partition_point(|&x| x <= t - gap)..] {
+        if h + gap <= x {
+            break;
+        }
+        h = h.max(x + gap);
+    }
+    h
 }
 
 /// The links on a shortest path from core `a` to core `b`, each with the
@@ -238,6 +321,47 @@ mod tests {
         .unwrap();
         assert!((three.duration - 5.0).abs() < 1e-12);
         assert_eq!(three.epr_wait, 0.0);
+    }
+
+    #[test]
+    fn mapping_durations_count_gates_and_moves() {
+        let arch = Architecture::new(2, 3).unwrap();
+        let slices = Timeslices::from_pairs(4, &[(0, 1), (1, 2), (2, 3)]).unwrap();
+        // q1 moves to q2's core for slice 1 and stays.
+        let mapping = Mapping {
+            architecture: arch.clone(),
+            initial: vec![0, 0, 1, 1],
+            slices: vec![vec![0, 0, 1, 1], vec![0, 1, 1, 1], vec![0, 1, 1, 1]],
+        };
+        mapping.validate(&arch, &slices).unwrap();
+        // Gate (1), q1's teleportation (5), then two gates in a row (2).
+        let d = mapping_duration(&mapping, &slices, &Timing::default());
+        assert!((d - 8.0).abs() < 1e-12, "{d}");
+    }
+
+    #[test]
+    fn teleportations_use_gaps_between_earlier_bookings() {
+        let arch = Architecture::new(2, 4).unwrap();
+        // The first teleportation waits for its qubit until 10; the second,
+        // listed later but ready at 5, does not wait behind it.
+        let circuit = vec![
+            Instruction::gate("h", vec![0], vec![]),
+            teleport(0, 4),
+            Instruction::gate("measure", vec![1], vec![]),
+            teleport(1, 5),
+        ];
+        let timing = Timing {
+            one_qubit: 10.0,
+            epr_pair: 0.0,
+            ..Timing::default()
+        };
+        let s = schedule(&circuit, &arch, &timing).unwrap();
+        assert_eq!(s.start[3], 5.0);
+        assert_eq!(s.epr_wait, 0.0);
+        assert_eq!(earliest_use(&[10.0], 0.0, 10.0), 0.0);
+        assert_eq!(earliest_use(&[10.0], 1.0, 10.0), 20.0);
+        assert_eq!(earliest_use(&[0.0, 30.0], 5.0, 10.0), 10.0);
+        assert_eq!(earliest_use(&[0.0, 15.0], 5.0, 10.0), 25.0);
     }
 
     #[test]

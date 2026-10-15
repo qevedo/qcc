@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass, replace
 
 from qevedo.compiler.ir import Circuit, Clbit, Instruction, Qubit
 
@@ -59,6 +59,7 @@ __all__ = [
     "CoreCircuit",
     "CoreMapping",
     "CoreSchedule",
+    "Timing",
     "map_and_route",
     "map_to_cores",
     "random_circuit_bounds",
@@ -66,6 +67,26 @@ __all__ = [
 ]
 
 METHODS = ("hqa", "hqa-latency", "hqa-no-lookahead", "hqa-uniform-cost", "fgp-roee", "naive")
+
+@dataclass(frozen=True)
+class Timing:
+    """Durations and link resources, in any one time unit.
+
+    The defaults are illustrative, in units of a two-qubit gate: set them for
+    the hardware at hand. Each link between cores has ``link_capacity``
+    channels; a channel holds one EPR pair and makes a new one in
+    ``epr_pair`` once its pair is used. A teleportation uses one pair per
+    link it crosses and then takes ``teleport`` per link.
+    """
+
+    one_qubit: float = 0.1
+    two_qubit: float = 1.0
+    swap: float = 3.0
+    measure: float = 5.0
+    epr_pair: float = 10.0
+    teleport: float = 5.0
+    link_capacity: int = 1
+
 
 #: A ``topology``: a name, or the links between cores as pairs of core indices.
 Topology = str | Sequence[tuple[int, int]]
@@ -114,6 +135,7 @@ def map_to_cores(
     method: str = "hqa",
     num_qubits: int | None = None,
     topology: Topology = "all-to-all",
+    timing: Timing | None = None,
 ) -> CoreMapping:
     """Map ``circuit`` onto ``cores`` cores of ``qubits_per_core`` qubits each.
 
@@ -127,6 +149,10 @@ def map_to_cores(
     ``"line"``, ``"ring"``, ``"grid"`` (the squarest grid of ``cores``
     cores), ``"grid:RxC"``, or a list of links as pairs of core indices.
 
+    ``"hqa-latency"`` keeps whichever of its latency weights gives the
+    mapping that takes least time under ``timing`` (by default
+    :class:`Timing`); the other methods ignore it.
+
     Raises ``ValueError`` when the qubits do not fit, the method is unknown or
     the links do not connect every core.
     """
@@ -138,7 +164,7 @@ def map_to_cores(
     links = topology_links(topology, cores)
     start = time.perf_counter()
     initial, assignments, timeslices, communications, moved = _core.map_to_cores(
-        pairs, len(qubits), cores, qubits_per_core, method, links
+        pairs, len(qubits), cores, qubits_per_core, method, links, astuple(timing or Timing())
     )
     seconds = time.perf_counter() - start
     return CoreMapping(
@@ -179,26 +205,16 @@ class CoreCircuit:
     teleportations: int
     #: Time mapping and routing took, in seconds.
     seconds: float
+    #: The timing the mapping planned for, and :meth:`schedule`'s default.
+    timing: Timing = Timing()
 
-    def schedule(
-        self,
-        one_qubit: float = 0.1,
-        two_qubit: float = 1.0,
-        swap: float = 3.0,
-        measure: float = 5.0,
-        epr_pair: float = 10.0,
-        teleport: float = 5.0,
-        link_capacity: int = 1,
-    ) -> CoreSchedule:
+    def schedule(self, timing: Timing | None = None, **changes) -> CoreSchedule:
         """How long the circuit takes when links make EPR pairs at a limited rate.
 
-        Each operation takes a fixed time by kind. Each link between cores
-        has ``link_capacity`` channels; a channel holds one EPR pair and
-        makes a new one in ``epr_pair`` once its pair is used. A teleportation
-        uses one pair per link it crosses and then takes ``teleport`` per
-        link. Operations start as soon as their qubits (and, for
-        teleportations, a pair) are ready. The defaults are illustrative, in
-        units of a two-qubit gate: set them for the hardware at hand.
+        Under ``timing`` (by default the one the circuit was mapped for),
+        with any field changed by keyword, e.g. ``schedule(link_capacity=2)``
+        (see :class:`Timing`). Operations start as soon as their qubits (and,
+        for teleportations, an EPR pair) are ready.
         """
         from qevedo.compiler import _core
 
@@ -211,13 +227,7 @@ class CoreCircuit:
             self.mapping.cores,
             self.mapping.qubits_per_core,
             self.mapping.links,
-            one_qubit,
-            two_qubit,
-            swap,
-            measure,
-            epr_pair,
-            teleport,
-            link_capacity,
+            astuple(replace(timing or self.timing, **changes)),
         )
         return CoreSchedule(
             start=start,
@@ -250,6 +260,7 @@ def map_and_route(
     method: str = "hqa",
     topology: Topology = "all-to-all",
     num_qubits: int | None = None,
+    timing: Timing | None = None,
     trials: int = 8,
     seed: int = 1,
 ) -> CoreCircuit:
@@ -265,7 +276,9 @@ def map_and_route(
     cores, as in :func:`map_to_cores`. Between the steps where qubits change
     core, each core's part of the circuit is routed with SABRE (``trials``
     random starts for the first layout); a qubit arriving in a core takes the
-    free slot closest to its next partner.
+    free slot closest to its next partner. ``timing`` is what
+    ``"hqa-latency"`` plans for, and what :meth:`CoreCircuit.schedule` uses
+    by default.
 
     Raises ``ValueError`` as :func:`map_to_cores` does, and when the chip's
     couplings do not connect its qubits.
@@ -317,7 +330,16 @@ def map_and_route(
         swaps,
         teleportations,
     ) = _core.map_and_route(
-        raw, len(qubits), cores, qubits_per_core, method, links, chip_edges, trials, seed
+        raw,
+        len(qubits),
+        cores,
+        qubits_per_core,
+        method,
+        links,
+        chip_edges,
+        astuple(timing or Timing()),
+        trials,
+        seed,
     )
     seconds = time.perf_counter() - start
     mapping = CoreMapping(
@@ -357,6 +379,7 @@ def map_and_route(
         swaps=swaps,
         teleportations=teleportations,
         seconds=seconds,
+        timing=timing or Timing(),
     )
 
 

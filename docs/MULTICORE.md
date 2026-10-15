@@ -15,7 +15,7 @@ Python API.
 ## Quick start
 
 ```python
-from qevedo.compiler.multicore import map_and_route, map_to_cores
+from qevedo.compiler.multicore import Timing, map_and_route, map_to_cores
 
 mapping = map_to_cores(open("circuit.qasm").read(), cores=4, qubits_per_core=10)
 print(mapping.communications)    # teleportations needed
@@ -34,6 +34,10 @@ print(result.circuit.instructions[:5])   # cx, swap and teleport on q[0..35]
 
 # How long it takes when each link holds two EPR pairs at a time.
 print(result.schedule(link_capacity=2).duration)
+
+# Map for time rather than teleportations, for links with two channels.
+fast = map_and_route(circuit, cores=4, qubits_per_core=9, chip="grid:3x3",
+                     method="hqa-latency", timing=Timing(link_capacity=2))
 ```
 
 `map_to_cores` also takes a parsed `Circuit` or a list of two-qubit gates as
@@ -42,15 +46,16 @@ qubit pairs, and a `method`:
 | method | what it does |
 |---|---|
 | `"hqa"` (default) | Hungarian Qubit Assignment with look-ahead attraction |
-| `"hqa-latency"` | HQA that also weighs how much each move delays its gate (not in the papers; see below) |
+| `"hqa-latency"` | HQA that also weighs how much each move delays its gate, planning for a `timing` (not in the papers; see below) |
 | `"hqa-no-lookahead"` | HQA without the attraction term |
 | `"hqa-uniform-cost"` | HQA counting every move as one teleportation (the papers' cost), even across unlinked cores |
 | `"fgp-roee"` | Fine-Grained Partitioning with relaxed Overall Extreme Exchange |
 | `"naive"` | move one qubit of each split gate to the other's core |
 
 From Rust, `qcc::multicore::{Architecture, Timeslices, map, Method}` (and
-`map_and_route` with a `qcc::routing::CouplingGraph` for the chip; `hqa`
-with `HqaOptions` sets the latency weight and the teleportation time), with
+`map_and_route` with a `qcc::routing::CouplingGraph` for the chip, and
+`map_timed` with a `Timing` for `HqaLatency`; `hqa` with `HqaOptions` sets
+the latency weight and the teleportation time directly), with
 `Architecture::new` (all to all), `line`, `ring`, `grid` or `with_links` (see
 `core/examples/multicore.rs`, run with
 `cargo run --release --example multicore -- 100 10`).
@@ -300,18 +305,18 @@ method's duration over HQA's (above 1: HQA finishes first):
 
 | links | channels | HQA-latency / HQA | FGP-rOEE / HQA | naive / HQA |
 |---|---|---|---|---|
-| all to all | 1 | **0.96×** | 1.25× | 1.71× |
-| | 2 | **0.93×** | 1.01× | 1.29× |
-| | 4 | **0.93×** | 0.97× | 1.07× |
-| | unlimited | **0.93×** | 0.96× | 1.03× |
-| line | 1 | **0.97×** | 2.14× | 2.97× |
-| | 2 | **0.98×** | 1.71× | 2.40× |
-| | 4 | **0.96×** | 1.41× | 2.03× |
-| | unlimited | **0.90×** | 1.20× | 1.51× |
+| all to all | 1 | **0.94×** | 1.21× | 1.64× |
+| | 2 | **0.93×** | 1.00× | 1.27× |
+| | 4 | **0.93×** | 0.97× | 1.06× |
+| | unlimited | **0.92×** | 0.96× | 1.03× |
+| line | 1 | **0.91×** | 1.49× | 2.25× |
+| | 2 | **0.91×** | 1.38× | 2.08× |
+| | 4 | **0.90×** | 1.27× | 1.82× |
+| | unlimited | **0.88×** | 1.20× | 1.51× |
 
 - When pairs are scarce, fewer teleportations means a shorter circuit:
-  with one channel per link HQA finishes 1.25× sooner than FGP-rOEE with
-  cores linked all to all, and 2.1× sooner on a line, where every crossing
+  with one channel per link HQA finishes 1.21× sooner than FGP-rOEE with
+  cores linked all to all, and 1.5× sooner on a line, where every crossing
   shares the few links (except, again, the Cuccaro adder).
 - When links have pairs to spare, teleportations run in parallel and the
   count matters less: with all cores linked to all and four channels or
@@ -321,18 +326,28 @@ method's duration over HQA's (above 1: HQA finishes first):
 - **HQA-latency** (`"hqa-latency"`, not in the papers) closes that gap. HQA
   keeps, for every qubit, when it would be free if everything ran as soon as
   possible, and adds to the cost of putting a gate in a core how much later
-  the gate could start than if nothing moved (weighted 0.5, in
-  teleportations; 0.25 to 1 give durations within 2%). Between moving one
-  qubit or the other, it moves the one that has been idle, whose
-  teleportation overlaps other gates. It needs 6% more teleportations than
-  HQA with cores linked all to all (10% on a line), and gives the shortest
-  circuits on average in every configuration, 2–10% shorter than HQA. It is
-  not the best on every benchmark: on a line with few channels, its extra
-  teleportations make random circuits and Quantum Volume 8–18% longer than
-  with HQA, and with all cores linked and links to spare, the naive mapper
-  (QFT, Draper, Quantum Volume) or FGP-rOEE (random circuits) is still
-  shortest on several benchmarks.
-- Making HQA's time estimate also count how busy each link is (when its next
+  the gate could start than if nothing moved, in teleportations, times a
+  weight. Between moving one qubit or the other, it moves the one that has
+  been idle, whose teleportation overlaps other gates. No single weight
+  suits every circuit: weighing delay shortens circuits whose links have
+  pairs to spare, but its extra teleportations lengthen those that keep the
+  links busy (with a fixed weight of 0.5, random circuits and Quantum Volume
+  on a line with few channels took 8–18% longer than with HQA). So
+  HQA-latency maps with the weights 0, 0.25, 0.5 and 1 and keeps the one
+  that runs fastest under the `Timing` it is given: `map_and_route` routes
+  all four and schedules them; `map_to_cores`, which does not route, uses an
+  estimate without SWAPs (gates and teleportations as soon as possible,
+  sharing the links' channels; `mapping_duration`). Weight 0 is plain HQA,
+  so through `map_and_route` it is never slower than HQA: 6–12% shorter on
+  average, up to 25% (QFT on a line), the shortest of all four methods in
+  31 of the 40 runs. It uses about as many teleportations as HQA when
+  channels are few, and up to 11% more when there are pairs to spare. The
+  exceptions are Cuccaro (FGP-rOEE, as before), random circuits with two channels (FGP-rOEE, by 1%) and, with all
+  cores linked and four channels or more, QFT, Draper and Quantum Volume,
+  where the naive mapper is 2–11% shorter. Mapping and routing take about
+  twice as long as with HQA (0.08 s against 0.03 s for 100-qubit Quantum
+  Volume).
+- Making the delay term also count how busy each link is (when its next
   EPR pair is ready) gave longer circuits, not shorter, so it was left out.
 
 ![Sparse links](../benchmarks/multicore/charts/topology.svg)

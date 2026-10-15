@@ -64,13 +64,12 @@ pub use bounds::random_circuit_bounds;
 pub use hqa::{HqaOptions, hqa};
 pub use lookahead::{HORIZON, attraction};
 pub use physical::{PhysicalCircuit, map_and_route, physical_circuit};
-pub use schedule::{Schedule, Timing, schedule};
+pub use schedule::{Schedule, Timing, mapping_duration, schedule};
 pub use timeslices::Timeslices;
 
-/// The weight of [`Method::HqaLatency`]'s delay term, in teleportations per
-/// teleportation of delay. Chosen on the benchmarks: 0.25 to 1 all give
-/// durations within 2% of each other.
-pub const LATENCY_WEIGHT: f64 = 0.5;
+/// The weights of the delay term (in teleportations per teleportation of
+/// delay) that [`Method::HqaLatency`] tries; 0 is plain HQA.
+pub const LATENCY_WEIGHTS: [f64; 4] = [0.0, 0.25, 0.5, 1.0];
 
 /// A mapping algorithm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,7 +77,8 @@ pub enum Method {
     /// Hungarian Qubit Assignment with look-ahead attraction (the default).
     Hqa,
     /// HQA that also weighs how much later each placement lets its gate start
-    /// (not in the papers): a few more teleportations, a shorter circuit.
+    /// (not in the papers), with the weight from [`LATENCY_WEIGHTS`] whose
+    /// mapping takes least time under the [`Timing`] given to [`map_timed`].
     HqaLatency,
     /// HQA without the attraction term.
     HqaWithoutLookahead,
@@ -175,7 +175,19 @@ fn place_groups(counts: &[Vec<f64>], part: &[usize], arch: &Architecture) -> Vec
 /// Map `slices` onto `arch` with `method`, from [`initial_placement`].
 ///
 /// Every slice must fit the cores (see [`Timeslices::fitted_to`]).
+/// [`Method::HqaLatency`] assumes the default [`Timing`]; see [`map_timed`].
 pub fn map(slices: &Timeslices, arch: &Architecture, method: Method) -> Result<Mapping, String> {
+    map_timed(slices, arch, method, &Timing::default())
+}
+
+/// [`map`], with the durations and link capacity that
+/// [`Method::HqaLatency`] plans for (the other methods ignore them).
+pub fn map_timed(
+    slices: &Timeslices,
+    arch: &Architecture,
+    method: Method,
+    timing: &Timing,
+) -> Result<Mapping, String> {
     arch.check_fits(slices.qubits())?;
     if !slices.fits(arch) {
         return Err(format!(
@@ -187,15 +199,7 @@ pub fn map(slices: &Timeslices, arch: &Architecture, method: Method) -> Result<M
     let initial = initial_placement(slices, arch);
     let mapping = match method {
         Method::Hqa => hqa(slices, arch, &initial, HqaOptions::default()),
-        Method::HqaLatency => hqa(
-            slices,
-            arch,
-            &initial,
-            HqaOptions {
-                latency: LATENCY_WEIGHT,
-                ..HqaOptions::default()
-            },
-        ),
+        Method::HqaLatency => hqa_latency(slices, arch, &initial, timing),
         Method::HqaWithoutLookahead => hqa(
             slices,
             arch,
@@ -219,6 +223,62 @@ pub fn map(slices: &Timeslices, arch: &Architecture, method: Method) -> Result<M
     }?;
     debug_assert!(mapping.validate(arch, slices).is_ok());
     Ok(mapping)
+}
+
+/// HQA with each of [`LATENCY_WEIGHTS`]: the mapping that takes least time
+/// under `timing` (then the one with fewest communications). Weighing delay
+/// shortens circuits whose links have pairs to spare, but its extra
+/// teleportations lengthen those that keep the links busy; trying the
+/// weights, plain HQA included, finds which case a circuit is in.
+fn hqa_latency(
+    slices: &Timeslices,
+    arch: &Architecture,
+    initial: &Assignment,
+    timing: &Timing,
+) -> Result<Mapping, String> {
+    let candidates = latency_candidates(slices, arch, initial, timing)?;
+    let key = |m: &Mapping| {
+        (
+            schedule::mapping_duration(m, slices, timing),
+            m.communications(),
+        )
+    };
+    Ok(fastest(candidates, key))
+}
+
+/// HQA's mappings with each of [`LATENCY_WEIGHTS`].
+fn latency_candidates(
+    slices: &Timeslices,
+    arch: &Architecture,
+    initial: &Assignment,
+    timing: &Timing,
+) -> Result<Vec<Mapping>, String> {
+    LATENCY_WEIGHTS
+        .iter()
+        .map(|&latency| {
+            let options = HqaOptions {
+                latency,
+                teleport_time: timing.teleport / timing.two_qubit,
+                ..HqaOptions::default()
+            };
+            hqa(slices, arch, initial, options)
+        })
+        .collect()
+}
+
+/// The item with the smallest `(duration, count)`, the first on ties.
+fn fastest<T>(items: Vec<T>, key: impl Fn(&T) -> (f64, usize)) -> T {
+    let mut best: Option<((f64, usize), T)> = None;
+    for item in items {
+        let k = key(&item);
+        if best
+            .as_ref()
+            .is_none_or(|(b, _)| k.0 < b.0 - 1e-9 || (k.0 <= b.0 + 1e-9 && k.1 < b.1))
+        {
+            best = Some((k, item));
+        }
+    }
+    best.expect("at least one item").1
 }
 
 #[cfg(test)]

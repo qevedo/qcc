@@ -7,6 +7,7 @@ import pytest
 
 from qevedo.compiler.multicore import (
     METHODS,
+    Timing,
     map_and_route,
     map_to_cores,
     random_circuit_bounds,
@@ -236,3 +237,20 @@ def test_schedules_wait_for_epr_pairs_on_busy_links():
     assert many.epr_wait < one.epr_wait
     with pytest.raises(ValueError, match="channel"):
         result.schedule(link_capacity=0)
+
+
+@pytest.mark.parametrize("capacity", [1, 4])
+def test_hqa_latency_plans_for_the_timing_and_is_no_slower(capacity):
+    timing = Timing(link_capacity=capacity)
+    pairs = random_pairs(24, 24, seed=5)
+    hqa = map_and_route(pairs, cores=4, qubits_per_core=6, chip="line", timing=timing)
+    fast = map_and_route(
+        pairs, cores=4, qubits_per_core=6, chip="line", method="hqa-latency", timing=timing
+    )
+    assert fast.timing == hqa.timing == timing
+    assert fast.schedule().duration <= hqa.schedule().duration + 1e-9
+    # Fields can be changed per call; other timings can be passed whole.
+    assert hqa.schedule(link_capacity=capacity + 1).duration <= hqa.schedule().duration
+    assert hqa.schedule(Timing(teleport=0.0, epr_pair=0.0)).epr_wait == 0
+    mapped = map_to_cores(pairs, 4, 6, method="hqa-latency", timing=timing)
+    check(mapped)
