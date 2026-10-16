@@ -85,20 +85,36 @@ print(circuit.gate_counts())
 
 ## Multi-core architectures
 
-`qevedo.compiler.multicore` maps circuits onto modular quantum computers made
-of several cores, deciding before each timeslice which core every qubit is in
-with as few teleportations as possible. It implements Hungarian Qubit
-Assignment (Escofet et al.) and the FGP-rOEE and naive mappers, in Rust:
+`qevedo.compiler.multicore` compiles circuits for modular quantum computers
+made of several cores joined by quantum links, in Rust:
+
+- **mapping**: before each timeslice, which core every qubit is in, with as
+  few teleportations as possible: Hungarian Qubit Assignment (HQA, Escofet
+  et al.), FGP-rOEE and a naive mapper, on cores linked all to all, in a
+  line, a ring, a grid or any connected way;
+- **routing inside the cores** (`map_and_route`): each core routed on its own
+  coupling graph with SABRE, giving a circuit on physical qubits with SWAPs
+  and teleportations, optionally through fixed communication qubits (ports);
+- **timing**: how long the circuit takes when links make EPR pairs a few at
+  a time, and `"hqa-latency"`, an HQA that plans for it.
 
 ```python
-from qevedo.compiler.multicore import map_to_cores
+from qevedo.compiler.multicore import Timing, map_and_route, map_to_cores
 
 mapping = map_to_cores(open("circuit.qasm").read(), cores=4, qubits_per_core=10)
-print(mapping.communications)
+print(mapping.communications)            # teleportations
+
+result = map_and_route(open("circuit.qasm").read(), cores=4, qubits_per_core=9,
+                       chip="grid:3x3", topology="line", ports="central",
+                       method="hqa-latency", timing=Timing(link_capacity=2))
+print(result.teleportations, result.swaps, result.schedule().duration)
 ```
 
-See [docs/MULTICORE.md](../docs/MULTICORE.md) for the model, the methods and
-benchmark results.
+It reproduces Escofet et al.'s comparison (HQA needs 1.24× fewer
+teleportations than FGP-rOEE), and on TeleSABRE's own device and circuits,
+HQA with ports uses 0.26× its EPR pairs and 0.51× its SWAPs. See
+[docs/MULTICORE.md](https://github.com/qevedo/qcc/blob/master/docs/MULTICORE.md)
+for the model, the methods and every benchmark.
 
 ## Tests
 

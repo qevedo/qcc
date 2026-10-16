@@ -4,12 +4,24 @@ build-backend = "maturin"
 
 [project]
 name = "qevedo-compiler"
-version = "0.1.1"
+version = "0.2.0"
 description = "QCC, the Quantum Compiler Collection: a technology-agnostic quantum circuit compiler (qevedo.compiler)"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
+keywords = [
+    "quantum", "compiler", "openqasm", "transpiler", "gate synthesis",
+    "multi-core", "modular quantum computing", "distributed quantum computing",
+    "qubit mapping", "qubit routing", "hungarian qubit assignment", "sabre",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Physics",
+]
 dependencies = [
     "PyYAML>=6.0",
     "numpy>=1.24",
@@ -26,6 +38,7 @@ qcc = "qevedo.compiler.cli:main"
 [project.urls]
 Homepage = "https://github.com/qevedo/qcc"
 Repository = "https://github.com/qevedo/qcc"
+Documentation = "https://github.com/qevedo/qcc/blob/master/docs/MULTICORE.md"
 
 [tool.maturin]
 # The Rust core (../core, through the bindings in src/) is the module
