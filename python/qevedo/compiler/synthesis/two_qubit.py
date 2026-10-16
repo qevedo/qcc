@@ -514,40 +514,39 @@ def _dress(steps: list[Step], cost_1q: Callable[[np.ndarray], int]) -> list[Step
     product; the angle that minimises the two gates' combined cost is kept.
     """
     work = [list(step) for step in steps]
-    for _ in range(3):
-        total = sum(cost_1q(step[1]) for step in work if step[0] == "u")
-        i = 0
-        while i < len(work):
-            name, params, operands = work[i]
-            if name == "u":
-                i += 1
-                continue
-            axes = _commuting_axes(name, params, operands)
-            for q in operands:
-                for axis in axes[q]:
-                    before = _neighbour(work, i, q, -1)
-                    if before is None:
-                        work.insert(i, ["u", I2, (q,)])
-                        before, i = i, i + 1
-                    after = _neighbour(work, i, q, 1)
-                    if after is None:
-                        work.insert(i + 1, ["u", I2, (q,)])
-                        after = i + 1
-                    b, a = work[before][1], work[after][1]
-                    best_cost, best_angle = cost_1q(b) + cost_1q(a), None
-                    for angle in _candidate_angles(axis, b, a):
-                        r = _rotation(axis, angle)
-                        cost = cost_1q(r.conj().T @ b) + cost_1q(a @ r)
-                        if cost < best_cost:
-                            best_cost, best_angle = cost, angle
-                    if best_angle is not None:
-                        r = _rotation(axis, best_angle)
-                        work[before][1] = r.conj().T @ b
-                        work[after][1] = a @ r
-            i = _move_paulis(work, i, cost_1q)
+    # One pass over the gates: on the benchmarks a second never removed a
+    # gate, and these passes are most of the time spent on generic
+    # two-qubit blocks.
+    i = 0
+    while i < len(work):
+        name, params, operands = work[i]
+        if name == "u":
             i += 1
-        if sum(cost_1q(step[1]) for step in work if step[0] == "u") >= total:
-            break
+            continue
+        axes = _commuting_axes(name, params, operands)
+        for q in operands:
+            for axis in axes[q]:
+                before = _neighbour(work, i, q, -1)
+                if before is None:
+                    work.insert(i, ["u", I2, (q,)])
+                    before, i = i, i + 1
+                after = _neighbour(work, i, q, 1)
+                if after is None:
+                    work.insert(i + 1, ["u", I2, (q,)])
+                    after = i + 1
+                b, a = work[before][1], work[after][1]
+                best_cost, best_angle = cost_1q(b) + cost_1q(a), None
+                for angle in _candidate_angles(axis, b, a):
+                    r = _rotation(axis, angle)
+                    cost = cost_1q(r.conj().T @ b) + cost_1q(a @ r)
+                    if cost < best_cost:
+                        best_cost, best_angle = cost, angle
+                if best_angle is not None:
+                    r = _rotation(axis, best_angle)
+                    work[before][1] = r.conj().T @ b
+                    work[after][1] = a @ r
+        i = _move_paulis(work, i, cost_1q)
+        i += 1
     return [tuple(step) for step in work if not (step[0] == "u" and np.allclose(step[1], I2))]
 
 

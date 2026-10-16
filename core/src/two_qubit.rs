@@ -770,64 +770,56 @@ impl TwoQubitSynth {
     /// products across Clifford gates, when that cheapens the neighbours.
     fn dress(&mut self, steps: Vec<Step>, cost: &dyn Fn(&M2) -> usize) -> Vec<Step> {
         let mut work = steps;
-        let local_total = |work: &[Step]| -> usize {
-            work.iter()
-                .map(|s| if let Step::U(_, m) = s { cost(m) } else { 0 })
-                .sum()
-        };
-        for _ in 0..3 {
-            let total = local_total(&work);
-            let mut i = 0;
-            while i < work.len() {
-                let (name, params, operands) = match &work[i] {
-                    Step::U(..) => {
-                        i += 1;
-                        continue;
+        // One pass over the gates: on the benchmarks a second never removed a
+        // gate, and these passes are most of the time spent on generic
+        // two-qubit blocks.
+        let mut i = 0;
+        while i < work.len() {
+            let (name, params, operands) = match &work[i] {
+                Step::U(..) => {
+                    i += 1;
+                    continue;
+                }
+                Step::Gate(name, params, operands) => (name.clone(), params.clone(), *operands),
+            };
+            let axes = self.commuting_axes(&name, &params, operands);
+            for q in operands {
+                for &axis in &axes[q] {
+                    let before = match neighbour(&work, i, q, -1) {
+                        Some(b) => b,
+                        None => {
+                            work.insert(i, Step::U(q, M2::IDENTITY));
+                            i += 1;
+                            i - 1
+                        }
+                    };
+                    let after = match neighbour(&work, i, q, 1) {
+                        Some(a) => a,
+                        None => {
+                            work.insert(i + 1, Step::U(q, M2::IDENTITY));
+                            i + 1
+                        }
+                    };
+                    let (b, a) = (local(&work[before]), local(&work[after]));
+                    let mut best_cost = cost(&b) + cost(&a);
+                    let mut best_angle = None;
+                    for angle in candidate_angles(axis, &b, &a) {
+                        let r = rotation(axis, angle);
+                        let c = cost(&(r.adjoint() * b)) + cost(&(a * r));
+                        if c < best_cost {
+                            (best_cost, best_angle) = (c, Some(angle));
+                        }
                     }
-                    Step::Gate(name, params, operands) => (name.clone(), params.clone(), *operands),
-                };
-                let axes = self.commuting_axes(&name, &params, operands);
-                for q in operands {
-                    for &axis in &axes[q] {
-                        let before = match neighbour(&work, i, q, -1) {
-                            Some(b) => b,
-                            None => {
-                                work.insert(i, Step::U(q, M2::IDENTITY));
-                                i += 1;
-                                i - 1
-                            }
-                        };
-                        let after = match neighbour(&work, i, q, 1) {
-                            Some(a) => a,
-                            None => {
-                                work.insert(i + 1, Step::U(q, M2::IDENTITY));
-                                i + 1
-                            }
-                        };
-                        let (b, a) = (local(&work[before]), local(&work[after]));
-                        let mut best_cost = cost(&b) + cost(&a);
-                        let mut best_angle = None;
-                        for angle in candidate_angles(axis, &b, &a) {
-                            let r = rotation(axis, angle);
-                            let c = cost(&(r.adjoint() * b)) + cost(&(a * r));
-                            if c < best_cost {
-                                (best_cost, best_angle) = (c, Some(angle));
-                            }
-                        }
-                        if let Some(angle) = best_angle {
-                            let r = rotation(axis, angle);
-                            set_local(&mut work[before], r.adjoint() * b);
-                            set_local(&mut work[after], a * r);
-                        }
+                    if let Some(angle) = best_angle {
+                        let r = rotation(axis, angle);
+                        set_local(&mut work[before], r.adjoint() * b);
+                        set_local(&mut work[after], a * r);
                     }
                 }
-                i = self.move_paired(&mut work, i, cost);
-                i = self.move_paulis(&mut work, i, cost);
-                i += 1;
             }
-            if local_total(&work) >= total {
-                break;
-            }
+            i = self.move_paired(&mut work, i, cost);
+            i = self.move_paulis(&mut work, i, cost);
+            i += 1;
         }
         work.retain(|s| !matches!(s, Step::U(_, m) if m.close(&M2::IDENTITY, 1e-8)));
         work

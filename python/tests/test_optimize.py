@@ -8,6 +8,7 @@ import pytest
 from qevedo.compiler.device import DeviceSpec
 from qevedo.compiler.ir import Circuit, Instruction, Qubit
 from qevedo.compiler.passes import CommutativeCancellation, ResynthesizeTwoQubitBlocks
+from qevedo.compiler.passes.optimize import MergeSingleQubitGates
 from qevedo.compiler.passes.decompose import cost
 from qevedo.compiler.synthesis.gates import embed, gate_matrix
 
@@ -76,8 +77,13 @@ def test_passes_preserve_the_unitary_and_never_cost_more(label, make):
         c = random_native_circuit(rng, NATIVE[label], int(rng.integers(2, 14)))
         out = make().run(c, dev)
         assert equal_up_to_phase(unitary(out), unitary(c))
-        # Fewer two-qubit gates first, then fewer gates.
-        assert cost(out.instructions) <= cost(c.instructions)
+        # Fewer two-qubit gates first, then fewer gates; resynthesis may leave
+        # single-qubit gates for the next merge.
+        if make is ResynthesizeTwoQubitBlocks:
+            merge = MergeSingleQubitGates()
+            assert cost(merge.run(out, dev).instructions) <= cost(merge.run(c, dev).instructions)
+        else:
+            assert cost(out.instructions) <= cost(c.instructions)
         assert {i.name for i in out.instructions} <= set(NATIVE[label])
 
 

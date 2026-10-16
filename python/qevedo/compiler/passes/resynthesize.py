@@ -40,7 +40,14 @@ class _Block:
 
 
 class ResynthesizeTwoQubitBlocks(Pass):
-    """Replace each maximal two-qubit block by its cheapest synthesis."""
+    """Replace each maximal two-qubit block by its cheapest synthesis.
+
+    A block is replaced when its synthesis has fewer two-qubit gates, or as
+    many and fewer gates inside the block (``_block_cost``). As counting only
+    inside can, in rare circuits, cost more once single-qubit runs merge, the
+    result is compared, merged, with replacing only blocks that are cheaper in
+    all their gates and with the input, and the cheapest is kept.
+    """
 
     name = "resynthesize_2q"
 
@@ -49,8 +56,20 @@ class ResynthesizeTwoQubitBlocks(Pass):
         self._lowerings: dict[frozenset[str], Lowering] = {}
 
     def run(self, circuit: Circuit, device: DeviceSpec | None = None) -> Circuit:
+        from qevedo.compiler.passes.optimize import MergeSingleQubitGates
+
         native = frozenset(g.lower() for g in (device or default_device()).native_gates)
         lowering = self._lowerings.setdefault(native, Lowering(native))
+        merge = MergeSingleQubitGates()
+        candidates = [
+            self._resynthesize(circuit, lowering, inside=True),
+            self._resynthesize(circuit, lowering, inside=False),
+            circuit.copy(),
+        ]
+        # The first of the cheapest, once merged: never worse than the input.
+        return min(candidates, key=lambda c: cost(merge.run(c, device).instructions))
+
+    def _resynthesize(self, circuit: Circuit, lowering: Lowering, inside: bool) -> Circuit:
         out = circuit.copy()
         # The output, with a block standing where its first gate was: gates that
         # come later on other qubits commute with the rest of the block.
@@ -99,15 +118,29 @@ class ResynthesizeTwoQubitBlocks(Pass):
         out.instructions = []
         for item in result:
             if isinstance(item, _Block):
-                out.instructions.extend(self._best(item, lowering))
+                out.instructions.extend(self._best(item, lowering, inside))
             else:
                 out.instructions.append(item)
         return out
 
     @staticmethod
-    def _best(block: _Block, lowering: Lowering) -> list[Instruction]:
+    def _best(block: _Block, lowering: Lowering, inside: bool) -> list[Instruction]:
         two_qubit_gates = sum(1 for inst in block.instructions if len(inst.qubits) == 2)
         if two_qubit_gates < 2 and len(block.instructions) <= 3:
             return block.instructions
         candidate = lowering.two_qubit(block.matrix(), block.pair)
-        return candidate if cost(candidate) < cost(block.instructions) else block.instructions
+        measure = _block_cost if inside else cost
+        return candidate if measure(candidate) < measure(block.instructions) else block.instructions
+
+
+def _block_cost(instructions: list[Instruction]) -> tuple[int, int, int]:
+    """What a block costs once its outer single-qubit gates have merged with
+    their neighbours' (as the next single-qubit merge does): its two-qubit
+    gates, then the single-qubit gates between its first and last two-qubit
+    gate, then all its gates. Counting the outer gates in full would refuse a
+    synthesis that saves many gates inside the block for a few more outside."""
+    two_qubit = [i for i, inst in enumerate(instructions) if len(inst.qubits) == 2]
+    inside = 0
+    if two_qubit:
+        inside = sum(1 for inst in instructions[two_qubit[0] : two_qubit[-1]] if len(inst.qubits) == 1)
+    return len(two_qubit), inside, len(instructions)

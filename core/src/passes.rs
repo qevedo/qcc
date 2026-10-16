@@ -328,10 +328,44 @@ enum Item {
 }
 
 /// Replace each maximal run of gates on one pair of qubits by its cheapest
-/// synthesis, when that has fewer two-qubit gates, or as many and fewer gates.
+/// synthesis, when that has fewer two-qubit gates, or as many and fewer
+/// gates inside the block ([`block_cost`]). As counting only inside can, in
+/// rare circuits, cost more once single-qubit runs merge, the result is
+/// compared, merged, with replacing only blocks that are cheaper in all
+/// their gates and with the input, and the cheapest is kept.
 pub fn resynthesize_two_qubit_blocks(
     instructions: Vec<Instruction>,
     lowering: &mut Lowering,
+) -> Vec<Instruction> {
+    let inside = resynthesize_blocks(instructions.clone(), lowering, Measure::Inside);
+    let whole = resynthesize_blocks(instructions.clone(), lowering, Measure::Whole);
+    let merged = |c: &[Instruction]| {
+        cost(&merge_single_qubit_runs(
+            c.to_vec(),
+            &lowering.native,
+            &lowering.bases_1q,
+        ))
+    };
+    // The first of the cheapest, once merged: never worse than the input.
+    [inside, whole, instructions]
+        .into_iter()
+        .min_by_key(|c| merged(c))
+        .expect("three candidates")
+}
+
+/// How [`resynthesize_blocks`] compares a block with its synthesis.
+#[derive(Clone, Copy)]
+enum Measure {
+    /// By [`block_cost`]: two-qubit gates, then gates inside the block.
+    Inside,
+    /// By [`cost`]: two-qubit gates, then all gates.
+    Whole,
+}
+
+fn resynthesize_blocks(
+    instructions: Vec<Instruction>,
+    lowering: &mut Lowering,
+    measure: Measure,
 ) -> Vec<Instruction> {
     // A block stands where its first gate was: gates that come later on other
     // qubits commute with the rest of the block.
@@ -424,13 +458,15 @@ pub fn resynthesize_two_qubit_blocks(
     for item in result {
         match item {
             Item::Inst(inst) => out.push(inst),
-            Item::Block(b) => out.extend(best_for_block(blocks[b].take().unwrap(), lowering)),
+            Item::Block(b) => {
+                out.extend(best_for_block(blocks[b].take().unwrap(), lowering, measure))
+            }
         }
     }
     out
 }
 
-fn best_for_block(block: Block, lowering: &mut Lowering) -> Vec<Instruction> {
+fn best_for_block(block: Block, lowering: &mut Lowering, measure: Measure) -> Vec<Instruction> {
     let two_qubit_gates = block
         .instructions
         .iter()
@@ -442,10 +478,33 @@ fn best_for_block(block: Block, lowering: &mut Lowering) -> Vec<Instruction> {
     let Some(m) = block.matrix() else {
         return block.instructions;
     };
+    let better = |candidate: &[Instruction], original: &[Instruction]| match measure {
+        Measure::Inside => block_cost(candidate) < block_cost(original),
+        Measure::Whole => cost(candidate) < cost(original),
+    };
     match lowering.two_qubit(&m, block.pair) {
-        Ok(candidate) if cost(&candidate) < cost(&block.instructions) => candidate,
+        Ok(candidate) if better(&candidate, &block.instructions) => candidate,
         _ => block.instructions,
     }
+}
+
+/// What a block costs once its outer single-qubit gates have merged with
+/// their neighbours' (as the next single-qubit merge does): its two-qubit
+/// gates, then the single-qubit gates between its first and last two-qubit
+/// gate, then all its gates. Counting the outer gates in full would refuse a
+/// synthesis that saves many gates inside the block for a few more outside.
+fn block_cost(instructions: &[Instruction]) -> (usize, usize, usize) {
+    let two_qubit: Vec<usize> = (0..instructions.len())
+        .filter(|&i| instructions[i].qubits.len() == 2)
+        .collect();
+    let inside = match (two_qubit.first(), two_qubit.last()) {
+        (Some(&first), Some(&last)) => instructions[first..last]
+            .iter()
+            .filter(|i| i.qubits.len() == 1)
+            .count(),
+        _ => 0,
+    };
+    (two_qubit.len(), inside, instructions.len())
 }
 
 // -- pipeline ---------------------------------------------------------------------------
@@ -586,18 +645,25 @@ mod tests {
                 circuit.extend(lowering.lower(inst).unwrap());
             }
             let reference = circuit_unitary(&circuit, 3);
+            // Resynthesis may leave single-qubit gates for the next merge.
+            let resynthesized = resynthesize_two_qubit_blocks(circuit.clone(), &mut lowering);
+            let merge = |c: Vec<Instruction>| {
+                merge_single_qubit_runs(c, &lowering.native, &lowering.bases_1q)
+            };
+            assert!(cost(&merge(resynthesized.clone())) <= cost(&merge(circuit.clone())));
             for out in [
                 commutative_cancellation(circuit.clone()),
-                resynthesize_two_qubit_blocks(circuit.clone(), &mut lowering),
-                merge_single_qubit_runs(circuit.clone(), &lowering.native, &lowering.bases_1q),
+                resynthesized,
+                merge(circuit.clone()),
             ] {
                 assert!(dense_equal_up_to_phase(
                     &circuit_unitary(&out, 3),
                     &reference,
                     1e-8
                 ));
-                assert!(cost(&out) <= cost(&circuit));
             }
+            assert!(cost(&commutative_cancellation(circuit.clone())) <= cost(&circuit));
+            assert!(cost(&merge(circuit.clone())) <= cost(&circuit));
         }
     }
 
