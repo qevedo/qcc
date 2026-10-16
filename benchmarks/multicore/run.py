@@ -31,12 +31,15 @@ and one more that takes the circuits down to physical qubits:
 * timing: the latency experiment (1 and unlimited channels) with links
   faster (EPR pair and teleportation 2) and slower (50 and 20) than the
   default (10 and 5);
+* attraction: HQA with and without its look-ahead attraction on the Cuccaro
+  adder and random circuits of 20 to 200 qubits, on cores of 16 qubits, as
+  many as needed (Figure 10a of the 2025 paper);
 * ablation: the routing experiment's grid and line chips without choosing
   the slot of an arriving qubit by its next partner, and with SABRE looking
   0 to 64 timeslices past each epoch.
 
 Every mapper starts from the same OEE placement. Results go to
-results/{multicore,routing,latency,ablation,latency_ports,timing}.csv;
+results/{multicore,routing,latency,ablation,latency_ports,timing,attraction}.csv;
 plot.py draws the first.
 """
 
@@ -63,6 +66,7 @@ LATENCY_OUT = Path(__file__).parent / "results" / "latency.csv"
 ABLATION_OUT = Path(__file__).parent / "results" / "ablation.csv"
 LATENCY_PORTS_OUT = Path(__file__).parent / "results" / "latency_ports.csv"
 TIMING_OUT = Path(__file__).parent / "results" / "timing.csv"
+ATTRACTION_OUT = Path(__file__).parent / "results" / "attraction.csv"
 #: Links faster and slower than the default (EPR pair 10, teleportation 5,
 #: in two-qubit gate times).
 TIMINGS = {
@@ -130,6 +134,7 @@ def main() -> None:
     write(ABLATION_OUT, ablation())
     write(LATENCY_PORTS_OUT, latency_ports())
     write(TIMING_OUT, timing_sensitivity())
+    write(ATTRACTION_OUT, attraction())
 
 
 def routing() -> list[dict]:
@@ -259,6 +264,33 @@ def ablation() -> list[dict]:
                     + " ".join(f"{r['swaps']:6}" for r in rows[-len(ABLATIONS) :]),
                     flush=True,
                 )
+    return rows
+
+
+def attraction() -> list[dict]:
+    """HQA with and without its look-ahead attraction, as in Figure 10a of
+    Escofet et al. (2025): 16 qubits per core, as many cores as needed."""
+    rows = []
+    for benchmark in ("cuccaro", "random"):
+        for size in range(20, 201, 20):
+            n, pairs = two_qubit_gates(benchmark, size)
+            cores = -(-n // 16)
+            for method in ("hqa", "hqa-no-lookahead"):
+                mapping = map_to_cores(pairs, cores, 16, method=method, num_qubits=n)
+                rows.append(
+                    {
+                        "benchmark": benchmark,
+                        "qubits": n,
+                        "cores": cores,
+                        "method": method,
+                        "communications": mapping.communications,
+                    }
+                )
+            print(
+                f"attraction {benchmark:8} {n:4} qubits: "
+                + " ".join(f"{r['method']} {r['communications']}" for r in rows[-2:]),
+                flush=True,
+            )
     return rows
 
 

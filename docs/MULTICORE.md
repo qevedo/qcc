@@ -244,9 +244,11 @@ configurations; above 1 means HQA needs fewer communications or less time.
 - HQA needs **1.24× fewer communications** than FGP-rOEE on average, in line
   with the 1.28× of the original HQA paper (the extended paper reports 1.56×
   over a different set of configurations), and is a median **8× faster**.
-- The look-ahead attraction matters as the paper says: on Cuccaro adders with
-  16 qubits per core, HQA without it needs 1.7–3.9× more communications
-  (the paper: 2.27× on average).
+- The look-ahead attraction matters as the paper says: on cores of 16
+  qubits, as many as needed, HQA without it needs 4.04× as many
+  communications on Cuccaro adders of 20 to 200 qubits (1.32–8.86×) and
+  1.18× on random circuits, where the 2025 paper reports 2.27× and 1.09×
+  (`results/attraction.csv`).
 - On the Cuccaro adder, whose gates mostly join neighbouring qubits,
   FGP-rOEE needs fewer communications than HQA here (0.73×).
 - On random circuits HQA goes below the papers' "lower bound", which assumes
@@ -447,14 +449,17 @@ Mean duration over HQA's:
 |---|---|---|---|---|
 | all to all | 1 | 1.00× | 1.41× | 2.13× |
 | | unlimited | 1.00× | 1.37× | 2.04× |
-| line | 1 | 0.95× | 1.66× | 2.80× |
-| | unlimited | 0.95× | 1.57× | 2.72× |
+| line | 1 | 0.93× | 1.66× | 2.80× |
+| | unlimited | 0.93× | 1.57× | 2.72× |
 
 Moving qubits to and from the ports makes teleportations dearer, and HQA's
 lead grows. The number of channels hardly matters: with one port per link
 in each core, the qubits crossing a link already queue at its port.
-HQA-latency gains little, since its time estimate leaves SWAPs out, which
-now dominate.
+Through ports, HQA-latency also tries its weights with a teleportation made
+dearer by the mean SWAPs to a port and from the other (and keeps the fastest
+routed circuit of all eight). That shortens circuits by 7% on a line of
+cores, but not at all with every core linked to every other: there the delay
+term still misses how crossings queue at the ports.
 
 ![Sparse links](../benchmarks/multicore/charts/topology.svg)
 ![Strong scaling](../benchmarks/multicore/charts/strong.svg)

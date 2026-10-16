@@ -172,7 +172,8 @@ pub fn physical_circuit(
 /// whose qubits are coupled as in `chip`. Gates on three or more qubits must
 /// be decomposed first. With [`Method::HqaLatency`](super::Method), every
 /// latency weight's mapping is routed and the one whose circuit runs fastest
-/// under `timing` is kept.
+/// under `timing` is kept; through ports, the weights are also tried with a
+/// teleportation made dearer by the mean SWAPs to and from the ports.
 pub fn map_and_route(
     circuit: &[Instruction],
     qubits: usize,
@@ -199,8 +200,20 @@ pub fn map_and_route(
         // Route every candidate and keep the one that runs fastest, SWAPs
         // included (the mapper's own estimate leaves them out).
         let initial = super::initial_placement(&slices, &planning);
+        let mut candidates = super::latency_candidates(&slices, &planning, &initial, timing)?;
+        // Through ports, a teleportation also costs the SWAPs to its port and
+        // from the other one: also plan for that, on average.
+        if let Some(ports) = &options.ports {
+            let planned = super::Timing {
+                teleport: timing.teleport + 2.0 * ports.mean_distance(chip) * timing.swap,
+                ..*timing
+            };
+            candidates.extend(super::latency_candidates(
+                &slices, &planning, &initial, &planned,
+            )?);
+        }
         let mut routed = Vec::new();
-        for mapping in super::latency_candidates(&slices, &planning, &initial, timing)? {
+        for mapping in candidates {
             let physical = physical_circuit(circuit, &mapping, &slices, chip, options)?;
             let duration = super::schedule(&physical.instructions, arch, timing)?.duration;
             routed.push((duration, mapping, physical));

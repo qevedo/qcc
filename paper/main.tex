@@ -164,8 +164,18 @@ over the virtual, weak and strong scaling configurations.}
 \end{figure}
 
 HQA needs \fgpOverHqa{} fewer teleportations than FGP-rOEE on average and
-maps \hqaSpeedup{} faster (median), in line with the published
-comparison.\todo{quote the papers' own averages with their configurations}
+maps \hqaSpeedup{} faster (median). The original paper reports an average
+improvement of 1.28$\times$~\cite{escofet2023hqa}, and the extended study, over
+its own configurations, 1.556$\times$ fewer communications than FGP-rOEE and a
+4.9$\times$ shorter execution time~\cite{escofet2025revisiting}. Our ratio is
+closer to the former; the gap to the latter may come from details of
+FGP-rOEE that the papers leave open, and our time ratio compares two Rust
+implementations, which the original one does not. The look-ahead attraction
+matters as reported: on cores of 16 qubits, as many as needed, HQA without it
+needs \attractionCuccaro{} as many communications on the Cuccaro adder
+(\attractionCuccaroRange{} over 20 to 200 qubits) and \attractionRandom{} on
+random circuits, where the extended study reports 2.27$\times$ and
+1.09$\times$.
 As in the papers, the exception is the Cuccaro adder, whose gates mostly join
 neighbouring qubits: there FGP-rOEE needs fewer teleportations
 (\cuccaroFgpOverHqa{} of HQA's). On random circuits, HQA goes below the
@@ -387,10 +397,13 @@ qubits to and from the ports makes teleportations dearer, and HQA's lead
 grows: FGP-rOEE's circuits take \portsFgpRange{} times as long and the naive
 mapper's \portsNaiveRange{} times. The number of channels hardly matters any more: with one port
 per link in each core, the qubits crossing a link already queue at its port.
-HQA-latency gains little here (up to \portsLatencyMeanBest{} on average), as
-its time estimate ignores SWAPs, which now dominate; it is still never slower
-than HQA, and the fastest in \portsLatencyWins{} of the \portsLatencyRuns{}
-runs.
+Through ports, HQA-latency also tries its weights with $t_\mathrm{tel}$
+raised by the mean number of SWAPs to a port and from the other, and keeps
+the fastest routed circuit of all eight. It gains up to
+\portsLatencyMeanBest{} on average (on the line), but nothing with every core
+linked to every other, where the delay term still misses how crossings queue
+at the ports; it is never slower than HQA, and the fastest in
+\portsLatencyWins{} of the \portsLatencyRuns{} runs.
 
 \begin{table}[t]
 \centering
@@ -403,8 +416,8 @@ circuits.}
 \section{Discussion and limitations}
 
 The timing model ignores noise, and its durations, with illustrative
-values, should be read as relative. With ports, HQA-latency's time estimate,
-which leaves SWAPs out, should count the way to and from the ports.
+values, should be read as relative. With ports, HQA-latency's delay term
+should model the queues at the ports.
 The benchmarks are those of~\cite{escofet2025revisiting}; other circuit
 families may behave differently, as the Cuccaro adder already does. Our
 choices for odd core sizes and sparse links are ours, not the original
@@ -414,15 +427,20 @@ model moves them by teleportation.
 
 \section{Availability}
 
-The toolkit is MIT-licensed and installs with \texttt{pip install
-qevedo-compiler}. The mappers, the router and the scheduler are in the Rust
-core (\nolinkurl{core/src/multicore/} and \nolinkurl{core/src/routing/}); the
-Python functions \texttt{map\_to\_cores} and \texttt{map\_and\_route} expose
-them. \nolinkurl{benchmarks/multicore/run.py} and
-\nolinkurl{benchmarks/routing/vs_qiskit.py} and
-\nolinkurl{benchmarks/telesabre/compare.py} produce the results, and
-\nolinkurl{paper/make.py} every table, number and figure of this paper.
-\todo{cite a tagged release and archive it (e.g.\ Zenodo DOI)}
+The toolkit is MIT-licensed and installs from PyPI as
+\texttt{qevedo-compiler}, version 0.2.0 or later. The mappers, the router
+and the scheduler are in its Rust core, in \nolinkurl{core/src/multicore/}
+and \nolinkurl{core/src/routing/}, and the Python functions
+\texttt{map\_to\_cores} and \texttt{map\_and\_route} expose them. The
+results come from
+\begin{itemize}
+\item \nolinkurl{benchmarks/multicore/run.py} (all other experiments),
+\item \nolinkurl{benchmarks/routing/vs_qiskit.py} (the SABRE comparison),
+\item \nolinkurl{benchmarks/telesabre/compare.py} (Section~\ref{sec:telesabre}),
+\end{itemize}
+and \nolinkurl{paper/make.py} writes every table, number and figure of this
+paper from them.
+\todo{archive the release used for the results (e.g.\ a Zenodo DOI)}
 
 \bibliographystyle{unsrt}
 \bibliography{refs}

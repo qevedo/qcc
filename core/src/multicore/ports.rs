@@ -92,6 +92,19 @@ impl Ports {
         Ok(())
     }
 
+    /// The mean number of SWAPs from a slot of a core to one of its ports,
+    /// over every slot and port.
+    pub fn mean_distance(&self, chip: &CouplingGraph) -> f64 {
+        let k = chip.qubits();
+        let total: u32 = self
+            .slots
+            .iter()
+            .flat_map(|&(a, b)| [a, b])
+            .map(|port| (0..k).map(|s| chip.distance(s, port)).sum::<u32>())
+            .sum();
+        f64::from(total) / (2 * self.slots.len() * k).max(1) as f64
+    }
+
     /// The slot of `core`'s port on its link to `other`.
     pub fn slot(&self, arch: &Architecture, core: usize, other: usize) -> usize {
         let link = (core.min(other), core.max(other));

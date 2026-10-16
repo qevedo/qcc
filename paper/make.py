@@ -118,6 +118,17 @@ def reproduction(numbers: Numbers) -> None:
     numbers.add("cuccaroFgpOverHqa", times(statistics.median(ratios["cuccaro"]["fgp-roee"])))
 
 
+def attraction(numbers: Numbers) -> None:
+    """HQA without its attraction term, relative to HQA (Figure 10a of the 2025 paper)."""
+    rows = load(RESULTS / "attraction.csv")
+    value = {(r["benchmark"], r["qubits"], r["method"]): int(r["communications"]) for r in rows}
+    for benchmark, name in (("cuccaro", "Cuccaro"), ("random", "Random")):
+        sizes = sorted({q for b, q, _ in value if b == benchmark}, key=int)
+        ratios = [value[(benchmark, q, "hqa-no-lookahead")] / value[(benchmark, q, "hqa")] for q in sizes]
+        numbers.add(f"attraction{name}", times(statistics.mean(ratios)))
+        numbers.add(f"attraction{name}Range", f"{min(ratios):.2f}--{max(ratios):.2f}")
+
+
 def links(numbers: Numbers) -> None:
     """Sparse links: communications counted in link hops."""
     rows = [r for r in load(RESULTS / "multicore.csv") if r["experiment"] == "topology"]
@@ -432,6 +443,7 @@ def main() -> None:
     OUT.mkdir(exist_ok=True)
     numbers = Numbers()
     reproduction(numbers)
+    attraction(numbers)
     links(numbers)
     routing(numbers)
     latency(numbers)
