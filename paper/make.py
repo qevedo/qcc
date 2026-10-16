@@ -235,6 +235,94 @@ def latency(numbers: Numbers) -> None:
     latency_figure(means)
 
 
+def durations(rows: list[dict], key: tuple[str, ...]) -> dict:
+    """Durations (and teleportations) per method, grouped by the columns ``key``."""
+    d = defaultdict(dict)
+    for r in rows:
+        d[tuple(r[k] for k in key)][r["method"]] = (float(r["duration"]), int(r["teleportations"]))
+    return d
+
+
+def mean_ratios(d: dict, keys: list) -> dict:
+    """Mean over ``keys`` of each method's duration over HQA's."""
+    return {
+        m: statistics.mean(d[k][m][0] / d[k]["hqa"][0] for k in keys)
+        for m in ("hqa-latency", "fgp-roee", "naive")
+    }
+
+
+def latency_ports(numbers: Numbers) -> None:
+    """Durations through ports, against HQA's."""
+    d = durations(load(RESULTS / "latency_ports.csv"), ("topology", "link_capacity", "benchmark"))
+    names = {"all-to-all": "All to all", "line": "Line"}
+    lines = []
+    lat, fgp, naive = [], [], []
+    for topology, name in names.items():
+        for k, c in enumerate(CAPACITIES):
+            ratio = mean_ratios(d, [key for key in d if key[:2] == (topology, c)])
+            lat.append(ratio["hqa-latency"])
+            fgp.append(ratio["fgp-roee"])
+            naive.append(ratio["naive"])
+            lines.append(
+                f"{name if k == 0 else ''} & {c} & \\textbf{{{times(ratio['hqa-latency'])}}} & "
+                f"{times(ratio['fgp-roee'])} & {times(ratio['naive'])} \\\\"
+            )
+        if topology != "line":
+            lines.append("\\midrule")
+    table(
+        "table-latency-ports",
+        "Links & Channels & HQA-latency / HQA & FGP-rOEE / HQA & Naive / HQA",
+        "llrrr",
+        lines,
+    )
+    numbers.add("portsLatencyMeanBest", percent(1 - min(lat)))
+    numbers.add("portsFgpRange", f"{min(fgp):.2f}--{max(fgp):.2f}")
+    numbers.add("portsNaiveRange", f"{min(naive):.2f}--{max(naive):.2f}")
+    numbers.add("portsLatencyMeanWorst", percent(1 - max(lat)))
+    per_run = [v["hqa-latency"][0] / v["hqa"][0] for v in d.values()]
+    numbers.add("portsLatencyWorstRun", f"{max(per_run):.2f}")
+    wins = sum(1 for v in d.values() if v["hqa-latency"][0] <= min(x[0] for x in v.values()) + 1e-9)
+    numbers.add("portsLatencyWins", str(wins))
+    numbers.add("portsLatencyRuns", str(len(d)))
+
+
+def timing_sensitivity(numbers: Numbers) -> None:
+    """Durations with links faster and slower than the default."""
+    rows = load(RESULTS / "timing.csv")
+    d = durations(rows, ("timing", "topology", "link_capacity", "benchmark"))
+    timings = list(dict.fromkeys(r["timing"] for r in rows))
+    names = {"all-to-all": "All to all", "line": "Line"}
+    lines = []
+    lat, fgp_one = [], []
+    for topology, name in names.items():
+        first = True
+        for timing in timings:
+            for c in ("1", "unlimited"):
+                ratio = mean_ratios(d, [key for key in d if key[:3] == (timing, topology, c)])
+                lat.append(ratio["hqa-latency"])
+                if c == "1":
+                    fgp_one.append(ratio["fgp-roee"])
+                lines.append(
+                    f"{name if first else ''} & {timing} & {c} & \\textbf{{{times(ratio['hqa-latency'])}}} & "
+                    f"{times(ratio['fgp-roee'])} & {times(ratio['naive'])} \\\\"
+                )
+                first = False
+        if topology != "line":
+            lines.append("\\midrule")
+    table(
+        "table-timing",
+        "Links & Timing & Channels & HQA-latency / HQA & FGP-rOEE / HQA & Naive / HQA",
+        "lllrrr",
+        lines,
+    )
+    per_run = [v["hqa-latency"][0] / v["hqa"][0] for v in d.values()]
+    numbers.add("timingLatencyWorstRun", f"{max(per_run):.2f}")
+    numbers.add("timingLatencyMeanBest", percent(1 - min(lat)))
+    numbers.add("timingLatencyMeanWorst", percent(1 - max(lat)))
+    numbers.add("timingFgpOneChannelMin", times(min(fgp_one)))
+    numbers.add("timingFgpOneChannelMax", times(max(fgp_one)))
+
+
 def latency_figure(means: dict) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(7, 2.6), sharey=True)
     for ax, (topology, title) in zip(axes, (("all-to-all", "Cores linked all to all"), ("line", "Cores in a line"))):
@@ -349,6 +437,8 @@ def main() -> None:
     latency(numbers)
     sabre(numbers)
     telesabre(numbers)
+    latency_ports(numbers)
+    timing_sensitivity(numbers)
     scaling_figure()
     numbers.write()
     print(f"wrote {OUT}: " + ", ".join(sorted(p.name for p in OUT.iterdir())))

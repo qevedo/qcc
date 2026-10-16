@@ -1,0 +1,241 @@
+timing,benchmark,topology,chip,method,link_capacity,teleportations,swaps,duration,epr_wait
+fast links,qft,all-to-all,grid:2x5,hqa,1,1080,4538,2232.0,40.0
+fast links,qft,all-to-all,grid:2x5,hqa,unlimited,1080,4538,2230.0,0.0
+fast links,qft,all-to-all,grid:2x5,hqa-latency,1,1080,4601,2090.0,82.0
+fast links,qft,all-to-all,grid:2x5,hqa-latency,unlimited,1080,4601,2087.0,0.0
+fast links,qft,all-to-all,grid:2x5,fgp-roee,1,2048,4057,2143.0,2722.0
+fast links,qft,all-to-all,grid:2x5,fgp-roee,unlimited,2048,4057,2091.0,0.0
+fast links,qft,all-to-all,grid:2x5,naive,1,1373,4225,2002.0,608.0
+fast links,qft,all-to-all,grid:2x5,naive,unlimited,1373,4225,1959.0,0.0
+fast links,draper,all-to-all,grid:2x5,hqa,1,1046,2990,2284.0,156.0
+fast links,draper,all-to-all,grid:2x5,hqa,unlimited,1046,2990,2276.0,0.0
+fast links,draper,all-to-all,grid:2x5,hqa-latency,1,1412,3049,2168.0,435.0
+fast links,draper,all-to-all,grid:2x5,hqa-latency,unlimited,1412,3049,2159.0,0.0
+fast links,draper,all-to-all,grid:2x5,fgp-roee,1,1672,2818,2279.0,2502.0
+fast links,draper,all-to-all,grid:2x5,fgp-roee,unlimited,1672,2818,2208.0,0.0
+fast links,draper,all-to-all,grid:2x5,naive,1,3782,1635,2099.0,6390.0
+fast links,draper,all-to-all,grid:2x5,naive,unlimited,3782,1635,1892.0,0.0
+fast links,cuccaro,all-to-all,grid:2x5,hqa,1,156,302,1469.0,164.0
+fast links,cuccaro,all-to-all,grid:2x5,hqa,unlimited,156,302,1406.0,0.0
+fast links,cuccaro,all-to-all,grid:2x5,hqa-latency,1,138,307,1385.0,236.0
+fast links,cuccaro,all-to-all,grid:2x5,hqa-latency,unlimited,138,307,1334.0,0.0
+fast links,cuccaro,all-to-all,grid:2x5,fgp-roee,1,114,368,1530.0,364.0
+fast links,cuccaro,all-to-all,grid:2x5,fgp-roee,unlimited,114,368,1498.0,0.0
+fast links,cuccaro,all-to-all,grid:2x5,naive,1,584,468,2044.0,1061.0
+fast links,cuccaro,all-to-all,grid:2x5,naive,unlimited,584,468,1853.0,0.0
+fast links,random,all-to-all,grid:2x5,hqa,1,3815,3328,1497.0,1138.0
+fast links,random,all-to-all,grid:2x5,hqa,unlimited,3815,3328,1464.0,0.0
+fast links,random,all-to-all,grid:2x5,hqa-latency,1,4121,3274,1343.0,1526.0
+fast links,random,all-to-all,grid:2x5,hqa-latency,unlimited,4121,3274,1308.0,0.0
+fast links,random,all-to-all,grid:2x5,fgp-roee,1,4209,3021,1444.0,3261.0
+fast links,random,all-to-all,grid:2x5,fgp-roee,unlimited,4209,3021,1355.0,0.0
+fast links,random,all-to-all,grid:2x5,naive,1,6300,2433,1489.0,5704.0
+fast links,random,all-to-all,grid:2x5,naive,unlimited,6300,2433,1354.0,0.0
+fast links,quantum_volume,all-to-all,grid:2x5,hqa,1,4096,2470,1284.0,1514.0
+fast links,quantum_volume,all-to-all,grid:2x5,hqa,unlimited,4096,2470,1242.0,0.0
+fast links,quantum_volume,all-to-all,grid:2x5,hqa-latency,1,4276,2354,1247.0,1588.0
+fast links,quantum_volume,all-to-all,grid:2x5,hqa-latency,unlimited,4276,2354,1206.0,0.0
+fast links,quantum_volume,all-to-all,grid:2x5,fgp-roee,1,4980,2147,1269.0,3887.0
+fast links,quantum_volume,all-to-all,grid:2x5,fgp-roee,unlimited,4980,2147,1190.0,0.0
+fast links,quantum_volume,all-to-all,grid:2x5,naive,1,5751,1345,1104.0,3584.0
+fast links,quantum_volume,all-to-all,grid:2x5,naive,unlimited,5751,1345,1039.0,0.0
+fast links,qft,line,grid:2x5,hqa,1,1800,4234,2314.0,549.0
+fast links,qft,line,grid:2x5,hqa,unlimited,1800,4234,2285.0,0.0
+fast links,qft,line,grid:2x5,hqa-latency,1,1800,4470,2208.0,730.0
+fast links,qft,line,grid:2x5,hqa-latency,unlimited,1800,4470,2192.0,0.0
+fast links,qft,line,grid:2x5,fgp-roee,1,6004,4057,3300.0,8684.0
+fast links,qft,line,grid:2x5,fgp-roee,unlimited,6004,4057,2867.0,0.0
+fast links,qft,line,grid:2x5,naive,1,3128,4225,2772.0,1636.0
+fast links,qft,line,grid:2x5,naive,unlimited,3128,4225,2689.0,0.0
+fast links,draper,line,grid:2x5,hqa,1,2572,2920,2531.0,1836.0
+fast links,draper,line,grid:2x5,hqa,unlimited,2572,2920,2444.0,0.0
+fast links,draper,line,grid:2x5,hqa-latency,1,2596,2979,2453.0,2888.0
+fast links,draper,line,grid:2x5,hqa-latency,unlimited,2596,2979,2308.0,0.0
+fast links,draper,line,grid:2x5,fgp-roee,1,5312,2848,3259.0,8529.0
+fast links,draper,line,grid:2x5,fgp-roee,unlimited,5312,2848,2825.0,0.0
+fast links,draper,line,grid:2x5,naive,1,11910,1635,5509.0,98865.0
+fast links,draper,line,grid:2x5,naive,unlimited,11910,1635,2686.0,0.0
+fast links,cuccaro,line,grid:2x5,hqa,1,264,302,1559.0,164.0
+fast links,cuccaro,line,grid:2x5,hqa,unlimited,264,302,1498.0,0.0
+fast links,cuccaro,line,grid:2x5,hqa-latency,1,220,340,1510.0,230.0
+fast links,cuccaro,line,grid:2x5,hqa-latency,unlimited,220,340,1471.0,0.0
+fast links,cuccaro,line,grid:2x5,fgp-roee,1,206,353,1528.0,105.0
+fast links,cuccaro,line,grid:2x5,fgp-roee,unlimited,206,353,1528.0,0.0
+fast links,cuccaro,line,grid:2x5,naive,1,1566,468,2808.0,861.0
+fast links,cuccaro,line,grid:2x5,naive,unlimited,1566,468,2655.0,0.0
+fast links,random,line,grid:2x5,hqa,1,11626,3269,3610.0,45073.0
+fast links,random,line,grid:2x5,hqa,unlimited,11626,3269,2239.0,0.0
+fast links,random,line,grid:2x5,hqa-latency,1,11626,3269,3610.0,45073.0
+fast links,random,line,grid:2x5,hqa-latency,unlimited,12258,3278,2229.0,0.0
+fast links,random,line,grid:2x5,fgp-roee,1,15354,3036,4824.0,84005.0
+fast links,random,line,grid:2x5,fgp-roee,unlimited,15354,3036,2473.0,0.0
+fast links,random,line,grid:2x5,naive,1,23062,2433,7085.0,170234.0
+fast links,random,line,grid:2x5,naive,unlimited,23062,2433,2670.0,0.0
+fast links,quantum_volume,line,grid:2x5,hqa,1,13686,1965,3986.0,83347.0
+fast links,quantum_volume,line,grid:2x5,hqa,unlimited,13686,1965,1756.0,0.0
+fast links,quantum_volume,line,grid:2x5,hqa-latency,1,13686,1965,3986.0,83347.0
+fast links,quantum_volume,line,grid:2x5,hqa-latency,unlimited,15780,1527,1620.0,0.0
+fast links,quantum_volume,line,grid:2x5,fgp-roee,1,18054,2153,5524.0,134186.0
+fast links,quantum_volume,line,grid:2x5,fgp-roee,unlimited,18054,2153,2109.0,0.0
+fast links,quantum_volume,line,grid:2x5,naive,1,21234,1345,6439.0,182755.0
+fast links,quantum_volume,line,grid:2x5,naive,unlimited,21234,1345,1957.0,0.0
+default,qft,all-to-all,grid:2x5,hqa,1,1080,4538,2764.0,793.0
+default,qft,all-to-all,grid:2x5,hqa,unlimited,1080,4538,2568.0,0.0
+default,qft,all-to-all,grid:2x5,hqa-latency,1,1080,4601,2551.0,2809.0
+default,qft,all-to-all,grid:2x5,hqa-latency,unlimited,1080,4601,2246.0,0.0
+default,qft,all-to-all,grid:2x5,fgp-roee,1,2048,4057,4105.0,22162.0
+default,qft,all-to-all,grid:2x5,fgp-roee,unlimited,2048,4057,2377.0,0.0
+default,qft,all-to-all,grid:2x5,naive,1,1373,4225,3528.0,11007.0
+default,qft,all-to-all,grid:2x5,naive,unlimited,1373,4225,2160.0,0.0
+default,draper,all-to-all,grid:2x5,hqa,1,1046,2990,3092.0,2378.0
+default,draper,all-to-all,grid:2x5,hqa,unlimited,1046,2990,2611.0,0.0
+default,draper,all-to-all,grid:2x5,hqa-latency,1,1046,2990,3092.0,2378.0
+default,draper,all-to-all,grid:2x5,hqa-latency,unlimited,1249,3126,2375.0,0.0
+default,draper,all-to-all,grid:2x5,fgp-roee,1,1672,2818,4319.0,20118.0
+default,draper,all-to-all,grid:2x5,fgp-roee,unlimited,1672,2818,2516.0,0.0
+default,draper,all-to-all,grid:2x5,naive,1,3782,1635,6011.0,59281.0
+default,draper,all-to-all,grid:2x5,naive,unlimited,3782,1635,2271.0,0.0
+default,cuccaro,all-to-all,grid:2x5,hqa,1,156,302,2327.0,1342.0
+default,cuccaro,all-to-all,grid:2x5,hqa,unlimited,156,302,1606.0,0.0
+default,cuccaro,all-to-all,grid:2x5,hqa-latency,1,134,307,1890.0,1524.0
+default,cuccaro,all-to-all,grid:2x5,hqa-latency,unlimited,134,307,1486.0,0.0
+default,cuccaro,all-to-all,grid:2x5,fgp-roee,1,114,368,1762.0,1860.0
+default,cuccaro,all-to-all,grid:2x5,fgp-roee,unlimited,114,368,1594.0,0.0
+default,cuccaro,all-to-all,grid:2x5,naive,1,584,468,5369.0,9757.0
+default,cuccaro,all-to-all,grid:2x5,naive,unlimited,584,468,2549.0,0.0
+default,random,all-to-all,grid:2x5,hqa,1,3815,3328,2594.0,13066.0
+default,random,all-to-all,grid:2x5,hqa,unlimited,3815,3328,1902.0,0.0
+default,random,all-to-all,grid:2x5,hqa-latency,1,4081,3260,2537.0,17729.0
+default,random,all-to-all,grid:2x5,hqa-latency,unlimited,4129,3261,1776.0,0.0
+default,random,all-to-all,grid:2x5,fgp-roee,1,4209,3021,2920.0,26856.0
+default,random,all-to-all,grid:2x5,fgp-roee,unlimited,4209,3021,1790.0,0.0
+default,random,all-to-all,grid:2x5,naive,1,6300,2433,3895.0,52571.0
+default,random,all-to-all,grid:2x5,naive,unlimited,6300,2433,1877.0,0.0
+default,quantum_volume,all-to-all,grid:2x5,hqa,1,4096,2470,2328.0,18093.0
+default,quantum_volume,all-to-all,grid:2x5,hqa,unlimited,4096,2470,1492.0,0.0
+default,quantum_volume,all-to-all,grid:2x5,hqa-latency,1,4276,2354,2306.0,19729.0
+default,quantum_volume,all-to-all,grid:2x5,hqa-latency,unlimited,4276,2354,1464.0,0.0
+default,quantum_volume,all-to-all,grid:2x5,fgp-roee,1,4980,2147,3044.0,37526.0
+default,quantum_volume,all-to-all,grid:2x5,fgp-roee,unlimited,4980,2147,1439.0,0.0
+default,quantum_volume,all-to-all,grid:2x5,naive,1,5751,1345,2749.0,40037.0
+default,quantum_volume,all-to-all,grid:2x5,naive,unlimited,5751,1345,1315.0,0.0
+default,qft,line,grid:2x5,hqa,1,1800,4234,5549.0,7358.0
+default,qft,line,grid:2x5,hqa,unlimited,1800,4234,3941.0,0.0
+default,qft,line,grid:2x5,hqa-latency,1,1800,4470,4332.0,15015.0
+default,qft,line,grid:2x5,hqa-latency,unlimited,1800,4470,2951.0,0.0
+default,qft,line,grid:2x5,fgp-roee,1,6004,4057,12267.0,85656.0
+default,qft,line,grid:2x5,fgp-roee,unlimited,6004,4057,5175.0,0.0
+default,qft,line,grid:2x5,naive,1,3128,4225,6300.0,28247.0
+default,qft,line,grid:2x5,naive,unlimited,3128,4225,4796.0,0.0
+default,draper,line,grid:2x5,hqa,1,2572,2920,6641.0,24832.0
+default,draper,line,grid:2x5,hqa,unlimited,2572,2920,3703.0,0.0
+default,draper,line,grid:2x5,hqa-latency,1,2446,2942,6094.0,32709.0
+default,draper,line,grid:2x5,hqa-latency,unlimited,2544,2795,3080.0,0.0
+default,draper,line,grid:2x5,fgp-roee,1,5312,2848,11970.0,90089.0
+default,draper,line,grid:2x5,fgp-roee,unlimited,5312,2848,4985.0,0.0
+default,draper,line,grid:2x5,naive,1,11910,1635,24373.0,577435.0
+default,draper,line,grid:2x5,naive,unlimited,11910,1635,4762.0,0.0
+default,cuccaro,line,grid:2x5,hqa,1,264,302,2573.0,1388.0
+default,cuccaro,line,grid:2x5,hqa,unlimited,264,302,1846.0,0.0
+default,cuccaro,line,grid:2x5,hqa-latency,1,220,340,2164.0,1929.0
+default,cuccaro,line,grid:2x5,hqa-latency,unlimited,220,340,1718.0,0.0
+default,cuccaro,line,grid:2x5,fgp-roee,1,206,353,1812.0,979.0
+default,cuccaro,line,grid:2x5,fgp-roee,unlimited,206,353,1744.0,0.0
+default,cuccaro,line,grid:2x5,naive,1,1566,468,7210.0,9964.0
+default,cuccaro,line,grid:2x5,naive,unlimited,1566,468,4577.0,0.0
+default,random,line,grid:2x5,hqa,1,11626,3269,17316.0,323317.0
+default,random,line,grid:2x5,hqa,unlimited,11626,3269,4263.0,0.0
+default,random,line,grid:2x5,hqa-latency,1,11626,3269,17316.0,323317.0
+default,random,line,grid:2x5,hqa-latency,unlimited,12928,3173,4211.0,0.0
+default,random,line,grid:2x5,fgp-roee,1,15354,3036,23560.0,542277.0
+default,random,line,grid:2x5,fgp-roee,unlimited,15354,3036,5050.0,0.0
+default,random,line,grid:2x5,naive,1,23062,2433,35259.0,1014638.0
+default,random,line,grid:2x5,naive,unlimited,23062,2433,5763.0,0.0
+default,quantum_volume,line,grid:2x5,hqa,1,13686,1965,19651.0,536348.0
+default,quantum_volume,line,grid:2x5,hqa,unlimited,13686,1965,3358.0,0.0
+default,quantum_volume,line,grid:2x5,hqa-latency,1,13686,1965,19651.0,536348.0
+default,quantum_volume,line,grid:2x5,hqa-latency,unlimited,15780,1527,3103.0,0.0
+default,quantum_volume,line,grid:2x5,fgp-roee,1,18054,2153,27353.0,829007.0
+default,quantum_volume,line,grid:2x5,fgp-roee,unlimited,18054,2153,4119.0,0.0
+default,quantum_volume,line,grid:2x5,naive,1,21234,1345,32010.0,1074432.0
+default,quantum_volume,line,grid:2x5,naive,unlimited,21234,1345,4107.0,0.0
+slow links,qft,all-to-all,grid:2x5,hqa,1,1080,4538,10007.0,23605.0
+slow links,qft,all-to-all,grid:2x5,hqa,unlimited,1080,4538,5067.0,0.0
+slow links,qft,all-to-all,grid:2x5,hqa-latency,1,1080,4601,9902.0,46460.0
+slow links,qft,all-to-all,grid:2x5,hqa-latency,unlimited,1080,4601,3870.0,0.0
+slow links,qft,all-to-all,grid:2x5,fgp-roee,1,2048,4057,18937.0,137340.0
+slow links,qft,all-to-all,grid:2x5,fgp-roee,unlimited,2048,4057,4833.0,0.0
+slow links,qft,all-to-all,grid:2x5,naive,1,1373,4225,16245.0,85683.0
+slow links,qft,all-to-all,grid:2x5,naive,unlimited,1373,4225,3940.0,0.0
+slow links,draper,all-to-all,grid:2x5,hqa,1,1046,2990,12433.0,25178.0
+slow links,draper,all-to-all,grid:2x5,hqa,unlimited,1046,2990,5398.0,0.0
+slow links,draper,all-to-all,grid:2x5,hqa-latency,1,1046,2990,12433.0,25178.0
+slow links,draper,all-to-all,grid:2x5,hqa-latency,unlimited,1346,3050,4598.0,0.0
+slow links,draper,all-to-all,grid:2x5,fgp-roee,1,1672,2818,20035.0,121426.0
+slow links,draper,all-to-all,grid:2x5,fgp-roee,unlimited,1672,2818,5170.0,0.0
+slow links,draper,all-to-all,grid:2x5,naive,1,3782,1635,28979.0,327436.0
+slow links,draper,all-to-all,grid:2x5,naive,unlimited,3782,1635,4866.0,0.0
+slow links,cuccaro,all-to-all,grid:2x5,hqa,1,156,302,6847.0,7386.0
+slow links,cuccaro,all-to-all,grid:2x5,hqa,unlimited,156,302,2686.0,0.0
+slow links,cuccaro,all-to-all,grid:2x5,hqa-latency,1,140,317,5020.0,9662.0
+slow links,cuccaro,all-to-all,grid:2x5,hqa-latency,unlimited,140,317,2267.0,0.0
+slow links,cuccaro,all-to-all,grid:2x5,fgp-roee,1,114,368,3556.0,10106.0
+slow links,cuccaro,all-to-all,grid:2x5,fgp-roee,unlimited,114,368,2086.0,0.0
+slow links,cuccaro,all-to-all,grid:2x5,naive,1,584,468,23907.0,56499.0
+slow links,cuccaro,all-to-all,grid:2x5,naive,unlimited,584,468,6102.0,0.0
+slow links,random,all-to-all,grid:2x5,hqa,1,3815,3328,10438.0,91654.0
+slow links,random,all-to-all,grid:2x5,hqa,unlimited,3815,3328,4636.0,0.0
+slow links,random,all-to-all,grid:2x5,hqa-latency,1,3815,3328,10438.0,91654.0
+slow links,random,all-to-all,grid:2x5,hqa-latency,unlimited,4146,3353,4371.0,0.0
+slow links,random,all-to-all,grid:2x5,fgp-roee,1,4209,3021,12363.0,156156.0
+slow links,random,all-to-all,grid:2x5,fgp-roee,unlimited,4209,3021,4398.0,0.0
+slow links,random,all-to-all,grid:2x5,naive,1,6300,2433,18017.0,304000.0
+slow links,random,all-to-all,grid:2x5,naive,unlimited,6300,2433,5010.0,0.0
+slow links,quantum_volume,all-to-all,grid:2x5,hqa,1,4096,2470,9276.0,120318.0
+slow links,quantum_volume,all-to-all,grid:2x5,hqa,unlimited,4096,2470,2951.0,0.0
+slow links,quantum_volume,all-to-all,grid:2x5,hqa-latency,1,4096,2470,9276.0,120318.0
+slow links,quantum_volume,all-to-all,grid:2x5,hqa-latency,unlimited,4276,2354,2936.0,0.0
+slow links,quantum_volume,all-to-all,grid:2x5,fgp-roee,1,4980,2147,13496.0,214207.0
+slow links,quantum_volume,all-to-all,grid:2x5,fgp-roee,unlimited,4980,2147,2915.0,0.0
+slow links,quantum_volume,all-to-all,grid:2x5,naive,1,5751,1345,12396.0,238382.0
+slow links,quantum_volume,all-to-all,grid:2x5,naive,unlimited,5751,1345,2795.0,0.0
+slow links,qft,line,grid:2x5,hqa,1,1800,4234,24770.0,52175.0
+slow links,qft,line,grid:2x5,hqa,unlimited,1800,4234,14075.0,0.0
+slow links,qft,line,grid:2x5,hqa-latency,1,1800,4470,19467.0,112734.0
+slow links,qft,line,grid:2x5,hqa-latency,unlimited,1800,4470,7913.0,0.0
+slow links,qft,line,grid:2x5,fgp-roee,1,6004,4057,64858.0,520378.0
+slow links,qft,line,grid:2x5,fgp-roee,unlimited,6004,4057,17507.0,0.0
+slow links,qft,line,grid:2x5,naive,1,3128,4225,30967.0,224580.0
+slow links,qft,line,grid:2x5,naive,unlimited,3128,4225,15707.0,0.0
+slow links,draper,line,grid:2x5,hqa,1,2572,2920,32893.0,167261.0
+slow links,draper,line,grid:2x5,hqa,unlimited,2572,2920,11516.0,0.0
+slow links,draper,line,grid:2x5,hqa-latency,1,2614,2985,32272.0,213998.0
+slow links,draper,line,grid:2x5,hqa-latency,unlimited,2530,2809,8398.0,0.0
+slow links,draper,line,grid:2x5,fgp-roee,1,5312,2848,63986.0,585293.0
+slow links,draper,line,grid:2x5,fgp-roee,unlimited,5312,2848,16753.0,0.0
+slow links,draper,line,grid:2x5,naive,1,11910,1635,127138.0,3091400.0
+slow links,draper,line,grid:2x5,naive,unlimited,11910,1635,15905.0,0.0
+slow links,cuccaro,line,grid:2x5,hqa,1,264,302,8145.0,8130.0
+slow links,cuccaro,line,grid:2x5,hqa,unlimited,264,302,3674.0,0.0
+slow links,cuccaro,line,grid:2x5,hqa-latency,1,264,302,8145.0,8130.0
+slow links,cuccaro,line,grid:2x5,hqa-latency,unlimited,284,354,3366.0,0.0
+slow links,cuccaro,line,grid:2x5,fgp-roee,1,206,353,4418.0,7488.0
+slow links,cuccaro,line,grid:2x5,fgp-roee,unlimited,206,353,2836.0,0.0
+slow links,cuccaro,line,grid:2x5,naive,1,1566,468,33635.0,63331.0
+slow links,cuccaro,line,grid:2x5,naive,unlimited,1566,468,14249.0,0.0
+slow links,random,line,grid:2x5,hqa,1,11626,3269,92740.0,1849702.0
+slow links,random,line,grid:2x5,hqa,unlimited,11626,3269,14904.0,0.0
+slow links,random,line,grid:2x5,hqa-latency,1,11626,3269,92740.0,1849702.0
+slow links,random,line,grid:2x5,hqa-latency,unlimited,12750,3065,14796.0,0.0
+slow links,random,line,grid:2x5,fgp-roee,1,15354,3036,124417.0,3054312.0
+slow links,random,line,grid:2x5,fgp-roee,unlimited,15354,3036,18286.0,0.0
+slow links,random,line,grid:2x5,naive,1,23062,2433,183564.0,5555764.0
+slow links,random,line,grid:2x5,naive,unlimited,23062,2433,21492.0,0.0
+slow links,quantum_volume,line,grid:2x5,hqa,1,13686,1965,102979.0,2960026.0
+slow links,quantum_volume,line,grid:2x5,hqa,unlimited,13686,1965,11757.0,0.0
+slow links,quantum_volume,line,grid:2x5,hqa-latency,1,13686,1965,102979.0,2960026.0
+slow links,quantum_volume,line,grid:2x5,hqa-latency,unlimited,15780,1527,10794.0,0.0
+slow links,quantum_volume,line,grid:2x5,fgp-roee,1,18054,2153,141112.0,4499240.0
+slow links,quantum_volume,line,grid:2x5,fgp-roee,unlimited,18054,2153,14557.0,0.0
+slow links,quantum_volume,line,grid:2x5,naive,1,21234,1345,164212.0,5763572.0
+slow links,quantum_volume,line,grid:2x5,naive,unlimited,21234,1345,14998.0,0.0

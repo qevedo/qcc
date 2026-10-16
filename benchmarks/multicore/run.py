@@ -25,13 +25,19 @@ and one more that takes the circuits down to physical qubits:
   a line, scheduled with 1, 2, 4 or unlimited channels (EPR pairs at once)
   per link, with the default Timing otherwise; "hqa-latency" (HQA weighing
   how much each move delays its gate) is mapped for each capacity.
+* latency through ports: the latency experiment with each link meeting each
+  core at a fixed port (90-qubit circuits, since the mapper then keeps a
+  slot free in every core);
+* timing: the latency experiment (1 and unlimited channels) with links
+  faster (EPR pair and teleportation 2) and slower (50 and 20) than the
+  default (10 and 5);
 * ablation: the routing experiment's grid and line chips without choosing
   the slot of an arriving qubit by its next partner, and with SABRE looking
   0 to 64 timeslices past each epoch.
 
 Every mapper starts from the same OEE placement. Results go to
-results/{multicore,routing,latency,ablation}.csv; plot.py draws the
-first.
+results/{multicore,routing,latency,ablation,latency_ports,timing}.csv;
+plot.py draws the first.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ import argparse
 import csv
 import platform
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -54,6 +61,15 @@ OUT = Path(__file__).parent / "results" / "multicore.csv"
 ROUTING_OUT = Path(__file__).parent / "results" / "routing.csv"
 LATENCY_OUT = Path(__file__).parent / "results" / "latency.csv"
 ABLATION_OUT = Path(__file__).parent / "results" / "ablation.csv"
+LATENCY_PORTS_OUT = Path(__file__).parent / "results" / "latency_ports.csv"
+TIMING_OUT = Path(__file__).parent / "results" / "timing.csv"
+#: Links faster and slower than the default (EPR pair 10, teleportation 5,
+#: in two-qubit gate times).
+TIMINGS = {
+    "fast links": Timing(epr_pair=2.0, teleport=2.0),
+    "default": Timing(),
+    "slow links": Timing(epr_pair=50.0, teleport=20.0),
+}
 #: (slot by next partner, timeslices SABRE looks past an epoch); (True, 4) is the default.
 ABLATIONS = ((False, 0), (True, 0), (True, 1), (True, 2), (True, 4), (True, 8), (True, 16), (True, 64))
 #: Channels per link; None is unlimited.
@@ -112,6 +128,8 @@ def main() -> None:
     write(ROUTING_OUT, routing())
     write(LATENCY_OUT, latency())
     write(ABLATION_OUT, ablation())
+    write(LATENCY_PORTS_OUT, latency_ports())
+    write(TIMING_OUT, timing_sensitivity())
 
 
 def routing() -> list[dict]:
@@ -142,16 +160,21 @@ def routing() -> list[dict]:
     return rows
 
 
-def latency() -> list[dict]:
-    """The latency experiment: how long each mapping takes per link capacity."""
+def latency(qubits: int = 100, ports: str | None = None, base: Timing = Timing()) -> list[dict]:
+    """How long each mapping takes per link capacity, under the timing ``base``.
+
+    ``qubits``-qubit circuits on 10 cores of 10 qubits coupled in a 2 × 5
+    grid, cores linked all to all or in a line, communication abstract or
+    through ``ports``.
+    """
     rows = []
     for topology in ("all-to-all", "line"):
         for benchmark in BENCHMARKS:
-            n, pairs = two_qubit_gates(benchmark, 100)
+            n, pairs = two_qubit_gates(benchmark, qubits)
             for method in LATENCY_METHODS:
                 result = None
                 for capacity in CAPACITIES:
-                    timing = Timing(link_capacity=capacity or len(pairs))
+                    timing = replace(base, link_capacity=capacity or len(pairs))
                     # hqa-latency plans for the timing, so it maps again per capacity.
                     if result is None or method == "hqa-latency":
                         result = map_and_route(
@@ -163,6 +186,7 @@ def latency() -> list[dict]:
                             num_qubits=n,
                             topology=topology,
                             timing=timing,
+                            ports=ports,
                         )
                     schedule = result.schedule(timing)
                     rows.append(
@@ -183,6 +207,22 @@ def latency() -> list[dict]:
                     + " ".join(f"{r['duration']:8.0f}" for r in rows[-len(CAPACITIES) :]),
                     flush=True,
                 )
+    return rows
+
+
+def latency_ports() -> list[dict]:
+    """The latency experiment through ports. The mapper keeps a slot free in
+    every core, so 90-qubit circuits fill the cores."""
+    return latency(qubits=90, ports="central")
+
+
+def timing_sensitivity() -> list[dict]:
+    """The latency experiment with links faster and slower than the default."""
+    rows = []
+    for name, timing in TIMINGS.items():
+        for row in latency(base=timing):
+            if row["link_capacity"] in (1, "unlimited"):
+                rows.append({"timing": name, **row})
     return rows
 
 

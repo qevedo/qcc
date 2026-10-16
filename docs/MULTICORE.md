@@ -354,6 +354,27 @@ method's duration over HQA's (above 1: HQA finishes first):
 - Making the delay term also count how busy each link is (when its next
   EPR pair is ready) gave longer circuits, not shorter, so it was left out.
 
+#### Faster and slower links
+
+The default timing is illustrative, so `results/timing.csv` repeats the
+experiment with links faster (EPR pair and teleportation 2) and slower (50
+and 20). Mean duration over HQA's:
+
+| links | timing | channels | HQA-latency | FGP-rOEE | naive |
+|---|---|---|---|---|---|
+| all to all | fast | 1 | 0.94× | 0.99× | 1.01× |
+| | fast | unlimited | 0.94× | 0.97× | 0.96× |
+| | slow | 1 | 0.94× | 1.33× | 2.10× |
+| | slow | unlimited | 0.88× | 0.92× | 1.20× |
+| line | fast | 1 | 0.98× | 1.28× | 1.75× |
+| | fast | unlimited | 0.96× | 1.15× | 1.27× |
+| | slow | 1 | 0.95× | 1.56× | 2.56× |
+| | slow | unlimited | 0.82× | 1.19× | 1.82× |
+
+HQA-latency is again never slower than HQA, 2–18% faster on average; how
+much fewer teleportations matter depends on the links: with fast links all
+to all, FGP-rOEE and the naive mapper are about as fast as HQA.
+
 ### Communication through ports
 
 By default a qubit teleports from any slot of its core to any free slot of
@@ -415,6 +436,25 @@ EPR pairs / SWAPs (`results/telesabre.csv`; * TeleSABRE's MQT Bench circuits):
   exchanges between full cores assume a teleportation each way at once.
 - Ports cost many SWAPs: compare with the last column, where communication
   is abstract. HQA-latency minimizes time, not EPR pairs or SWAPs.
+
+#### Time through ports
+
+`results/latency_ports.csv` repeats the latency experiment through central
+ports (90-qubit circuits, since the mapper keeps a slot free per core).
+Mean duration over HQA's:
+
+| links | channels | HQA-latency | FGP-rOEE | naive |
+|---|---|---|---|---|
+| all to all | 1 | 1.00× | 1.41× | 2.13× |
+| | unlimited | 1.00× | 1.37× | 2.04× |
+| line | 1 | 0.95× | 1.66× | 2.80× |
+| | unlimited | 0.95× | 1.57× | 2.72× |
+
+Moving qubits to and from the ports makes teleportations dearer, and HQA's
+lead grows. The number of channels hardly matters: with one port per link
+in each core, the qubits crossing a link already queue at its port.
+HQA-latency gains little, since its time estimate leaves SWAPs out, which
+now dominate.
 
 ![Sparse links](../benchmarks/multicore/charts/topology.svg)
 ![Strong scaling](../benchmarks/multicore/charts/strong.svg)

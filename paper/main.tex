@@ -261,7 +261,7 @@ making the next, in a time $t_\mathrm{EPR}$, once its pair is used; a
 teleportation uses one pair per link it crosses and then takes
 $t_\mathrm{tel}$ per link. We use, in units of a two-qubit gate, SWAP 3,
 measurement 5, $t_\mathrm{EPR} = 10$ and $t_\mathrm{tel} = 5$; these values are
-illustrative.\todo{justify or vary the timing values}
+illustrative, so we also try faster and slower links below.
 
 \paragraph{HQA-latency.} HQA minimizes teleportations, not the length of the
 critical path. We add a delay term: HQA keeps, for every qubit, when it would
@@ -306,6 +306,24 @@ the fastest of all four methods in \latencyWins{} of the \latencyRuns{} runs,
 with at most \latencyExtraTeleportations{} more teleportations than HQA. The
 naive mapper remains faster on some benchmarks when links have pairs to
 spare, and FGP-rOEE on the Cuccaro adder.
+
+\paragraph{Other timings.} Table~\ref{tab:timing} repeats the experiment
+with links faster ($t_\mathrm{EPR} = t_\mathrm{tel} = 2$) and slower
+($t_\mathrm{EPR} = 50$, $t_\mathrm{tel} = 20$) than the default. HQA-latency
+plans for each timing and is again never slower than HQA (worst run
+\timingLatencyWorstRun{}), \timingLatencyMeanWorst{} to
+\timingLatencyMeanBest{} faster on average. How much fewer teleportations
+matter depends on the links: with one channel per link, FGP-rOEE's circuits
+take from \timingFgpOneChannelMin{} (fast links, all to all) to
+\timingFgpOneChannelMax{} (slow links, line) as long as HQA's.
+
+\begin{table}[t]
+\centering
+\input{generated/table-timing}
+\caption{As Table~\ref{tab:latency}, with one or unlimited channels per link,
+for links faster and slower than the default.}
+\label{tab:timing}
+\end{table}
 
 \section{Communication qubits and TeleSABRE}
 \label{sec:telesabre}
@@ -362,13 +380,31 @@ needs its communication qubits free when they teleport, while our ports can
 hold data between teleportations, and our exchanges between full cores
 assume a teleportation each way at once.
 
+\paragraph{Time through ports.} Table~\ref{tab:latency-ports} repeats the
+latency experiment of Section~\ref{sec:latency} through central ports, with
+90-qubit circuits, since the mapper keeps a slot free in every core. Moving
+qubits to and from the ports makes teleportations dearer, and HQA's lead
+grows: FGP-rOEE's circuits take \portsFgpRange{} times as long and the naive
+mapper's \portsNaiveRange{} times. The number of channels hardly matters any more: with one port
+per link in each core, the qubits crossing a link already queue at its port.
+HQA-latency gains little here (up to \portsLatencyMeanBest{} on average), as
+its time estimate ignores SWAPs, which now dominate; it is still never slower
+than HQA, and the fastest in \portsLatencyWins{} of the \portsLatencyRuns{}
+runs.
+
+\begin{table}[t]
+\centering
+\input{generated/table-latency-ports}
+\caption{As Table~\ref{tab:latency}, through central ports, with 90-qubit
+circuits.}
+\label{tab:latency-ports}
+\end{table}
+
 \section{Discussion and limitations}
 
 The timing model ignores noise, and its durations, with illustrative
-values, should be read as relative. Sections~\ref{sec:routing}
-and~\ref{sec:latency} leave communication qubits abstract; with ports
-(Section~\ref{sec:telesabre}) qubits need many more SWAPs, which the latency
-experiments do not include yet.
+values, should be read as relative. With ports, HQA-latency's time estimate,
+which leaves SWAPs out, should count the way to and from the ports.
 The benchmarks are those of~\cite{escofet2025revisiting}; other circuit
 families may behave differently, as the Cuccaro adder already does. Our
 choices for odd core sizes and sparse links are ours, not the original

@@ -17,8 +17,10 @@ python benchmarks/multicore/plot.py
 - `circuits.py` builds the circuits with Qiskit and keeps their CX gates
   (cached in `cache/`).
 - `run.py` maps each circuit with each method and writes `results/multicore.csv`,
-  then routes them inside the cores and writes `results/routing.csv`, and
-  schedules them per link capacity in `results/latency.csv`.
+  then routes them inside the cores (`results/routing.csv`, and the
+  ablation `results/ablation.csv`), and schedules them per link capacity
+  (`results/latency.csv`), through ports (`results/latency_ports.csv`) and
+  with faster and slower links (`results/timing.csv`).
 - `plot.py` draws `charts/` and prints the summary table.
 
 Results and discussion: [docs/MULTICORE.md](../../docs/MULTICORE.md).
