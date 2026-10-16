@@ -401,8 +401,9 @@ Through ports, HQA-latency also tries its weights with $t_\mathrm{tel}$
 raised by the mean number of SWAPs to a port and from the other, and keeps
 the fastest routed circuit of all eight. It gains up to
 \portsLatencyMeanBest{} on average (on the line), but nothing with every core
-linked to every other, where the delay term still misses how crossings queue
-at the ports; it is never slower than HQA, and the fastest in
+linked to every other; adding to the delay term that a link carries one
+teleportation at a time did not help there either. It is never slower than
+HQA, and the fastest in
 \portsLatencyWins{} of the \portsLatencyRuns{} runs.
 
 \begin{table}[t]
@@ -416,8 +417,8 @@ circuits.}
 \section{Discussion and limitations}
 
 The timing model ignores noise, and its durations, with illustrative
-values, should be read as relative. With ports, HQA-latency's delay term
-should model the queues at the ports.
+values, should be read as relative. With ports and every core linked to
+every other, we have not found a delay term that shortens HQA's circuits.
 The benchmarks are those of~\cite{escofet2025revisiting}; other circuit
 families may behave differently, as the Cuccaro adder already does. Our
 choices for odd core sizes and sparse links are ours, not the original

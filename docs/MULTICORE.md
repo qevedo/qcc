@@ -12,6 +12,11 @@ communications**, as possible.
 Escofet et al. and the mappers it was compared with, in the Rust core, with a
 Python API.
 
+Try it in the browser, no install: the
+[multi-core mapping playground](https://qevedo.com/multicore/) maps QFT,
+random and Quantum Volume circuits with each method and shows the qubits
+teleporting between cores, step by step.
+
 ## Quick start
 
 ```python
@@ -458,8 +463,9 @@ in each core, the qubits crossing a link already queue at its port.
 Through ports, HQA-latency also tries its weights with a teleportation made
 dearer by the mean SWAPs to a port and from the other (and keeps the fastest
 routed circuit of all eight). That shortens circuits by 7% on a line of
-cores, but not at all with every core linked to every other: there the delay
-term still misses how crossings queue at the ports.
+cores, but not at all with every core linked to every other. Counting, in
+the delay term, that a link carries one teleportation at a time (the queue
+at its ports) did not help either: no such mapping was ever the fastest.
 
 ![Sparse links](../benchmarks/multicore/charts/topology.svg)
 ![Strong scaling](../benchmarks/multicore/charts/strong.svg)

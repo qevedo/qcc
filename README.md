@@ -6,15 +6,20 @@ Quantum Compiler Collection — a technology-agnostic quantum circuit compiler.
 The Python package is published as `qevedo-compiler` and imports as
 `qevedo.compiler`; the command is `qcc`.
 
+Try it in the browser: the [gate decomposition](https://qevedo.com/decompose/)
+and [multi-core mapping](https://qevedo.com/multicore/) playgrounds run the
+Rust core compiled to WebAssembly.
+
 ## Status
 
-The **Python compiler** in `python/` is the active implementation (v0.1):
+`qevedo-compiler` 0.2 on PyPI:
 
 - QCC IR (`Circuit`, `Instruction`, `DeviceSpec`)
-- OpenQASM 2 and 3 frontend and emitter, built on [`openqasm`](https://pypi.org/project/openqasm) 3.x (sibling repo [`openqasm`](../openqasm))
+- OpenQASM 2 and 3 frontend and emitter, built on [`openqasm`](https://pypi.org/project/openqasm) 3.x ([repository](https://github.com/qevedo/openqasm))
 - Lowering to any device's native gates with the fewest gates (Euler and KAK synthesis, optimal two-qubit gate counts) and peephole optimization
 - CLI: `qcc compile input.qasm -o out.qasm --device qevedo/compiler/profiles/grid_2x4.yaml [--qasm-version 3]`
-- Mapping onto multi-core (modular) quantum computers: Hungarian Qubit Assignment (HQA) and the FGP-rOEE and naive baselines, with a benchmark reproducing the published comparison ([docs/MULTICORE.md](docs/MULTICORE.md))
+- Multi-core (modular) quantum computers ([docs/MULTICORE.md](docs/MULTICORE.md)): mapping with Hungarian Qubit Assignment (HQA), a latency-aware HQA, FGP-rOEE and a naive mapper on any connected links between cores; routing inside each core with SABRE, optionally through fixed communication qubits; a timing model of links with a limited supply of EPR pairs; and benchmarks reproducing the published comparison and comparing with TeleSABRE
+- A preprint draft on the multi-core work, generated from the benchmark results ([paper/](paper/))
 
 The lowering and optimization passes run in a **Rust core** (`core/`, the
 `qcc` crate), loaded by the Python package as `qevedo.compiler._core` through
