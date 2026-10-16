@@ -69,9 +69,12 @@ profile's `native_gates`, with the fewest gates:
 After lowering, the circuit is optimized: single-qubit runs are merged,
 gates cancel or merge across gates they commute with, and every run of gates
 on one pair of qubits is resynthesized as a single two-qubit unitary when
-that is cheaper. On a 12-qubit QFT and Qiskit's random circuits this gives the
-same CX counts as Qiskit's `optimization_level=3` and equal or lower total
-gate counts (see `docs/ARCHITECTURE.md`).
+that is cheaper. Two-qubit interactions whose removal costs less than 10⁻⁹ in average gate
+infidelity are dropped, as Qiskit's default does. On a benchmark of 21
+circuits (QFT, QAOA, Quantum Volume, GHZ, Heisenberg, adders, Clifford+T)
+this uses as many two-qubit gates as Qiskit's `optimization_level=3` except
+on the QFT, where Qiskit relabels output qubits to drop SWAPs
+([benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation)).
 
 ```python
 from qevedo.compiler import CompileOptions, compile_source

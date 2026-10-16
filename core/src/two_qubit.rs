@@ -17,6 +17,12 @@ use std::sync::LazyLock;
 
 pub const TOL: f64 = 1e-9;
 
+/// Below this average gate infidelity, a two-qubit unitary is synthesized with
+/// fewer CX-like gates than it exactly needs, as Qiskit's default does: an
+/// error far below any hardware's (QFTs, for instance, drop their tiniest
+/// controlled phases).
+pub const APPROXIMATION: f64 = 1e-9;
+
 /// `numpy.allclose` for one value: |a − b| ≤ atol + 1e-5 |b|.
 fn close(a: f64, b: f64, atol: f64) -> bool {
     (a - b).abs() <= atol + 1e-5 * b.abs()
@@ -401,6 +407,28 @@ fn cx_templates(point: [f64; 3]) -> Vec<Vec<Step>> {
     variants
 }
 
+/// The average gate infidelity between two canonical gates (same local parts),
+/// at Weyl points `p` and `q`: `4 (1 − |t|²) / 5` with `t = Tr(U†V) / 4`.
+pub fn infidelity(p: [f64; 3], q: [f64; 3]) -> f64 {
+    let d = [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+    let re = d[0].cos() * d[1].cos() * d[2].cos();
+    let im = d[0].sin() * d[1].sin() * d[2].sin();
+    0.8 * (1.0 - (re * re + im * im))
+}
+
+/// `target` moved to the closest point reachable with 0, 1 or 2 CX-like gates
+/// (the origin, CX's point, or the face c = 0), the first within
+/// [`APPROXIMATION`]; unchanged if none is.
+fn approximate_cx(target: Kak) -> Kak {
+    let [a, b, _] = target.point;
+    for point in [[0.0; 3], [FRAC_PI_4, 0.0, 0.0], [a, b, 0.0]] {
+        if infidelity(target.point, point) <= APPROXIMATION {
+            return Kak { point, ..target };
+        }
+    }
+    target
+}
+
 /// A single-qubit Clifford V with V P_src V† = P_dst (axes 0, 1, 2 = X, Y, Z).
 fn clifford_map(src: usize, dst: usize) -> M2 {
     use crate::gates::{h, s};
@@ -548,7 +576,10 @@ impl TwoQubitSynth {
         basis: &TwoQubitBasis,
         cost_1q: Option<&dyn Fn(&M2) -> usize>,
     ) -> Result<Vec<Step>, String> {
-        let target = kak(u);
+        let target = match basis.kind {
+            BasisKind::CxLike(_) => approximate_cx(kak(u)),
+            _ => kak(u),
+        };
         let mut candidates: Vec<Vec<Step>> = match &basis.kind {
             BasisKind::Numeric(g) => {
                 match numeric::numeric_decomposition(u, &target, &basis.name, g) {
@@ -1087,6 +1118,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn negligible_interactions_are_dropped() {
+        let cx_basis = two_qubit_basis("cx").unwrap();
+        let mut synth = TwoQubitSynth::new();
+        let count = |synth: &mut TwoQubitSynth, u: &M4| {
+            synth
+                .synthesize(u, &cx_basis, None)
+                .unwrap()
+                .iter()
+                .filter(|s| matches!(s, Step::Gate(..)))
+                .count()
+        };
+        // cp(θ) needs 2 CX; below about π/2^14.5 its interaction is dropped.
+        for (k, expected) in [(10, 2), (14, 2), (15, 0), (20, 0)] {
+            let theta = PI / 2f64.powi(k);
+            let u = matrix_2q("cp", &[theta]).unwrap();
+            assert_eq!(count(&mut synth, &u), expected, "cp(π/2^{k})");
+            let steps = synth.synthesize(&u, &cx_basis, None).unwrap();
+            let error = 1.0 - (steps_matrix(&steps).adjoint() * u).trace().norm_sqr() / 16.0;
+            assert!(error < 1e-8, "{error}");
+        }
+        // CX followed by a tiny YY rotation: one CX.
+        let u = matrix_2q("ryy", &[2e-5]).unwrap() * cx();
+        assert_eq!(count(&mut synth, &u), 1);
+        assert!(infidelity([0.1, 0.0, 0.0], [0.1, 0.0, 0.0]) == 0.0);
     }
 
     #[test]

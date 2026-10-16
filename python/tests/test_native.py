@@ -98,3 +98,21 @@ reset a[0];
     assert ("measure", ["b[0]"], ["c[2]"]) in names
     assert ("reset", ["a[0]"], []) in names
     assert any(n == "barrier" and len(q) == 3 for n, q, _ in names)
+
+
+@pytest.mark.parametrize("pipeline", ["default", "reference"])
+def test_negligible_two_qubit_interactions_are_dropped(pipeline):
+    from qevedo.compiler.device import default_device
+
+    def cx_count(angle: str) -> int:
+        source = f'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[2];\ncu1({angle}) q[0],q[1];\n'
+        manager = getattr(PassManager, pipeline)(default_device())
+        out = compile_source(source, CompileOptions(pass_manager=manager))
+        return out.two_qubit_gate_count()
+
+    # Dropping cu1(θ) costs about θ²/20 in average gate infidelity: below 1e-9
+    # from θ = π/2^15 on.
+    assert cx_count("pi/1024") == 2
+    assert cx_count("pi/16384") == 2
+    assert cx_count("pi/32768") == 0
+    assert cx_count("pi/1048576") == 0

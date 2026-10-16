@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 
 import numpy as np
@@ -34,6 +34,11 @@ from qevedo.compiler.synthesis.gates import SX as _SX
 __all__ = ["KAK", "TwoQubitBasis", "best_2q_bases", "kak", "synthesize_2q", "two_qubit_basis"]
 
 TOL = 1e-9
+#: Below this average gate infidelity, a two-qubit unitary is synthesized with
+#: fewer CX-like gates than it exactly needs, as Qiskit's default does: an
+#: error far below any hardware's (QFTs, for instance, drop their tiniest
+#: controlled phases).
+APPROXIMATION = 1e-9
 PAULIS = (X, Y, Z)
 I2 = np.eye(2, dtype=complex)
 
@@ -342,6 +347,7 @@ def synthesize_2q(
     if basis.kind == "ising":
         templates = [_ising_template(target.point, basis)]
     else:
+        target = _approximate_cx(target)
         templates = _cx_templates(target.point)
     candidates = [
         steps
@@ -360,6 +366,25 @@ def synthesize_2q(
     # two variants that start cheapest.
     candidates.sort(key=total)
     return min((_dress(steps, cost_1q) for steps in candidates[:2]), key=total)
+
+
+def infidelity(p: tuple[float, float, float], q: tuple[float, float, float]) -> float:
+    """Average gate infidelity between canonical gates at Weyl points p and q."""
+    d = [x - y for x, y in zip(p, q)]
+    re = math.cos(d[0]) * math.cos(d[1]) * math.cos(d[2])
+    im = math.sin(d[0]) * math.sin(d[1]) * math.sin(d[2])
+    return 0.8 * (1.0 - (re * re + im * im))
+
+
+def _approximate_cx(target: KAK) -> KAK:
+    """``target`` moved to the closest point reachable with 0, 1 or 2 CX-like
+    gates (the origin, CX's point, or the face c = 0), the first within
+    ``APPROXIMATION``; unchanged if none is."""
+    a, b, _ = target.point
+    for point in ((0.0, 0.0, 0.0), (math.pi / 4, 0.0, 0.0), (a, b, 0.0)):
+        if infidelity(target.point, point) <= APPROXIMATION:
+            return replace(target, point=point)
+    return target
 
 
 def _instantiate(target: KAK, template: list[Step], basis: TwoQubitBasis) -> list[Step] | None:
