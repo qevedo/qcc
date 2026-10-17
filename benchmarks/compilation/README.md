@@ -19,6 +19,15 @@ python benchmarks/compilation/run.py [--sizes 8 16 32]
   reading the input. Outputs of up to 10 qubits are checked against the
   input's unitary (up to a global phase); all pass.
 
+`check.py` runs in CI on every pull request and push
+(`.github/workflows/benchmarks.yml`): it compiles every circuit with QCC,
+checks the small ones, and fails if any uses more gates than recorded in
+`results/compilation.csv`, with Qiskit 2.6.0, which built the recorded
+circuits. When QCC improves, rerun `run.py` to record it.
+
+`plugin.py` compares Qiskit with and without QCC as its optimization stage
+(below).
+
 The suite follows the kinds of circuits of
 [ucc-bench](https://github.com/unitaryfoundation/ucc-bench), but its code and
 circuits are written here: ucc-bench is AGPL-licensed, this repository MIT.
@@ -76,3 +85,27 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
 - Like Qiskit's default, QCC drops two-qubit interactions whose removal
   costs less than 10⁻⁹ in average gate infidelity (the QFT's tiniest
   controlled phases); see `core/src/two_qubit.rs`.
+
+## Inside Qiskit
+
+With `qevedo-compiler` installed, Qiskit can use QCC as its optimization
+stage: `transpile(circuit, backend, optimization_method="qcc")` keeps
+Qiskit's layout, routing and translation and replaces its optimizations with
+QCC's (`python/qevedo/compiler/qiskit_plugin.py`). `plugin.py` transpiles the
+8- and 16-qubit circuits at optimization level 3 onto a 19-qubit heavy-hex
+chip, with and without it, and checks every output's state
+(`results/plugin.csv`). Geometric means of Qiskit + QCC over Qiskit alone:
+
+| gates | two-qubit gates | all gates |
+|---|---|---|
+| {rz, sx, x, cx} | 1.000× | 0.931× |
+| {rz, sx, x, cz} | 1.000× | 0.995× |
+
+- With CX, QCC removes up to 46% of the gates (the 16-qubit QFT: 1324 →
+  719) and never adds two-qubit gates; Quantum Volume gets 2–3% more
+  single-qubit gates.
+- With CZ, QCC saves up to 22% (QFT) but gives the Heisenberg chain 28–30%
+  more single-qubit gates. Its two-qubit blocks there have a symmetric
+  interaction (XX + YY + ZZ), whose decomposition leaves a choice of outer
+  single-qubit gates that QCC does not yet make well; Qiskit picks simple
+  ones. That is the next thing to fix.

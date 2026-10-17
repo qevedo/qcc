@@ -31,9 +31,15 @@ dependencies = [
 [project.optional-dependencies]
 # The synthesis tests check results against the qvd simulator.
 dev = ["pytest>=7.0", "qevedo-simulator>=0.1"]
+# The Qiskit transpiler plugin (qevedo.compiler.qiskit_plugin).
+qiskit = ["qiskit>=1.3"]
 
 [project.scripts]
 qcc = "qevedo.compiler.cli:main"
+
+# transpile(circuit, backend, optimization_method="qcc") in Qiskit.
+[project.entry-points."qiskit.transpiler.optimization"]
+qcc = "qevedo.compiler.qiskit_plugin:QCCPlugin"
 
 [project.urls]
 Homepage = "https://github.com/qevedo/qcc"

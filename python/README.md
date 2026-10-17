@@ -86,6 +86,22 @@ circuit = compile_source(open("program.qasm").read(), CompileOptions(device=ion_
 print(circuit.gate_counts())
 ```
 
+## Inside Qiskit
+
+From version 0.2.1, with Qiskit installed (`pip install qevedo-compiler[qiskit]`), QCC is also
+an optimization stage for Qiskit's transpiler: Qiskit lays out, routes and
+translates the circuit, and QCC optimizes it.
+
+```python
+from qiskit import transpile
+
+compiled = transpile(circuit, backend, optimization_method="qcc")
+```
+
+On a 19-qubit heavy-hex chip with CX gates, this uses the same two-qubit
+gates as Qiskit's level 3 and 7% fewer gates in all (up to 46% on a QFT); see
+[benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation).
+
 ## Multi-core architectures
 
 `qevedo.compiler.multicore` compiles circuits for modular quantum computers

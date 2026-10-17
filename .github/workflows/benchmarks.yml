@@ -1,0 +1,25 @@
+name: Benchmarks
+
+# On every pull request and push: compile the compilation benchmark's
+# circuits with QCC, check the small ones against their unitaries, and fail
+# if any uses more gates than recorded in
+# benchmarks/compilation/results/compilation.csv. The table goes to the
+# job's summary.
+on:
+  push:
+  pull_request:
+
+jobs:
+  compilation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install
+        # The Qiskit version that built the recorded circuits (README.md).
+        run: python -m pip install ./python qiskit==2.6.0
+      - name: Check against the recorded results
+        run: python benchmarks/compilation/check.py >> "$GITHUB_STEP_SUMMARY"
