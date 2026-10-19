@@ -75,7 +75,7 @@ short syntheses the one with the fewest gates inside the block. Two-qubit
 interactions whose removal costs less than 10⁻⁹ in average gate infidelity
 are dropped, as Qiskit's default does. On a benchmark of 21 circuits (QFT,
 QAOA, Quantum Volume, GHZ, Heisenberg, adders, Clifford+T) this uses 0.968×
-the two-qubit gates of Qiskit's `optimization_level=3` and 0.913× its gates
+the two-qubit gates of Qiskit's `optimization_level=3` and 0.901× its gates
 in all, and no more of either on any circuit
 ([benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation)).
 
@@ -110,7 +110,8 @@ compiled = transpile(circuit, backend, optimization_method="qcc")
 ```
 
 On a 19-qubit heavy-hex chip with CX gates, this uses 3% fewer two-qubit
-gates than Qiskit's level 3 and 13% fewer gates in all (61% on a QFT); see
+gates than Qiskit's level 3 and 14% fewer gates in all (61% on a QFT); with
+CZ gates, 9% fewer gates in all; see
 [benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation).
 
 ## Multi-core architectures

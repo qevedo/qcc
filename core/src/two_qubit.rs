@@ -35,6 +35,10 @@ pub enum Objective {
     InCircuit,
 }
 
+/// How many of the outer single-qubit gates a symmetric point allows (see
+/// `symmetric_variants`) are tried, the cheapest first.
+const VARIANTS: usize = 4;
+
 /// How much more a single-qubit gate between two two-qubit gates weighs under
 /// [`Objective::InCircuit`]: more than all the outer ones together.
 const INNER_WEIGHT: usize = 64;
@@ -445,6 +449,62 @@ fn approximate_cx(target: Kak) -> Kak {
     target
 }
 
+/// `target` and the same unitary with other outer single-qubit gates, where
+/// the point is symmetric. canonical(a, b, c) commutes with S = S1 ⊗ S0 when
+/// a = b (S = Rz(θ) ⊗ Rz(θ)), b = ±c (Rx(θ) ⊗ Rx(±θ)) or a = b = ±c (V ⊗ V,
+/// or V ⊗ Z V Z, for any V), so (A1 ⊗ A0) C (B1 ⊗ B0) = (A1 S1 ⊗ A0 S0) C (S1† B1 ⊗ S0† B0).
+/// The KAK decomposition picks one such S arbitrarily; these are the ones
+/// that make an outer gate the identity or give it a special angle. On a
+/// Heisenberg chain (XX + YY + ZZ blocks) the arbitrary choice cost a fifth
+/// more single-qubit gates than Qiskit.
+fn symmetric_variants(target: &Kak) -> Vec<Kak> {
+    let [a, b, c] = target.point;
+    let shifted = |s1: M2, s0: M2| Kak {
+        a1: target.a1 * s1,
+        a0: target.a0 * s0,
+        b1: s1.adjoint() * target.b1,
+        b0: s0.adjoint() * target.b0,
+        ..target.clone()
+    };
+    let mut out = vec![target.clone()];
+    if a.abs() < TOL {
+        return out; // the identity: no outer gates to choose
+    }
+    if close(a, b, TOL) && close(b, c.abs(), TOL) {
+        // V ⊗ V, or V ⊗ Z V Z when c < 0 (see symmetric_blocks.rs).
+        let z = pauli(2);
+        let on0 = |v: M2| if c < 0.0 { z * v * z } else { v };
+        for (v1, v0) in [
+            (target.a1.adjoint(), on0(target.a1.adjoint())),
+            (on0(target.a0.adjoint()), target.a0.adjoint()),
+            (target.b1, on0(target.b1)),
+            (on0(target.b0), target.b0),
+        ] {
+            out.push(shifted(v1, v0));
+        }
+    }
+    // One-parameter families: the axis, and the sign of the angle on qubit 0.
+    let mut families = Vec::new();
+    if close(a, b, TOL) {
+        families.push((2, 1.0));
+    }
+    if close(b, c.abs(), TOL) && b.abs() > TOL {
+        families.push((0, c.signum()));
+    }
+    for (axis, sign) in families {
+        let mut angles = candidate_angles(axis, &target.b1, &target.a1);
+        angles.extend(
+            candidate_angles(axis, &target.b0, &target.a0)
+                .into_iter()
+                .map(|t| sign * t),
+        );
+        for theta in angles {
+            out.push(shifted(rotation(axis, theta), rotation(axis, sign * theta)));
+        }
+    }
+    out
+}
+
 /// How many CX-like gates `u` needs (0–3), within [`APPROXIMATION`].
 pub fn cx_count(u: &M4) -> usize {
     let [a, b, c] = approximate_cx(kak(u)).point;
@@ -636,9 +696,35 @@ impl TwoQubitSynth {
                     }
                     BasisKind::Numeric(_) => unreachable!(),
                 };
-                templates
+                // With a cost to compare them by, also the other outer
+                // single-qubit gates the point's symmetries allow.
+                // Only the few whose outer gates are cheapest are worth
+                // instantiating: there can be a hundred.
+                let targets = match cost_1q {
+                    Some(cost) => {
+                        let mut variants = symmetric_variants(&target);
+                        variants.sort_by_cached_key(|k| {
+                            cost(&k.a1) + cost(&k.a0) + cost(&k.b1) + cost(&k.b0)
+                        });
+                        variants.truncate(VARIANTS);
+                        variants
+                    }
+                    None => vec![target.clone()],
+                };
+                // The template's own KAK, once for all the targets.
+                let templates: Vec<(Vec<Step>, Kak)> = templates
                     .into_iter()
-                    .filter_map(|t| instantiate(&target, t, basis))
+                    .map(|t| {
+                        let reference = kak(&steps_matrix(&t));
+                        (t, reference)
+                    })
+                    .collect();
+                targets
+                    .iter()
+                    .flat_map(|t| templates.iter().map(move |template| (t, template)))
+                    .filter_map(|(t, (template, reference))| {
+                        instantiate(t, template.clone(), reference, basis)
+                    })
                     .collect()
             }
         };
@@ -1059,8 +1145,12 @@ fn candidate_angles(axis: usize, before: &M2, after: &M2) -> Vec<f64> {
 }
 
 /// `target` as `template` between single-qubit gates, or None if the points differ.
-fn instantiate(target: &Kak, template: Vec<Step>, basis: &TwoQubitBasis) -> Option<Vec<Step>> {
-    let reference = kak(&steps_matrix(&template));
+fn instantiate(
+    target: &Kak,
+    template: Vec<Step>,
+    reference: &Kak,
+    basis: &TwoQubitBasis,
+) -> Option<Vec<Step>> {
     if !close3(reference.point, target.point, 1e-7) {
         return None;
     }

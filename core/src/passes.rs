@@ -3,13 +3,14 @@
 //! `phase_folding`). Matches
 //! `qevedo/compiler/passes/{optimize,resynthesize,base}.py`.
 
-use crate::gates::{is_known_gate, matrix_1q, matrix_2q};
+use crate::gates::{is_known_gate, matrix_1q, matrix_2q, signature};
 use crate::ir::{Instruction, NON_GATES, cost};
 use crate::linalg::{M2, M4, kron};
 use crate::lower::Lowering;
 use crate::one_qubit::{Basis1q, remainder, synthesize_1q};
 use crate::permutation::measured_out;
 use crate::phase_folding::phase_folding;
+use crate::symmetric_blocks::shift_through_symmetric_blocks;
 use crate::two_qubit::{Objective, cx_count};
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::TAU;
@@ -295,14 +296,14 @@ fn reachable(
 
 // -- two-qubit blocks -------------------------------------------------------------------
 
-struct Block {
-    pair: [usize; 2],
-    instructions: Vec<Instruction>,
+pub(crate) struct Block {
+    pub(crate) pair: [usize; 2],
+    pub(crate) instructions: Vec<Instruction>,
 }
 
 impl Block {
     /// The block's unitary, with `pair[0]` as the most significant qubit.
-    fn matrix(&self) -> Option<M4> {
+    pub(crate) fn matrix(&self) -> Option<M4> {
         let mut out = M4::IDENTITY;
         for inst in &self.instructions {
             let m = if inst.qubits.len() == 1 {
@@ -595,6 +596,7 @@ pub fn run_passes(
             "commutative_cancellation" => commutative_cancellation(current),
             "resynthesize_2q" => resynthesize_two_qubit_blocks(current, &mut lowering),
             "phase_folding" => phase_folding(current),
+            "symmetric_blocks" => shift_through_symmetric_blocks(current, &lowering.bases_1q),
             other => return Err(format!("unknown pass '{other}'")),
         };
     }
@@ -625,44 +627,95 @@ pub enum Relabel {
 /// [`compile`], with permutation-aware block resynthesis when `relabel`
 /// allows it. Returns the instructions and where each qubit's state ends: on
 /// wire `wires[q]`.
+///
+/// For a device whose two-qubit gate is CX-like but not CX (CZ, ECR, …), the
+/// circuit is also compiled for CX first and then for the device, and the
+/// cheaper result kept: phase folding sees parities through CNOTs, but not
+/// through the single-qubit gates that turn a CZ into one.
 pub fn compile_relabelling(
     instructions: Vec<Instruction>,
     native: impl IntoIterator<Item = String>,
     relabel: Relabel,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let native: Vec<String> = native.into_iter().collect();
-    let mut lowering = Lowering::new(native.clone());
+    let permute = relabel != Relabel::Never;
+    let mut candidates = vec![pipeline(&instructions, &native, permute)?];
+    if let Some(via) = through_cx(&native) {
+        if let Ok((middle, first)) = pipeline(&instructions, &via, permute) {
+            let (out, second) = pipeline(&middle, &native, permute)?;
+            let wires = first
+                .iter()
+                .map(|&w| second.get(w).copied().unwrap_or(w))
+                .collect();
+            candidates.push((out, wires));
+        }
+    }
+    let allowed = |(out, wires): &(Vec<Instruction>, Vec<usize>)| {
+        let moved = wires.iter().enumerate().any(|(q, &w)| q != w);
+        !moved || relabel == Relabel::Always || measured_out(out, wires)
+    };
+    // The first of the cheapest: the direct compilation on ties.
+    match candidates
+        .into_iter()
+        .filter(allowed)
+        .min_by_key(|(out, _)| cost(out))
+    {
+        Some(best) => Ok(best),
+        None => compile_relabelling(instructions, native, Relabel::Never),
+    }
+}
+
+/// `native` with CX as its two-qubit gate, if its two-qubit gates are
+/// CX-like but do not include CX.
+fn through_cx(native: &[String]) -> Option<Vec<String>> {
+    let two_qubit = |name: &str| signature(name).is_some_and(|(arity, _)| arity == 2);
+    let cx_like = ["cz", "cy", "ch", "ecr"];
+    let gates: Vec<&String> = native.iter().filter(|g| two_qubit(g)).collect();
+    if gates.is_empty()
+        || native.iter().any(|g| g == "cx")
+        || !gates.iter().all(|g| cx_like.contains(&g.as_str()))
+    {
+        return None;
+    }
+    let mut via: Vec<String> = native.iter().filter(|g| !two_qubit(g)).cloned().collect();
+    via.push("cx".to_string());
+    Some(via)
+}
+
+/// The default pipeline (see [`compile`]), with permutation-aware block
+/// resynthesis if `permute`.
+fn pipeline(
+    instructions: &[Instruction],
+    native: &[String],
+    permute: bool,
+) -> Result<(Vec<Instruction>, Vec<usize>), String> {
+    let mut lowering = Lowering::new(native.iter().cloned());
     let mut current = Vec::with_capacity(instructions.len());
-    for inst in &instructions {
+    for inst in instructions {
         current.extend(lowering.lower(inst)?);
     }
-    let mut wires: Vec<usize> = (0..qubit_count(&instructions)).collect();
+    let mut wires: Vec<usize> = (0..qubit_count(instructions)).collect();
     for _ in 0..2 {
         // First, while rotations are still Z rotations between CNOTs.
         current = phase_folding(current);
         current = merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q);
         current = commutative_cancellation(current);
         let moved;
-        (current, moved) =
-            resynthesize_permuting(current, &mut lowering, relabel != Relabel::Never);
+        (current, moved) = resynthesize_permuting(current, &mut lowering, permute);
         // A pass may drop every gate on the last qubits: those stay put.
         wires = wires
             .iter()
             .map(|&w| moved.get(w).copied().unwrap_or(w))
             .collect();
     }
+    let current = shift_through_symmetric_blocks(current, &lowering.bases_1q);
     let current = merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q);
-    let moved = wires.iter().enumerate().any(|(q, &w)| q != w);
-    if relabel == Relabel::IfMeasured && moved && !measured_out(&current, &wires) {
-        return compile_relabelling(instructions, native, Relabel::Never);
-    }
     Ok((current, wires))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gates::signature;
     use crate::testing::{Rng, circuit_unitary, dense_equal_up_to_phase};
 
     const INPUT: [&str; 33] = [

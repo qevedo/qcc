@@ -17,6 +17,7 @@ pub mod permutation;
 pub mod phase_folding;
 pub mod rng;
 pub mod routing;
+pub mod symmetric_blocks;
 #[cfg(test)]
 pub(crate) mod testing;
 pub mod two_qubit;

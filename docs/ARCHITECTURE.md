@@ -21,8 +21,13 @@ OpenQASM 2/3  →  openqasm.parse + analyze  →  frontend  →  IR  →  passes
 
 The default pipeline is: elide SWAPs, decompose, then two rounds of [phase
 folding → merge single-qubit runs → commutative cancellation → two-qubit
-block resynthesis], then a final merge. Each optimization can expose work for
-the others.
+block resynthesis], then moving gates through symmetric blocks and a final
+merge. Each optimization can expose work for the others. For a device whose
+two-qubit gate is CX-like but not CX (CZ, ECR, …), the Rust core also
+compiles for CX first and then for the device, and keeps the cheaper result:
+phase folding sees parities through CNOTs but not through the single-qubit
+gates that make a CZ one (on the benchmark's adders, 40 and 92 CZs instead
+of 49 and 113).
 
 1. **ElideSwaps** (`passes/permutation.py`; `core/src/permutation.rs`):
    removes SWAP gates by relabelling the qubits of everything after them, as
@@ -79,7 +84,20 @@ the others.
    CX (a CX each way is a SWAP and one CX) becomes SWAP·U, its SWAP elided,
    and everything after it is relabelled (`compile_relabelling` in
    `core/src/passes.rs`; the Python passes do not do this).
-
+   At a symmetric Weyl point the KAK decomposition's outer gates are not
+   unique: canonical(a, b, c) commutes with Rz ⊗ Rz when a = b, with
+   Rx ⊗ Rx(±) when b = ±c, and with every V ⊗ V (or V ⊗ ZVZ) when
+   a = b = ±c, as for XX + YY + ZZ. The Rust core tries the outer gates those
+   symmetries allow and keeps the cheapest (`symmetric_variants` in
+   `core/src/two_qubit.rs`).
+7. **Symmetric blocks** (`core/src/symmetric_blocks.rs`, Rust only): the same
+   symmetry lets a factor V ⊗ V move through a whole block, from the
+   single-qubit runs before it to those after it. Blocks are synthesized
+   without seeing their neighbours, so this pass picks V for each symmetric
+   block to make the four runs around it cheapest. On Heisenberg chains
+   (XX + YY + ZZ blocks) it saves 8–9% of the gates, and with the
+   symmetric outer gates above it turned QCC's output for CZ from a fifth
+   longer than Qiskit's to 7–13% shorter.
 On the compilation benchmark (`benchmarks/compilation`: 21 circuits against
 Qiskit's level 3, pytket and UCC), QCC uses no more two-qubit gates and no
 more gates in all than Qiskit on any circuit, and fewer on most; phase

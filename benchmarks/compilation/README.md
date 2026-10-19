@@ -52,9 +52,9 @@ UCC 0.4.12):
 | GHZ | 8 | 7 / 10 | 7 / 10 | 7 / 10 | 7 / 21 |
 |  | 16 | 15 / 18 | 15 / 18 | 15 / 18 | 15 / 29 |
 |  | 32 | 31 / 34 | 31 / 34 | 31 / 34 | 31 / 45 |
-| Heisenberg | 8 | 84 / 295 | 84 / 356 | 84 / 434 | 84 / 674 |
-|  | 16 | 180 / 627 | 180 / 760 | 180 / 914 | 180 / 1450 |
-|  | 32 | 372 / 1291 | 372 / 1568 | 372 / 1874 | 372 / 3002 |
+| Heisenberg | 8 | 84 / 273 | 84 / 356 | 84 / 434 | 84 / 674 |
+|  | 16 | 180 / 573 | 180 / 760 | 180 / 914 | 180 / 1450 |
+|  | 32 | 372 / 1173 | 372 / 1568 | 372 / 1874 | 372 / 3002 |
 | Adder | 8 | 40 / 105 | 49 / 117 | 46 / 129 | 49 / 424 |
 |  | 16 | 92 / 245 | 113 / 273 | 106 / 301 | 113 / 988 |
 |  | 32 | 196 / 525 | 241 / 585 | 226 / 645 | 241 / 2116 |
@@ -66,17 +66,17 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
 
 | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|
-| QCC | 0.968× | 0.913× | 7 ms |
-| Qiskit | 1.000× | 1.000× | 7 ms |
-| pytket | 1.002× | 1.123× | 1161 ms |
-| UCC | 1.017× | 2.210× | 21 ms |
+| QCC | 0.968× | 0.901× | 8 ms |
+| Qiskit | 1.000× | 1.000× | 9 ms |
+| pytket | 1.002× | 1.123× | 1098 ms |
+| UCC | 1.017× | 2.210× | 30 ms |
 
 - QCC uses the fewest gates of the four compilers: 3% fewer two-qubit gates
-  than Qiskit (0.968×) and 9% fewer gates in all, and no more of either than
+  than Qiskit (0.968×) and 10% fewer gates in all, and no more of either than
   Qiskit on any circuit. Phase folding (`core/src/phase_folding.rs`) does
   most of it: on the adder it removes 19% of the two-qubit gates (196 against
   Qiskit's 241 and pytket's 226 at 32 qubits), and on the QFT, QAOA and
-  Heisenberg chain QCC leaves 7–23% fewer gates in all than Qiskit.
+  Heisenberg chain QCC leaves 7–25% fewer gates in all than Qiskit.
 - Qiskit, pytket and QCC all remove the QFT's final SWAPs by relabelling the
   output qubits (3 CX per SWAP: 12, 24 and 48); `run.py` asks QCC to with
   `relabel_outputs=True` and checks its outputs with the permutation it
@@ -93,8 +93,11 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
   `core/src/two_qubit.rs`: fewest gates between its first and last two-qubit
   gates, as the outer ones merge with their neighbours') saves 1% there over
   synthesizing it alone.
-- QCC takes about as long as Qiskit on most circuits (a median of 7 ms for
-  both), but up to 6× longer on Quantum Volume, where most of the work is
+- On the Heisenberg chain, moving single-qubit gates through its symmetric
+  XX + YY + ZZ blocks (`core/src/symmetric_blocks.rs`) saves another 8–9%
+  of the gates: 1173 at 32 qubits, against Qiskit's 1568.
+- QCC takes about as long as Qiskit on most circuits (a median of 8 ms,
+  against 9), but up to 6× longer on Quantum Volume, where most of the work is
   resynthesizing generic two-qubit blocks.
 - Like Qiskit's default, QCC drops two-qubit interactions whose removal
   costs less than 10⁻⁹ in average gate infidelity (the QFT's tiniest
@@ -112,14 +115,16 @@ chip, with and without it, and checks every output's state
 
 | gates | two-qubit gates | all gates |
 |---|---|---|
-| {rz, sx, x, cx} | 0.973× | 0.867× |
-| {rz, sx, x, cz} | 1.000× | 0.981× |
+| {rz, sx, x, cx} | 0.973× | 0.856× |
+| {rz, sx, x, cz} | 0.999× | 0.906× |
 
-- With CX, QCC removes 13% of the gates and 3% of the two-qubit gates (the
+- With CX, QCC removes 14% of the gates and 3% of the two-qubit gates (the
   16-qubit QFT: 1324 → 518 gates; the adder: 180 → 159 two-qubit gates);
   Quantum Volume gets up to 1% more single-qubit gates.
-- With CZ, QCC saves 2% of the gates but gives the Heisenberg chain 20–22%
-  more single-qubit gates. Its two-qubit blocks there have a symmetric
-  interaction (XX + YY + ZZ), whose decomposition leaves a choice of outer
-  single-qubit gates that QCC does not yet make well; Qiskit picks simple
-  ones. That is the next thing to fix.
+- With CZ, QCC removes 9% of the gates, and 7–13% on the Heisenberg chain
+  (16 qubits: 992 → 866). Its XX + YY + ZZ blocks have a symmetric Weyl
+  point, where the outer single-qubit gates of the KAK decomposition are
+  not unique; QCC now picks them for each block and its neighbours
+  (`symmetric_variants` in `core/src/two_qubit.rs` and
+  `core/src/symmetric_blocks.rs`). Before, it gave this circuit a fifth more
+  gates than Qiskit.
