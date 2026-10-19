@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "qevedo-compiler"
-version = "0.2.3"
+version = "0.3.0"
 description = "QCC, the Quantum Compiler Collection: a technology-agnostic quantum circuit compiler (qevedo.compiler)"
 readme = "README.md"
 license = "MIT"
