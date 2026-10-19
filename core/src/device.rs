@@ -9,10 +9,10 @@
 //! all act on coupled pairs already is not routed again.
 
 use crate::gates::matrix_2q;
-use crate::ir::Instruction;
+use crate::ir::{Instruction, cost};
 use crate::linalg::{M2, equal_up_to_phase4, kron};
 use crate::lower::Lowering;
-use crate::passes::{Relabel, best_pipeline, merge_single_qubit_runs};
+use crate::passes::{Relabel, best_pipeline, merge_single_qubit_runs, network_promising};
 use crate::routing::{CouplingGraph, SabreOptions, layout_and_route};
 use crate::two_qubit::kak;
 use std::collections::HashSet;
@@ -77,30 +77,64 @@ pub fn compile_for_device(
         .iter()
         .filter(|i| i.is_gate() && i.qubits.len() == 2)
         .all(|i| coupled(i.qubits[0], i.qubits[1]));
-    let identity: Vec<usize> = (0..logical).collect();
-    let (physical, initial_layout, final_layout) = if routed_already {
-        (instructions, identity.clone(), identity)
-    } else {
-        // On logical qubits, where relabelling is free: the final layout
-        // reports it.
-        let (optimized, moved) = best_pipeline(&instructions, &native, Relabel::Always)?;
+    if routed_already {
+        let identity: Vec<usize> = (0..logical).collect();
+        let out = on_physical_qubits(&instructions, &native, device)?;
+        return Ok(DeviceCircuit {
+            instructions: out,
+            initial_layout: identity.clone(),
+            final_layout: identity,
+        });
+    }
+    // On logical qubits, where relabelling is free (the final layout reports
+    // it). A Pauli network can need far more routing than it saves, so a
+    // result with one is routed next to one without, and the cheaper kept.
+    let mut logical_candidates = vec![best_pipeline(
+        &instructions,
+        &native,
+        Relabel::Always,
+        false,
+    )?];
+    if network_promising(&instructions, &native) {
+        let with_network = best_pipeline(&instructions, &native, Relabel::Always, true)?;
+        if with_network.0 != logical_candidates[0].0 {
+            logical_candidates.push(with_network);
+        }
+    }
+    let mut best: Option<DeviceCircuit> = None;
+    for (optimized, moved) in logical_candidates {
         let routed = layout_and_route(&optimized, logical, &graph, options)?;
         let final_layout = (0..logical)
             .map(|q| routed.final_layout[moved.get(q).copied().unwrap_or(q)])
             .collect();
-        (routed.instructions, routed.initial_layout, final_layout)
-    };
-    // On physical qubits: no relabelling, and every pass keeps the pairs.
-    let (mut out, _) = best_pipeline(&physical, &native, Relabel::Never)?;
+        let out = on_physical_qubits(&routed.instructions, &native, device)?;
+        if best
+            .as_ref()
+            .is_none_or(|b| cost(&out) < cost(&b.instructions))
+        {
+            best = Some(DeviceCircuit {
+                instructions: out,
+                initial_layout: routed.initial_layout,
+                final_layout,
+            });
+        }
+    }
+    Ok(best.expect("a candidate"))
+}
+
+/// The pipeline on physical qubits: no relabelling, every pass keeps the
+/// pairs; then gates turned around where the couplings have a direction.
+fn on_physical_qubits(
+    physical: &[Instruction],
+    native: &[String],
+    device: &Device,
+) -> Result<Vec<Instruction>, String> {
+    let (mut out, _) = best_pipeline(physical, native, Relabel::Never, false)?;
     if device.directed {
         let allowed: HashSet<(usize, usize)> = device.edges.iter().copied().collect();
-        out = turn_around(out, &allowed, &native);
+        out = turn_around(out, &allowed, native);
     }
-    Ok(DeviceCircuit {
-        instructions: out,
-        initial_layout,
-        final_layout,
-    })
+    Ok(out)
 }
 
 /// Rewrite two-qubit gates on `(b, a)` where only `(a, b)` is allowed as

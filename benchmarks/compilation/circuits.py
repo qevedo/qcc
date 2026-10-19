@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import numpy as np
 from qiskit import QuantumCircuit, qasm2, transpile
-from qiskit.circuit.library import CDKMRippleCarryAdder, quantum_volume
+from qiskit.circuit.library import CDKMRippleCarryAdder, PauliEvolutionGate, quantum_volume
+from qiskit.quantum_info import SparsePauliOp
 from qiskit.synthesis.qft import synth_qft_full
 
 # The standard gates the input may use: OpenQASM 2's qelib1.inc.
@@ -92,6 +93,24 @@ def clifford_t(n: int, depth: int = 40) -> QuantumCircuit:
     return qc
 
 
+def hamiltonian(n: int, terms_per_qubit: int = 4) -> QuantumCircuit:
+    """One Trotter step of a random Hamiltonian: Pauli strings of weight 2
+    to 6 on random qubits, as in quantum chemistry, each exponentiated with
+    Qiskit's default CX ladders."""
+    rng = np.random.default_rng(2000 + n)
+    labels = []
+    for _ in range(terms_per_qubit * n):
+        qubits = rng.choice(n, rng.integers(2, min(n, 6) + 1), replace=False)
+        label = ["I"] * n
+        for q in qubits:
+            label[q] = "XYZ"[rng.integers(3)]
+        labels.append("".join(label))
+    op = SparsePauliOp(labels, coeffs=rng.uniform(-1, 1, len(labels)))
+    qc = QuantumCircuit(n)
+    qc.append(PauliEvolutionGate(op, time=0.3), range(n))
+    return qc
+
+
 FAMILIES = {
     "qft": qft,
     "qaoa": qaoa,
@@ -100,6 +119,7 @@ FAMILIES = {
     "heisenberg": heisenberg,
     "adder": adder,
     "clifford_t": clifford_t,
+    "hamiltonian": hamiltonian,
 }
 
 

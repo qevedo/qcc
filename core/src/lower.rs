@@ -322,21 +322,27 @@ impl Lowering {
         if todo.len() < PARALLEL_MIN || threads < 2 || cfg!(target_arch = "wasm32") {
             return;
         }
-        let chunk = todo.len().div_ceil(threads);
+        // Each thread takes the next unitary until none is left: syntheses
+        // differ in cost, and so do the cores of hybrid processors.
+        let next = std::sync::atomic::AtomicUsize::new(0);
         let (bases_2q, bases_1q, native) = (&self.bases_2q, &self.bases_1q, &self.native);
+        let (todo, next) = (&todo, &next);
         let results: Vec<Vec<_>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = todo
-                .chunks(chunk)
-                .map(|part| {
+            let handles: Vec<_> = (0..threads.min(todo.len()))
+                .map(|_| {
                     scope.spawn(move || {
                         let mut synth = TwoQubitSynth::new();
-                        part.iter()
-                            .map(|(key, m)| {
-                                let out =
-                                    synthesize_2q(&mut synth, m, key.1, bases_2q, bases_1q, native);
-                                (*key, out)
-                            })
-                            .collect()
+                        let mut out = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some((key, m)) = todo.get(i) else {
+                                break;
+                            };
+                            let lowered =
+                                synthesize_2q(&mut synth, m, key.1, bases_2q, bases_1q, native);
+                            out.push((*key, lowered));
+                        }
+                        out
                     })
                 })
                 .collect();

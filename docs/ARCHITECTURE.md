@@ -19,9 +19,9 @@ OpenQASM 2/3  →  openqasm.parse + analyze  →  frontend  →  IR  →  passes
 
 ### Implemented passes
 
-The default pipeline is: elide SWAPs, decompose, [phase folding → merge
-single-qubit runs → commutative cancellation → two-qubit block
-resynthesis], the same again without resynthesis, then moving gates through
+The default pipeline is: elide SWAPs, decompose, [rotation merging → phase
+folding → merge single-qubit runs → commutative cancellation → two-qubit
+block resynthesis], the same again without resynthesis, then moving gates through
 symmetric blocks and a final merge. Each optimization can expose work for
 the others; a second resynthesis never removed a gate on the benchmarks, and
 resynthesis is most of the time. The Rust core synthesizes a pass's blocks
@@ -65,6 +65,12 @@ of 49 and 113).
    and any other non-diagonal gate gives its qubits fresh variables. Diagonal
    rotations (Rz, phase, T, S, Z, Rzz) add phases on their parity, and those
    on the same parity merge into the last adjustable one.
+   In the Rust core, **rotation merging** (`merge_rotations` in
+   `core/src/pauli_network.rs`) goes first and further: each Z rotation,
+   moved through every Clifford gate before it (Hadamards included, with a
+   stabilizer tableau), is a rotation about a Pauli string, and rotations
+   about the same string merge when every rotation between them commutes
+   with it (Zhang and Chen, 2019).
 4. **MergeSingleQubitGates**: replaces each run of single-qubit gates on a
    qubit by its shortest equivalent in the native basis.
 5. **CommutativeCancellation**: each gate looks back along its qubits,
@@ -101,10 +107,11 @@ of 49 and 113).
    (XX + YY + ZZ blocks) it saves 8–9% of the gates, and with the
    symmetric outer gates above it turned QCC's output for CZ from a fifth
    longer than Qiskit's to 7–13% shorter.
-On the compilation benchmark (`benchmarks/compilation`: 21 circuits against
-Qiskit's level 3, pytket and UCC), QCC uses no more two-qubit gates and no
-more gates in all than Qiskit on any circuit, and fewer on most; phase
-folding is most of the difference (19% fewer CNOTs on adders).
+On the compilation benchmark (`benchmarks/compilation`: 24 circuits against
+Qiskit's level 3, pytket and UCC), QCC uses no more two-qubit gates than
+Qiskit on any circuit, and fewer on most; phase folding is most of the
+difference on arithmetic (19% fewer CNOTs on adders), the Pauli network on
+Hamiltonian simulation (up to 43%).
 
 The synthesis lives in `qevedo/compiler/synthesis/` (`gates.py`: matrices of
 the standard gates; `one_qubit.py`: Euler decompositions; `two_qubit.py`: KAK
@@ -118,6 +125,33 @@ exact). The Python reference has templates for CX-like and Ising gates only.
 `core/src/decompose.rs` decomposes one gate or unitary and checks the result;
 `wasm/` compiles it to WebAssembly for the decomposition playground at
 https://qevedo.com/decompose/.
+
+### Pauli networks
+
+For circuits whose two-qubit gates are mostly CX ladders around few
+rotations, as Pauli exponentials in Hamiltonian simulation and chemistry
+are, the Rust core also synthesizes the circuit again from scratch
+(`core/src/pauli_network.rs`) and keeps the result if it is cheaper:
+
+1. The circuit, lowered to CX, is read as Pauli rotations: each Z rotation
+   moved through the Clifford gates before it (a stabilizer tableau) is a
+   rotation about some Pauli string, and the Clifford gates that remain
+   form one Clifford at the end.
+2. The rotations are built again greedily, as in Rustiq (Goubault de
+   Brugière and Martiel, 2024) and pytket's GreedyPauliSimp: of the
+   controlled-Pauli gates on two qubits of a rotation that can come next,
+   the one that most lowers the weights of the rotations ahead (discounted
+   by commuting layer) and of the Clifford left; a rotation is emitted as an
+   Rz once it acts on one qubit.
+3. The Clifford left is synthesized one qubit at a time, as in the greedy
+   synthesis of Bravyi et al. (2021); where qubits may be relabelled, it
+   may end as a permutation.
+
+It runs only on circuits with three or more CXs per non-Clifford rotation
+(at most 400 rotations) and on all-to-all devices, and its result must also
+win with a CX counted as ten single-qubit gates. On one Trotter step of
+random Hamiltonians QCC then uses 43% fewer CXs than Qiskit's level 3 at 8
+qubits and 17% at 16.
 
 ### Multi-core mapping
 
@@ -151,7 +185,7 @@ The result is a circuit on a register `q` of the device's qubits;
 `Circuit.initial_layout` and `Circuit.output_permutation` say on which
 physical qubit each logical qubit starts and ends. A circuit whose two-qubit
 gates already act on coupled pairs keeps its layout. On a 19-qubit
-heavy-hex chip (`benchmarks/compilation/device.py`) this uses 5–6% fewer
+heavy-hex chip (`benchmarks/compilation/device.py`) this uses 6% fewer
 two-qubit gates than Qiskit's level 3, and 12–17% fewer gates in all.
 
 Still to come: technology-specific constraints from `DeviceSpec.gate_rules`,

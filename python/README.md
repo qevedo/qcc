@@ -67,16 +67,20 @@ profile's `native_gates`, with the fewest gates:
   more qubits, through their definitions.
 
 After lowering, the circuit is optimized: rotations acting on the same
-parity of the qubits are merged however far apart they are (phase folding),
+Pauli string are merged however far apart they are (rotation merging and
+phase folding),
 single-qubit runs are merged, gates cancel or merge across gates they
 commute with, and every run of gates on one pair of qubits is resynthesized
 as a single two-qubit unitary when that is cheaper, choosing among equally
 short syntheses the one with the fewest gates inside the block. Two-qubit
 interactions whose removal costs less than 10⁻⁹ in average gate infidelity
-are dropped, as Qiskit's default does. On a benchmark of 21 circuits (QFT,
-QAOA, Quantum Volume, GHZ, Heisenberg, adders, Clifford+T) this uses 0.968×
-the two-qubit gates of Qiskit's `optimization_level=3` and 0.901× its gates
-in all, and no more of either on any circuit
+are dropped, as Qiskit's default does. Circuits made mostly of CX ladders
+around few rotations, as Pauli exponentials are, are also synthesized again
+from scratch as a Pauli network, which shares CNOTs between commuting
+rotations, and kept if cheaper. On a benchmark of 24 circuits (QFT, QAOA,
+Quantum Volume, GHZ, Heisenberg, adders, Clifford+T, random Hamiltonians)
+this uses 0.942× the two-qubit gates of Qiskit's `optimization_level=3` and
+0.916× its gates in all, and no more two-qubit gates on any circuit
 ([benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation)).
 
 SWAP gates are removed by relabelling the qubits after them, and blocks that
@@ -119,7 +123,7 @@ print(circuit.initial_layout, circuit.output_permutation)  # where each qubit st
 
 The result is on the device's physical qubits (a register `q`), and
 `qcc compile --device profile.yaml` prints both layouts. On a 19-qubit
-heavy-hex chip, QCC alone uses 5–6% fewer two-qubit gates than Qiskit's
+heavy-hex chip, QCC alone uses 6% fewer two-qubit gates than Qiskit's
 `optimization_level=3` and 12–17% fewer gates in all
 ([benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation)).
 
@@ -135,9 +139,9 @@ from qiskit import transpile
 compiled = transpile(circuit, backend, optimization_method="qcc")
 ```
 
-On a 19-qubit heavy-hex chip with CX gates, this uses 3% fewer two-qubit
-gates than Qiskit's level 3 and 14% fewer gates in all (61% on a QFT); with
-CZ gates, 9% fewer gates in all; see
+On a 19-qubit heavy-hex chip with CX gates, this uses 2% fewer two-qubit
+gates than Qiskit's level 3 and 15% fewer gates in all (61% on a QFT); with
+CZ gates, 10% fewer gates in all; see
 [benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation).
 
 ## Multi-core architectures

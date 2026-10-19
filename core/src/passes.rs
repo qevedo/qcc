@@ -347,6 +347,7 @@ fn reachable(
 
 // -- two-qubit blocks -------------------------------------------------------------------
 
+#[derive(Clone)]
 pub(crate) struct Block {
     pub(crate) pair: [usize; 2],
     pub(crate) instructions: Vec<Instruction>,
@@ -406,9 +407,13 @@ pub fn resynthesize_permuting(
     lowering: &mut Lowering,
     permute: bool,
 ) -> (Vec<Instruction>, Vec<usize>) {
-    let inside = resynthesize_blocks(instructions.clone(), lowering, Measure::Inside, permute);
-    let whole = resynthesize_blocks(instructions.clone(), lowering, Measure::Whole, permute);
-    let unchanged = (0..qubit_count(&instructions)).collect();
+    let qubits = qubit_count(&instructions);
+    let (items, blocks) = collect_blocks(instructions.clone());
+    // Both measures' syntheses at once, on all cores.
+    lowering.prefetch_two_qubit(&synthesis_requests(&blocks, permute));
+    let inside = resynthesize_blocks(&items, &blocks, qubits, lowering, Measure::Inside, permute);
+    let whole = resynthesize_blocks(&items, &blocks, qubits, lowering, Measure::Whole, permute);
+    let unchanged = (0..qubits).collect();
     let merged = |c: &[Instruction]| merged_cost(c, &lowering.native, &lowering.bases_1q);
     // The first of the cheapest, once merged: never worse than the input.
     [inside, whole, (instructions, unchanged)]
@@ -435,13 +440,9 @@ enum Measure {
     Whole,
 }
 
-fn resynthesize_blocks(
-    instructions: Vec<Instruction>,
-    lowering: &mut Lowering,
-    measure: Measure,
-    permute: bool,
-) -> (Vec<Instruction>, Vec<usize>) {
-    let mut wires: Vec<usize> = (0..qubit_count(&instructions)).collect();
+/// The circuit as instructions and maximal blocks of gates on one pair of
+/// qubits (with the single-qubit gates before them), in order.
+fn collect_blocks(instructions: Vec<Instruction>) -> (Vec<Item>, Vec<Block>) {
     // A block stands where its first gate was: gates that come later on other
     // qubits commute with the rest of the block.
     let mut result: Vec<Item> = Vec::new();
@@ -527,33 +528,27 @@ fn resynthesize_blocks(
             result.extend(run.into_iter().map(Item::Inst));
         }
     }
+    (result, blocks)
+}
 
-    // Synthesize the blocks' unitaries together first: on all cores when
-    // there are many (generic circuits have hundreds of distinct blocks).
-    let objective = match measure {
-        Measure::Inside => Objective::InCircuit,
-        Measure::Whole => Objective::Alone,
-    };
-    let swap = matrix_2q("swap", &[]).expect("a standard gate");
-    let mut requests = Vec::new();
-    for block in blocks.iter().filter(|b| worth_resynthesizing(b)) {
-        if let Some(m) = block.matrix() {
-            requests.push((m, objective));
-            if permute && cx_count(&(swap * m)) < cx_count(&m) {
-                requests.push((swap * m, objective));
-            }
-        }
-    }
-    lowering.prefetch_two_qubit(&requests);
+/// Each block replaced by the cheapest of it and its syntheses, by `measure`.
+fn resynthesize_blocks(
+    items: &[Item],
+    blocks: &[Block],
+    qubits: usize,
+    lowering: &mut Lowering,
+    measure: Measure,
+    permute: bool,
+) -> (Vec<Instruction>, Vec<usize>) {
     // A block synthesized with its SWAP elided moves its qubits' states to
     // each other's wires, and everything after is relabelled to follow them.
-    let mut blocks: Vec<Option<Block>> = blocks.into_iter().map(Some).collect();
+    let mut wires: Vec<usize> = (0..qubits).collect();
     let mut out = Vec::new();
-    for item in result {
+    for item in items {
         match item {
             Item::Inst(inst) => out.push(inst.relabel(&wires)),
-            Item::Block(b) => {
-                let block = blocks[b].take().unwrap();
+            &Item::Block(b) => {
+                let block = blocks[b].clone();
                 let [p, q] = block.pair;
                 let (synthesized, swapped) = best_for_block(block, lowering, measure, permute);
                 out.extend(synthesized.iter().map(|i| i.relabel(&wires)));
@@ -564,6 +559,28 @@ fn resynthesize_blocks(
         }
     }
     (out, wires)
+}
+
+/// The unitaries [`resynthesize_blocks`] will synthesize, under both
+/// measures' objectives.
+fn synthesis_requests(blocks: &[Block], permute: bool) -> Vec<(M4, Objective)> {
+    let swap = matrix_2q("swap", &[]).expect("a standard gate");
+    let mut requests = Vec::new();
+    for block in blocks {
+        if !worth_resynthesizing(block) {
+            continue;
+        }
+        if let Some(m) = block.matrix() {
+            let swapped = permute && cx_count(&(swap * m)) < cx_count(&m);
+            for objective in [Objective::InCircuit, Objective::Alone] {
+                requests.push((m, objective));
+                if swapped {
+                    requests.push((swap * m, objective));
+                }
+            }
+        }
+    }
+    requests
 }
 
 /// Whether a synthesis could beat the block: not with fewer than two
@@ -664,6 +681,15 @@ pub fn run_passes(
             "commutative_cancellation" => commutative_cancellation(current),
             "resynthesize_2q" => resynthesize_two_qubit_blocks(current, &mut lowering),
             "phase_folding" => phase_folding(current),
+            "merge_rotations" => crate::pauli_network::merge_rotations(current),
+            "pauli_network" => match crate::pauli_network::synthesize(&current, false) {
+                Some((out, _)) => out,
+                None => current,
+            },
+            "pauli_network_permuting" => match crate::pauli_network::synthesize(&current, true) {
+                Some((out, _)) => out,
+                None => current,
+            },
             "symmetric_blocks" => shift_through_symmetric_blocks(current, &lowering.bases_1q),
             other => return Err(format!("unknown pass '{other}'")),
         };
@@ -675,11 +701,16 @@ pub fn run_passes(
 /// single-qubit runs, commutative cancellation and block resynthesis; the
 /// same without resynthesis; moving gates through symmetric blocks; and a
 /// final merge.
+///
+/// Every two-qubit gate of the result acts on two qubits that some gate of
+/// the input acts on together, so that an input already routed for a device
+/// stays routed: this is what the Qiskit plugin needs.
 pub fn compile(
     instructions: Vec<Instruction>,
     native: impl IntoIterator<Item = String>,
 ) -> Result<Vec<Instruction>, String> {
-    Ok(compile_relabelling(instructions, native, Relabel::Never)?.0)
+    let native: Vec<String> = native.into_iter().collect();
+    Ok(best_pipeline(&instructions, &native, Relabel::Never, false)?.0)
 }
 
 /// Whether the pipeline may leave qubits' states on other wires at the end.
@@ -707,15 +738,17 @@ pub fn compile_relabelling(
     relabel: Relabel,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let native: Vec<String> = native.into_iter().collect();
-    best_pipeline(&instructions, &native, relabel)
+    best_pipeline(&instructions, &native, relabel, true)
 }
 
-/// The cheapest of [`pipeline`] and, for CX-like devices, [`pipeline`]
-/// through CX, among those `relabel` allows.
+/// The cheapest of [`pipeline`], for CX-like devices [`pipeline`] through
+/// CX, and with `new_pairs` (two-qubit gates may act on pairs of qubits the
+/// input does not use) the Pauli network, among those `relabel` allows.
 pub(crate) fn best_pipeline(
     instructions: &[Instruction],
     native: &[String],
     relabel: Relabel,
+    new_pairs: bool,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let permute = relabel != Relabel::Never;
     let mut candidates = vec![pipeline(instructions, native, permute)?];
@@ -729,6 +762,19 @@ pub(crate) fn best_pipeline(
             candidates.push((out, wires));
         }
     }
+    if new_pairs {
+        // The network trades single-qubit gates for CXs: it must also win
+        // with a CX counted as ten of them.
+        let weighted = |out: &[Instruction]| {
+            let (two, all) = cost(out);
+            10 * two + all
+        };
+        let best = candidates.iter().map(|(out, _)| weighted(out)).min();
+        candidates.extend(
+            through_pauli_network(instructions, native, permute)
+                .filter(|(out, _)| best.is_none_or(|b| weighted(out) < b)),
+        );
+    }
     let allowed = |(out, wires): &(Vec<Instruction>, Vec<usize>)| {
         let moved = wires.iter().enumerate().any(|(q, &w)| q != w);
         !moved || relabel == Relabel::Always || measured_out(out, wires)
@@ -740,8 +786,50 @@ pub(crate) fn best_pipeline(
         .min_by_key(|(out, _)| cost(out))
     {
         Some(best) => Ok(best),
-        None => best_pipeline(instructions, native, Relabel::Never),
+        None => best_pipeline(instructions, native, Relabel::Never, new_pairs),
     }
+}
+
+/// The circuit lowered to CX, synthesized again as a Pauli network
+/// (`pauli_network.rs`), then through the [`pipeline`]; None when the
+/// circuit is not Clifford gates and Z rotations once lowered, or has too
+/// many rotations.
+fn through_pauli_network(
+    instructions: &[Instruction],
+    native: &[String],
+    permute: bool,
+) -> Option<(Vec<Instruction>, Vec<usize>)> {
+    let lowered = lowered_for_network(instructions, native)?;
+    let (network, first) = crate::pauli_network::synthesize(&lowered, permute)?;
+    let (out, second) = pipeline(&network, native, permute).ok()?;
+    let wires = first
+        .iter()
+        .map(|&w| second.get(w).copied().unwrap_or(w))
+        .collect();
+    Some((out, wires))
+}
+
+/// The circuit lowered to CX, if the Pauli network is worth trying on it.
+fn lowered_for_network(
+    instructions: &[Instruction],
+    native: &[String],
+) -> Option<Vec<Instruction>> {
+    let via = if native.iter().any(|g| g == "cx") {
+        native.to_vec()
+    } else {
+        through_cx(native)?
+    };
+    let mut lowering = Lowering::new(via);
+    let mut lowered = Vec::with_capacity(instructions.len());
+    for inst in instructions {
+        lowered.extend(lowering.lower(inst).ok()?);
+    }
+    crate::pauli_network::promising(&lowered).then_some(lowered)
+}
+
+/// Whether [`best_pipeline`] would try a Pauli network on the circuit.
+pub(crate) fn network_promising(instructions: &[Instruction], native: &[String]) -> bool {
+    lowered_for_network(instructions, native).is_some()
 }
 
 /// `native` with CX as its two-qubit gate, if its two-qubit gates are
@@ -776,6 +864,7 @@ fn pipeline(
     // Phase folding first, while rotations are still Z rotations between
     // CNOTs; each pass can expose work for the next.
     let cleanup = |current: Vec<Instruction>, lowering: &Lowering| {
+        let current = crate::pauli_network::merge_rotations(current);
         let current = phase_folding(current);
         let current = merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q);
         commutative_cancellation(current)
