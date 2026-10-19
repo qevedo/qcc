@@ -7,7 +7,7 @@ use crate::gates::{is_known_gate, matrix_1q, matrix_2q, signature};
 use crate::ir::{Instruction, NON_GATES, cost};
 use crate::linalg::{M2, M4, kron};
 use crate::lower::Lowering;
-use crate::one_qubit::{Basis1q, remainder, synthesize_1q};
+use crate::one_qubit::{Basis1q, count_1q, remainder, synthesize_1q};
 use crate::permutation::measured_out;
 use crate::phase_folding::phase_folding;
 use crate::symmetric_blocks::shift_through_symmetric_blocks;
@@ -61,6 +61,57 @@ pub fn merge_single_qubit_runs(
         flush(&mut runs, q, &mut result);
     }
     result
+}
+
+/// `cost(&merge_single_qubit_runs(instructions, native, bases))`, without
+/// building the merged circuit.
+fn merged_cost(
+    instructions: &[Instruction],
+    native: &HashSet<String>,
+    bases: &[Basis1q],
+) -> (usize, usize) {
+    let mut two_qubit = 0;
+    let mut total = 0;
+    // Open runs by qubit: their unitary (None once a gate has no matrix),
+    // length, and whether they are all native.
+    let mut runs: HashMap<usize, (Option<M2>, usize, bool)> = HashMap::new();
+    let close = |run: (Option<M2>, usize, bool)| -> usize {
+        match run {
+            (Some(m), len, all_native) if !bases.is_empty() => {
+                let count = count_1q(&m, bases);
+                if all_native { count.min(len) } else { count }
+            }
+            (_, len, _) => len,
+        }
+    };
+    for inst in instructions {
+        if inst.qubits.len() == 1
+            && !NON_GATES.contains(&inst.name.as_str())
+            && is_known_gate(&inst.name)
+        {
+            let run = runs
+                .entry(inst.qubits[0])
+                .or_insert((Some(M2::IDENTITY), 0, true));
+            run.0 = match (run.0, matrix_1q(&inst.name, &inst.params)) {
+                (Some(m), Some(g)) => Some(g * m),
+                _ => None,
+            };
+            run.1 += 1;
+            run.2 &= native.contains(&inst.name);
+            continue;
+        }
+        for q in &inst.qubits {
+            if let Some(run) = runs.remove(q) {
+                total += close(run);
+            }
+        }
+        total += 1;
+        if inst.qubits.len() > 1 {
+            two_qubit += 1;
+        }
+    }
+    total += runs.into_values().map(close).sum::<usize>();
+    (two_qubit, total)
 }
 
 fn resynthesize_run(
@@ -358,13 +409,7 @@ pub fn resynthesize_permuting(
     let inside = resynthesize_blocks(instructions.clone(), lowering, Measure::Inside, permute);
     let whole = resynthesize_blocks(instructions.clone(), lowering, Measure::Whole, permute);
     let unchanged = (0..qubit_count(&instructions)).collect();
-    let merged = |c: &[Instruction]| {
-        cost(&merge_single_qubit_runs(
-            c.to_vec(),
-            &lowering.native,
-            &lowering.bases_1q,
-        ))
-    };
+    let merged = |c: &[Instruction]| merged_cost(c, &lowering.native, &lowering.bases_1q);
     // The first of the cheapest, once merged: never worse than the input.
     [inside, whole, (instructions, unchanged)]
         .into_iter()
@@ -483,6 +528,23 @@ fn resynthesize_blocks(
         }
     }
 
+    // Synthesize the blocks' unitaries together first: on all cores when
+    // there are many (generic circuits have hundreds of distinct blocks).
+    let objective = match measure {
+        Measure::Inside => Objective::InCircuit,
+        Measure::Whole => Objective::Alone,
+    };
+    let swap = matrix_2q("swap", &[]).expect("a standard gate");
+    let mut requests = Vec::new();
+    for block in blocks.iter().filter(|b| worth_resynthesizing(b)) {
+        if let Some(m) = block.matrix() {
+            requests.push((m, objective));
+            if permute && cx_count(&(swap * m)) < cx_count(&m) {
+                requests.push((swap * m, objective));
+            }
+        }
+    }
+    lowering.prefetch_two_qubit(&requests);
     // A block synthesized with its SWAP elided moves its qubits' states to
     // each other's wires, and everything after is relabelled to follow them.
     let mut blocks: Vec<Option<Block>> = blocks.into_iter().map(Some).collect();
@@ -504,6 +566,17 @@ fn resynthesize_blocks(
     (out, wires)
 }
 
+/// Whether a synthesis could beat the block: not with fewer than two
+/// two-qubit gates and three gates in all.
+fn worth_resynthesizing(block: &Block) -> bool {
+    let two_qubit_gates = block
+        .instructions
+        .iter()
+        .filter(|i| i.qubits.len() == 2)
+        .count();
+    two_qubit_gates >= 2 || block.instructions.len() > 3
+}
+
 /// The cheapest of the block, its synthesis and, with `permute`, the
 /// synthesis of SWAP·U; and whether that last one, whose SWAP the caller
 /// elides, was chosen.
@@ -513,12 +586,7 @@ fn best_for_block(
     measure: Measure,
     permute: bool,
 ) -> (Vec<Instruction>, bool) {
-    let two_qubit_gates = block
-        .instructions
-        .iter()
-        .filter(|i| i.qubits.len() == 2)
-        .count();
-    if two_qubit_gates < 2 && block.instructions.len() <= 3 {
+    if !worth_resynthesizing(&block) {
         return (block.instructions, false);
     }
     let Some(m) = block.matrix() else {
@@ -603,9 +671,10 @@ pub fn run_passes(
     Ok(current)
 }
 
-/// The default pipeline: lower to native gates, then two rounds of
-/// [phase folding → merge single-qubit runs → commutative cancellation →
-/// block resynthesis], then a final merge.
+/// The default pipeline: lower to native gates; phase folding, merging
+/// single-qubit runs, commutative cancellation and block resynthesis; the
+/// same without resynthesis; moving gates through symmetric blocks; and a
+/// final merge.
 pub fn compile(
     instructions: Vec<Instruction>,
     native: impl IntoIterator<Item = String>,
@@ -638,11 +707,21 @@ pub fn compile_relabelling(
     relabel: Relabel,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let native: Vec<String> = native.into_iter().collect();
+    best_pipeline(&instructions, &native, relabel)
+}
+
+/// The cheapest of [`pipeline`] and, for CX-like devices, [`pipeline`]
+/// through CX, among those `relabel` allows.
+pub(crate) fn best_pipeline(
+    instructions: &[Instruction],
+    native: &[String],
+    relabel: Relabel,
+) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let permute = relabel != Relabel::Never;
-    let mut candidates = vec![pipeline(&instructions, &native, permute)?];
-    if let Some(via) = through_cx(&native) {
-        if let Ok((middle, first)) = pipeline(&instructions, &via, permute) {
-            let (out, second) = pipeline(&middle, &native, permute)?;
+    let mut candidates = vec![pipeline(instructions, native, permute)?];
+    if let Some(via) = through_cx(native) {
+        if let Ok((middle, first)) = pipeline(instructions, &via, permute) {
+            let (out, second) = pipeline(&middle, native, permute)?;
             let wires = first
                 .iter()
                 .map(|&w| second.get(w).copied().unwrap_or(w))
@@ -661,7 +740,7 @@ pub fn compile_relabelling(
         .min_by_key(|(out, _)| cost(out))
     {
         Some(best) => Ok(best),
-        None => compile_relabelling(instructions, native, Relabel::Never),
+        None => best_pipeline(instructions, native, Relabel::Never),
     }
 }
 
@@ -694,20 +773,18 @@ fn pipeline(
     for inst in instructions {
         current.extend(lowering.lower(inst)?);
     }
-    let mut wires: Vec<usize> = (0..qubit_count(instructions)).collect();
-    for _ in 0..2 {
-        // First, while rotations are still Z rotations between CNOTs.
-        current = phase_folding(current);
-        current = merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q);
-        current = commutative_cancellation(current);
-        let moved;
-        (current, moved) = resynthesize_permuting(current, &mut lowering, permute);
-        // A pass may drop every gate on the last qubits: those stay put.
-        wires = wires
-            .iter()
-            .map(|&w| moved.get(w).copied().unwrap_or(w))
-            .collect();
-    }
+    // Phase folding first, while rotations are still Z rotations between
+    // CNOTs; each pass can expose work for the next.
+    let cleanup = |current: Vec<Instruction>, lowering: &Lowering| {
+        let current = phase_folding(current);
+        let current = merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q);
+        commutative_cancellation(current)
+    };
+    let current = cleanup(current, &lowering);
+    let (current, wires) = resynthesize_permuting(current, &mut lowering, permute);
+    // Once more, without resynthesis: a second one never removed a gate on
+    // the benchmarks, and resynthesis is most of the time.
+    let current = cleanup(current, &lowering);
     let current = shift_through_symmetric_blocks(current, &lowering.bases_1q);
     let current = merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q);
     Ok((current, wires))
@@ -913,6 +990,27 @@ mod tests {
                 &circuit_unitary(&circuit, 3),
                 1e-7
             ));
+        }
+    }
+
+    #[test]
+    fn merged_cost_counts_what_the_merge_leaves() {
+        let mut rng = Rng::new(9);
+        for native in [
+            &["rz", "sx", "x", "cx"][..],
+            &["u3", "cx"],
+            &["rx", "ry", "rxx"],
+        ] {
+            let lowering = Lowering::new(natives(native));
+            for _ in 0..50 {
+                let circuit = random_circuit(&mut rng, 3, 30);
+                let merged =
+                    merge_single_qubit_runs(circuit.clone(), &lowering.native, &lowering.bases_1q);
+                assert_eq!(
+                    merged_cost(&circuit, &lowering.native, &lowering.bases_1q),
+                    cost(&merged)
+                );
+            }
         }
     }
 }

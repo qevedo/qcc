@@ -19,10 +19,13 @@ OpenQASM 2/3  →  openqasm.parse + analyze  →  frontend  →  IR  →  passes
 
 ### Implemented passes
 
-The default pipeline is: elide SWAPs, decompose, then two rounds of [phase
-folding → merge single-qubit runs → commutative cancellation → two-qubit
-block resynthesis], then moving gates through symmetric blocks and a final
-merge. Each optimization can expose work for the others. For a device whose
+The default pipeline is: elide SWAPs, decompose, [phase folding → merge
+single-qubit runs → commutative cancellation → two-qubit block
+resynthesis], the same again without resynthesis, then moving gates through
+symmetric blocks and a final merge. Each optimization can expose work for
+the others; a second resynthesis never removed a gate on the benchmarks, and
+resynthesis is most of the time. The Rust core synthesizes a pass's blocks
+on all cores when there are many (`Lowering::prefetch_two_qubit`). For a device whose
 two-qubit gate is CX-like but not CX (CZ, ECR, …), the Rust core also
 compiles for CX first and then for the device, and keeps the cheaper result:
 phase folding sees parities through CNOTs but not through the single-qubit
@@ -124,11 +127,35 @@ naive baseline, exposed as `qevedo.compiler.multicore`. It works on the
 circuit's two-qubit gates grouped into timeslices and is separate from the
 lowering pipeline. See [MULTICORE.md](MULTICORE.md).
 
-### Planned passes (Phase 3)
+### Compiling for a device
 
-- Initial layout (logical → physical qubit map)
-- SABRE-style routing with SWAP insertion
-- Technology-specific constraints from `DeviceSpec.gate_rules`
+For a device that is not all-to-all and lists its couplings
+(`DeviceSpec.edges`), the circuit is placed and routed onto its physical
+qubits (`core/src/device.rs`):
+
+1. The default pipeline runs on the logical qubits first, where relabelling
+   is free: fewer two-qubit gates leave the router less to do.
+2. The layout: if the pairs the circuit's gates use fit the coupling graph,
+   a layout that needs no SWAP (`core/src/routing/perfect.rs`, a subgraph
+   search like Qiskit's VF2Layout); otherwise SABRE's forward–backward
+   search over 32 random starts.
+3. Routing with SABRE, where a SWAP right after a block on the same pair
+   counts for what it costs once merged into the block, as in NASSC (Liu,
+   Li and Zhou, HPCA 2022): after a CX one CNOT, after a generic block none.
+4. The default pipeline again, on the physical qubits, keeping every
+   two-qubit gate on its pair; on a device whose couplings have a direction,
+   gates the other way round are turned around with single-qubit gates
+   found from their KAK decompositions.
+
+The result is a circuit on a register `q` of the device's qubits;
+`Circuit.initial_layout` and `Circuit.output_permutation` say on which
+physical qubit each logical qubit starts and ends. A circuit whose two-qubit
+gates already act on coupled pairs keeps its layout. On a 19-qubit
+heavy-hex chip (`benchmarks/compilation/device.py`) this uses 5–6% fewer
+two-qubit gates than Qiskit's level 3, and 12–17% fewer gates in all.
+
+Still to come: technology-specific constraints from `DeviceSpec.gate_rules`,
+and error rates in the layout.
 
 ## DeviceSpec schema
 

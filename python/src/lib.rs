@@ -81,6 +81,44 @@ fn compile_relabelling(
     Ok((to_raw(out), wires))
 }
 
+/// Compile `instructions` (on logical qubits) for a device of `physical`
+/// qubits coupled by `edges` (only from the first qubit of each to the
+/// second if `directed`): optimize, lay out and route with SABRE, optimize
+/// again. Returns (instructions on physical qubits, initial layout, final
+/// layout).
+#[pyfunction]
+#[pyo3(signature = (instructions, native, physical, edges, directed=false, trials=None, seed=1))]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn compile_for_device(
+    py: Python<'_>,
+    instructions: Vec<Raw>,
+    native: Vec<String>,
+    physical: usize,
+    edges: Vec<(usize, usize)>,
+    directed: bool,
+    trials: Option<usize>,
+    seed: u64,
+) -> PyResult<(Vec<Raw>, Vec<usize>, Vec<usize>)> {
+    use qcc::device::{Device, compile_for_device, routing_options};
+    let instructions = from_raw(instructions);
+    let mut options = routing_options();
+    options.seed = seed;
+    if let Some(trials) = trials {
+        options.trials = trials;
+    }
+    let out = py
+        .detach(|| {
+            let device = Device {
+                qubits: physical,
+                edges: &edges,
+                directed,
+            };
+            compile_for_device(instructions, native, &device, &options)
+        })
+        .map_err(PyValueError::new_err)?;
+    Ok((to_raw(out.instructions), out.initial_layout, out.final_layout))
+}
+
 /// Run the named passes of the core in order ("decompose", "merge_1q",
 /// "commutative_cancellation", "resynthesize_2q"), for testing.
 #[pyfunction]
@@ -159,8 +197,8 @@ fn map_to_cores(
 /// Returns (instructions on physical qubits, initial layout, final layout,
 /// SWAPs inserted).
 #[pyfunction]
-#[pyo3(signature = (instructions, logical, physical, edges, trials=8, seed=1))]
-#[allow(clippy::type_complexity)]
+#[pyo3(signature = (instructions, logical, physical, edges, trials=8, seed=1, merge_weight=0.0))]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn route(
     py: Python<'_>,
     instructions: Vec<Raw>,
@@ -169,6 +207,7 @@ fn route(
     edges: Vec<(usize, usize)>,
     trials: usize,
     seed: u64,
+    merge_weight: f64,
 ) -> PyResult<(Vec<Raw>, Vec<usize>, Vec<usize>, usize)> {
     use qcc::routing::{CouplingGraph, SabreOptions, layout_and_route};
     let graph = CouplingGraph::new(physical, &edges).map_err(PyValueError::new_err)?;
@@ -176,6 +215,7 @@ fn route(
     let options = SabreOptions {
         trials,
         seed,
+        merge_weight,
         ..SabreOptions::default()
     };
     let routed = py
@@ -312,6 +352,7 @@ fn random_circuit_bounds(cores: usize, qubits: usize, two_qubit_gates: usize) ->
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compile, m)?)?;
     m.add_function(wrap_pyfunction!(compile_relabelling, m)?)?;
+    m.add_function(wrap_pyfunction!(compile_for_device, m)?)?;
     m.add_function(wrap_pyfunction!(run_passes, m)?)?;
     m.add_function(wrap_pyfunction!(map_to_cores, m)?)?;
     m.add_function(wrap_pyfunction!(random_circuit_bounds, m)?)?;

@@ -12,6 +12,8 @@ and elide the SWAP, when that is cheaper. The Python passes do not do this.
 
 from __future__ import annotations
 
+import dataclasses
+
 from qevedo.compiler.device import DeviceSpec, default_device
 from qevedo.compiler.ir import Circuit, Clbit, Instruction, Qubit
 from qevedo.compiler.passes.base import Pass
@@ -35,7 +37,10 @@ class NativePipeline(Pass):
 
     With ``relabel_outputs``, qubits' states may end on other wires (recorded
     in ``output_permutation``); without it, only when every moved state is
-    measured last. Never for devices that are not all-to-all.
+    measured last. For a device that is not all-to-all and lists its
+    couplings, the circuit is laid out and routed onto its physical qubits
+    (``initial_layout`` and ``output_permutation`` say where each logical
+    qubit starts and ends).
     """
 
     name = "native_pipeline"
@@ -46,19 +51,22 @@ class NativePipeline(Pass):
     def run(self, circuit: Circuit, device: DeviceSpec | None = None) -> Circuit:
         if _core is None:
             raise RuntimeError("the qevedo.compiler._core extension is not installed")
-        qubits = _Numbering(circuit.qreg_sizes)
-        clbits = _Numbering(circuit.creg_sizes)
+        qubits = _Numbering(circuit.qreg_sizes, Qubit)
+        clbits = _Numbering(circuit.creg_sizes, Clbit)
+        qubit, clbit = qubits.index, clbits.index
         raw = [
             (
                 inst.name,
-                [qubits.index(q) for q in inst.qubits],
+                [qubit(q) for q in inst.qubits],
                 list(inst.params),
-                [clbits.index(c) for c in inst.clbits],
+                [clbit(c) for c in inst.clbits],
             )
             for inst in circuit.instructions
         ]
         device = device or default_device()
         native = sorted(g.lower() for g in device.native_gates)
+        if device.topology != "all_to_all" and device.edges:
+            return self._on_device(circuit, raw, native, device, qubits, clbits)
         if device.topology != "all_to_all":
             relabel = "never"
         else:
@@ -67,45 +75,79 @@ class NativePipeline(Pass):
             lowered, wires = _core.compile_relabelling(raw, native, relabel)
         except ValueError as error:
             raise LoweringError(str(error)) from None
-        out = circuit.copy()
-        # Compose with where earlier passes left each state.
+        # Compose with where earlier passes left each state: every qubit
+        # the circuit uses has been numbered by now.
         moved = {}
-        for q in {q for inst in circuit.instructions for q in inst.qubits} | set(
-            circuit.output_permutation
-        ):
-            w = qubits.index(circuit.output_permutation.get(q, q))
-            final = qubits.bit(wires[w] if w < len(wires) else w, Qubit)
+        for q in list(qubits.bits) + list(circuit.output_permutation):
+            w = qubit(circuit.output_permutation.get(q, q))
+            final = qubits.bits[wires[w] if w < len(wires) else w]
             if final != q:
                 moved[q] = final
-        out.output_permutation = moved
-        out.instructions = [
+        q_bits, c_bits = qubits.bits, clbits.bits
+        instructions = [
             Instruction(
                 name,
-                tuple(qubits.bit(i, Qubit) for i in qs),
+                tuple([q_bits[i] for i in qs]),
                 tuple(params),
-                tuple(clbits.bit(i, Clbit) for i in cs),
+                tuple([c_bits[i] for i in cs]),
             )
             for name, qs, params, cs in lowered
         ]
-        return out
+        return dataclasses.replace(
+            circuit,
+            qreg_sizes=dict(circuit.qreg_sizes),
+            creg_sizes=dict(circuit.creg_sizes),
+            instructions=instructions,
+            output_permutation=moved,
+        )
+
+
+    @staticmethod
+    def _on_device(circuit, raw, native, device, qubits, clbits) -> Circuit:
+        """Lay out and route on the device's coupled pairs, on its physical
+        qubits: a register ``q`` of ``device.qubits``."""
+        try:
+            lowered, initial, final = _core.compile_for_device(
+                raw, native, device.qubits, list(device.edges), device.directed_edges
+            )
+        except ValueError as error:
+            raise LoweringError(str(error)) from None
+        physical = [Qubit("q", i) for i in range(device.qubits)]
+        c_bits = clbits.bits
+        instructions = [
+            Instruction(
+                name,
+                tuple([physical[i] for i in qs]),
+                tuple(params),
+                tuple([c_bits[i] for i in cs]),
+            )
+            for name, qs, params, cs in lowered
+        ]
+        logical = qubits.bits[: len(initial)]
+        return dataclasses.replace(
+            circuit,
+            num_qubits=device.qubits,
+            qreg_sizes={"q": device.qubits},
+            creg_sizes=dict(circuit.creg_sizes),
+            instructions=instructions,
+            initial_layout={q: physical[p] for q, p in zip(logical, initial)},
+            output_permutation={q: physical[p] for q, p in zip(logical, final)},
+        )
 
 
 class _Numbering:
-    """Numbers the bits of named registers, in declaration order."""
+    """Numbers the bits of named registers, in declaration order; bits outside
+    them follow, in the order they are met."""
 
-    def __init__(self, sizes: dict[str, int]):
-        self.bits: list[tuple[str, int]] = [
-            (name, i) for name, size in sizes.items() for i in range(size)
+    def __init__(self, sizes: dict[str, int], kind: type):
+        self.bits: list[Qubit | Clbit] = [
+            kind(name, i) for name, size in sizes.items() for i in range(size)
         ]
         self.indices = {bit: i for i, bit in enumerate(self.bits)}
 
     def index(self, bit: Qubit | Clbit) -> int:
-        key = (bit.register, bit.index)
-        if key not in self.indices:
-            self.indices[key] = len(self.bits)
-            self.bits.append(key)
-        return self.indices[key]
-
-    def bit(self, index: int, kind: type) -> Qubit | Clbit:
-        register, i = self.bits[index]
-        return kind(register, i)
+        i = self.indices.get(bit)
+        if i is None:
+            i = self.indices[bit] = len(self.bits)
+            self.bits.append(bit)
+        return i

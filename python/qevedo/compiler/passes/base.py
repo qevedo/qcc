@@ -60,20 +60,17 @@ class PassManager:
         del device  # routing passes will use this later
         # Each optimization can expose work for the others (merging single-qubit
         # runs brings inverse pairs together, resynthesis joins blocks), so the
-        # round runs twice. Phase folding goes first, while rotations are still
-        # Z rotations between CNOTs.
-        rounds = [
-            PhaseFolding(),
-            MergeSingleQubitGates(),
-            CommutativeCancellation(),
-            ResynthesizeTwoQubitBlocks(),
-        ]
+        # round runs twice, the second time without resynthesis, as in the Rust
+        # core. Phase folding goes first, while rotations are still Z
+        # rotations between CNOTs.
+        cleanup = [PhaseFolding(), MergeSingleQubitGates(), CommutativeCancellation()]
         return cls(
             [
                 ElideSwaps(relabel_outputs),
                 DecomposeToNative(),
-                *rounds,
-                *rounds,
+                *cleanup,
+                ResynthesizeTwoQubitBlocks(),
+                *cleanup,
                 MergeSingleQubitGates(),
             ]
         )

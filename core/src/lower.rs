@@ -184,6 +184,17 @@ impl Lowering {
         if NON_GATES.contains(&name.as_str()) || self.native.contains(&name) {
             return Ok(vec![inst.clone()]);
         }
+        // A single-qubit gate without a definition is its Euler synthesis,
+        // which is optimal; with parameters it rarely repeats, so it skips
+        // the memo (Quantum Volume's thousands of distinct u3 gates).
+        if inst.qubits.len() == 1
+            && !inst.params.is_empty()
+            && definition(&name, &inst.params).is_none()
+        {
+            if let Some(m) = matrix_1q(&name, &inst.params) {
+                return self.one_qubit(&m, inst.qubits[0]);
+            }
+        }
         // Lower each distinct gate once, on placeholder qubits, then relabel.
         let key = (
             name.clone(),
@@ -271,14 +282,7 @@ impl Lowering {
         qubits: [usize; 2],
         objective: Objective,
     ) -> Result<Vec<Instruction>, String> {
-        let mut key = [0u64; 32];
-        for i in 0..4 {
-            for j in 0..4 {
-                key[8 * i + 2 * j] = m.0[i][j].re.to_bits();
-                key[8 * i + 2 * j + 1] = m.0[i][j].im.to_bits();
-            }
-        }
-        let key = (key, objective);
+        let key = (key_2q(m), objective);
         if !self.memo_2q.contains_key(&key) {
             let lowered = self.two_qubit_new(m, objective)?;
             self.memo_2q.insert(key, lowered);
@@ -290,46 +294,125 @@ impl Lowering {
     }
 
     fn two_qubit_new(&mut self, m: &M4, objective: Objective) -> Result<Vec<Instruction>, String> {
-        if self.bases_2q.is_empty() {
-            let mut native: Vec<&String> = self.native.iter().collect();
-            native.sort();
-            return Err(format!(
-                "the native gates {native:?} include no supported two-qubit gate \
-                 (cx, cz, cy, ch, ecr, rxx, ryy, rzz or rzx)"
-            ));
-        }
         if self.bases_1q.is_empty() {
             self.one_qubit(&M2::IDENTITY, 0)?;
         }
-        let bases_1q = &self.bases_1q;
-        let cost_1q = |u: &M2| {
-            if bases_1q.is_empty() {
-                0
-            } else {
-                count_1q(u, bases_1q)
-            }
-        };
-        let mut best: Option<Vec<Instruction>> = None;
-        for basis in &self.bases_2q {
-            let mut out = Vec::new();
-            for step in self.synth.synthesize(m, basis, Some(&cost_1q), objective)? {
-                match step {
-                    Step::U(q, u) => out.extend(
-                        synthesize_1q(&u, bases_1q)
-                            .into_iter()
-                            .map(|op| Instruction::gate(&op.name, vec![q], op.params)),
-                    ),
-                    Step::Gate(name, params, q) => {
-                        out.push(Instruction::gate(&name, q.to_vec(), params))
-                    }
-                }
-            }
-            if best.as_ref().is_none_or(|b| cost(&out) < cost(b)) {
-                best = Some(out);
+        synthesize_2q(
+            &mut self.synth,
+            m,
+            objective,
+            &self.bases_2q,
+            &self.bases_1q,
+            &self.native,
+        )
+    }
+
+    /// Synthesize the two-qubit unitaries of `requests` that are not
+    /// remembered yet, on all cores when there are enough of them, so that
+    /// [`Lowering::two_qubit`] finds them. Errors are left for `two_qubit` to
+    /// report.
+    pub fn prefetch_two_qubit(&mut self, requests: &[(M4, Objective)]) {
+        let mut seen = HashSet::new();
+        let todo: Vec<(([u64; 32], Objective), M4)> = requests
+            .iter()
+            .map(|(m, objective)| ((key_2q(m), *objective), *m))
+            .filter(|(key, _)| !self.memo_2q.contains_key(key) && seen.insert(*key))
+            .collect();
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+        if todo.len() < PARALLEL_MIN || threads < 2 || cfg!(target_arch = "wasm32") {
+            return;
+        }
+        let chunk = todo.len().div_ceil(threads);
+        let (bases_2q, bases_1q, native) = (&self.bases_2q, &self.bases_1q, &self.native);
+        let results: Vec<Vec<_>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = todo
+                .chunks(chunk)
+                .map(|part| {
+                    scope.spawn(move || {
+                        let mut synth = TwoQubitSynth::new();
+                        part.iter()
+                            .map(|(key, m)| {
+                                let out =
+                                    synthesize_2q(&mut synth, m, key.1, bases_2q, bases_1q, native);
+                                (*key, out)
+                            })
+                            .collect()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a synthesis thread"))
+                .collect()
+        });
+        for (key, out) in results.into_iter().flatten() {
+            if let Ok(out) = out {
+                self.memo_2q.insert(key, out);
             }
         }
-        Ok(best.expect("two_qubit needs a two-qubit basis"))
     }
+}
+
+/// Below this many new two-qubit unitaries, threads cost more than they save.
+const PARALLEL_MIN: usize = 32;
+
+/// The memo key of a 4×4 matrix: its bits.
+fn key_2q(m: &M4) -> [u64; 32] {
+    let mut key = [0u64; 32];
+    for i in 0..4 {
+        for j in 0..4 {
+            key[8 * i + 2 * j] = m.0[i][j].re.to_bits();
+            key[8 * i + 2 * j + 1] = m.0[i][j].im.to_bits();
+        }
+    }
+    key
+}
+
+/// The cheapest native sequence for `m` on qubits 0 and 1, over the native
+/// two-qubit bases.
+fn synthesize_2q(
+    synth: &mut TwoQubitSynth,
+    m: &M4,
+    objective: Objective,
+    bases_2q: &[TwoQubitBasis],
+    bases_1q: &[Basis1q],
+    native: &HashSet<String>,
+) -> Result<Vec<Instruction>, String> {
+    if bases_2q.is_empty() {
+        let mut native: Vec<&String> = native.iter().collect();
+        native.sort();
+        return Err(format!(
+            "the native gates {native:?} include no supported two-qubit gate \
+             (cx, cz, cy, ch, ecr, rxx, ryy, rzz or rzx)"
+        ));
+    }
+    let cost_1q = |u: &M2| {
+        if bases_1q.is_empty() {
+            0
+        } else {
+            count_1q(u, bases_1q)
+        }
+    };
+    let mut best: Option<Vec<Instruction>> = None;
+    for basis in bases_2q {
+        let mut out = Vec::new();
+        for step in synth.synthesize(m, basis, Some(&cost_1q), objective)? {
+            match step {
+                Step::U(q, u) => out.extend(
+                    synthesize_1q(&u, bases_1q)
+                        .into_iter()
+                        .map(|op| Instruction::gate(&op.name, vec![q], op.params)),
+                ),
+                Step::Gate(name, params, q) => {
+                    out.push(Instruction::gate(&name, q.to_vec(), params))
+                }
+            }
+        }
+        if best.as_ref().is_none_or(|b| cost(&out) < cost(b)) {
+            best = Some(out);
+        }
+    }
+    Ok(best.expect("two_qubit needs a two-qubit basis"))
 }
 
 fn bad_params(inst: &Instruction) -> String {

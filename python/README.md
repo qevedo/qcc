@@ -84,8 +84,8 @@ are a SWAP away from fewer CX are synthesized that way, whenever the moved
 qubits are measured last, so that the output is equivalent. With
 `CompileOptions(relabel_outputs=True)` (`qcc compile --relabel-outputs`)
 QCC does so for any circuit, as Qiskit does, and the result's
-`output_permutation` says on which wire each qubit's state ends. Neither
-happens on devices that are not all-to-all.
+`output_permutation` says on which wire each qubit's state ends. On a device
+that is not all-to-all, see below.
 
 ```python
 from qevedo.compiler import CompileOptions, compile_source
@@ -96,6 +96,32 @@ ion_trap = DeviceSpec(name="ions", topology="all_to_all", qubits=4,
 circuit = compile_source(open("program.qasm").read(), CompileOptions(device=ion_trap))
 print(circuit.gate_counts())
 ```
+
+## Compiling for a device
+
+For a device whose qubits are not all coupled, give its couplings: QCC
+optimizes the circuit, places it (with no SWAP at all when the circuit's
+pairs fit the chip), routes it with SABRE, counting each SWAP for what it
+costs once merged with the gates next to it, and optimizes it again on the
+physical qubits, turning gates around on devices whose couplings have a
+direction.
+
+```python
+from qevedo.compiler import CompileOptions, compile_source
+from qevedo.compiler.device import DeviceSpec
+
+chip = DeviceSpec(name="line", topology="linear_chain", qubits=5,
+                  edges=[(0, 1), (1, 2), (2, 3), (3, 4)],
+                  native_gates={"rz", "sx", "x", "cz"})
+circuit = compile_source(open("program.qasm").read(), CompileOptions(device=chip))
+print(circuit.initial_layout, circuit.output_permutation)  # where each qubit starts and ends
+```
+
+The result is on the device's physical qubits (a register `q`), and
+`qcc compile --device profile.yaml` prints both layouts. On a 19-qubit
+heavy-hex chip, QCC alone uses 5–6% fewer two-qubit gates than Qiskit's
+`optimization_level=3` and 12–17% fewer gates in all
+([benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation)).
 
 ## Inside Qiskit
 

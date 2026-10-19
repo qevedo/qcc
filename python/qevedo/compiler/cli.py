@@ -75,6 +75,14 @@ def _run_compile(args: argparse.Namespace) -> int:
         return 1
     output = emit_qasm(compiled, version=f"{args.qasm_version}.0")
     args.output.write_text(output + "\n", encoding="utf-8")
+    if compiled.initial_layout:
+        placed = ", ".join(
+            f"{q.label()} on {p.label()}"
+            for q, p in sorted(
+                compiled.initial_layout.items(), key=lambda item: (item[0].register, item[0].index)
+            )
+        )
+        print(f"initial layout: {placed}", file=sys.stderr)
     if compiled.output_permutation:
         moved = ", ".join(
             f"{q.label()} on {w.label()}"
@@ -82,7 +90,8 @@ def _run_compile(args: argparse.Namespace) -> int:
                 compiled.output_permutation.items(), key=lambda item: (item[0].register, item[0].index)
             )
         )
-        print(f"output permutation: {moved}", file=sys.stderr)
+        label = "final layout" if compiled.initial_layout else "output permutation"
+        print(f"{label}: {moved}", file=sys.stderr)
     if args.stats:
         counts = compiled.gate_counts()
         print(f"device: {device.name}", file=sys.stderr)

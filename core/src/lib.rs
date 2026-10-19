@@ -5,6 +5,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod decompose;
+pub mod device;
 pub mod gates;
 pub mod ir;
 pub mod linalg;

@@ -61,10 +61,15 @@ class Circuit:
     qreg_sizes: Dict[str, int] = field(default_factory=dict)
     creg_sizes: Dict[str, int] = field(default_factory=dict)
     instructions: List[Instruction] = field(default_factory=list)
-    #: Where each qubit's state ends when SWAP gates were elided: the wire
-    #: ``output_permutation[q]`` holds qubit ``q``'s state. Unlisted qubits
-    #: end on their own wires.
+    #: Where each qubit's state ends when it is not where it started: the
+    #: wire ``output_permutation[q]`` holds qubit ``q``'s state. Unlisted
+    #: qubits end on their own wires. For a circuit compiled onto a device,
+    #: every logical qubit is listed, with the physical qubit it ends on.
     output_permutation: Dict[Qubit, Qubit] = field(default_factory=dict)
+    #: For a circuit compiled onto a device's physical qubits: the physical
+    #: qubit that holds each logical qubit at the start (and
+    #: ``output_permutation``, the one at the end). Empty otherwise.
+    initial_layout: Dict[Qubit, Qubit] = field(default_factory=dict)
 
     def append(self, inst: Instruction) -> None:
         self.instructions.append(inst)
@@ -80,6 +85,7 @@ class Circuit:
             creg_sizes=dict(self.creg_sizes),
             instructions=[inst.copy() for inst in self.instructions],
             output_permutation=dict(self.output_permutation),
+            initial_layout=dict(self.initial_layout),
         )
 
     def gate_counts(self) -> Dict[str, int]:

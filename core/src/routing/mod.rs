@@ -14,8 +14,10 @@
 //! |---|---|
 //! | `coupling.rs` | coupling graphs and their distances |
 //! | `sabre.rs` | the SABRE router and its layout search |
+//! | `perfect.rs` | layouts that need no SWAP, when the circuit's pairs fit the chip |
 
 mod coupling;
+pub mod perfect;
 pub mod sabre;
 
 pub use coupling::CouplingGraph;

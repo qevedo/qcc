@@ -66,10 +66,10 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
 
 | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|
-| QCC | 0.968× | 0.901× | 8 ms |
-| Qiskit | 1.000× | 1.000× | 9 ms |
-| pytket | 1.002× | 1.123× | 1098 ms |
-| UCC | 1.017× | 2.210× | 30 ms |
+| QCC | 0.968× | 0.901× | 3 ms |
+| Qiskit | 1.000× | 1.000× | 6 ms |
+| pytket | 1.002× | 1.123× | 626 ms |
+| UCC | 1.017× | 2.210× | 15 ms |
 
 - QCC uses the fewest gates of the four compilers: 3% fewer two-qubit gates
   than Qiskit (0.968×) and 10% fewer gates in all, and no more of either than
@@ -96,9 +96,9 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
 - On the Heisenberg chain, moving single-qubit gates through its symmetric
   XX + YY + ZZ blocks (`core/src/symmetric_blocks.rs`) saves another 8–9%
   of the gates: 1173 at 32 qubits, against Qiskit's 1568.
-- QCC takes about as long as Qiskit on most circuits (a median of 8 ms,
-  against 9), but up to 6× longer on Quantum Volume, where most of the work is
-  resynthesizing generic two-qubit blocks.
+- QCC is faster than Qiskit on most circuits (a median of 3 ms, against
+  6), but 2–3× slower on Quantum Volume, where most of the work is
+  resynthesizing generic two-qubit blocks (on all cores).
 - Like Qiskit's default, QCC drops two-qubit interactions whose removal
   costs less than 10⁻⁹ in average gate infidelity (the QFT's tiniest
   controlled phases); see `core/src/two_qubit.rs`.
@@ -128,3 +128,51 @@ chip, with and without it, and checks every output's state
   (`symmetric_variants` in `core/src/two_qubit.rs` and
   `core/src/symmetric_blocks.rs`). Before, it gave this circuit a fifth more
   gates than Qiskit.
+
+## On a chip
+
+`device.py` compiles the 8- and 16-qubit circuits onto the 19-qubit
+heavy-hex chip with QCC alone (`compile_circuit` with the chip's couplings:
+it optimizes, lays out, routes and optimizes again; see
+`docs/ARCHITECTURE.md`), with Qiskit at level 3, and with Qiskit using QCC as
+its optimization stage, and checks every output's state
+(`results/device.csv`). Geometric means over Qiskit's level 3:
+
+| gates | compiler | two-qubit gates | all gates | median time |
+|---|---|---|---|---|
+| {rz, sx, x, cx} | QCC | 0.951× | 0.828× | 43 ms |
+|  | Qiskit + QCC | 0.973× | 0.856× | 43 ms |
+| {rz, sx, x, cz} | QCC | 0.943× | 0.884× | 64 ms |
+|  | Qiskit + QCC | 0.999× | 0.906× | 85 ms |
+
+Two-qubit gates / all gates with CX:
+
+| circuit | qubits | QCC | Qiskit | Qiskit + QCC |
+|---|---|---|---|---|
+| QFT | 8 | 84 / 136 | 102 / 188 | 98 / 150 |
+|  | 16 | 357 / 524 | 356 / 1324 | 350 / 518 |
+| QAOA | 8 | 94 / 207 | 97 / 232 | 97 / 209 |
+|  | 16 | 188 / 411 | 187 / 445 | 187 / 408 |
+| Quantum Volume | 8 | 111 / 515 | 108 / 575 | 108 / 560 |
+|  | 16 | 822 / 2787 | 828 / 3182 | 828 / 3203 |
+| GHZ | 8 | 7 / 10 | 7 / 10 | 7 / 10 |
+|  | 16 | 15 / 18 | 15 / 18 | 15 / 18 |
+| Heisenberg | 8 | 84 / 271 | 84 / 356 | 84 / 300 |
+|  | 16 | 180 / 571 | 180 / 760 | 180 / 631 |
+| Adder | 8 | 57 / 151 | 72 / 184 | 59 / 162 |
+|  | 16 | 148 / 405 | 180 / 452 | 159 / 411 |
+| Clifford+T | 8 | 236 / 538 | 249 / 546 | 249 / 497 |
+|  | 16 | 751 / 1294 | 774 / 1394 | 772 / 1236 |
+
+- QCC's own layout and routing do better than Qiskit's on the adder (148
+  CNOTs against 180) and Clifford+T, and as well on the rest, give or take a
+  few gates. GHZ and the Heisenberg chain fit the chip, and both find the
+  layout that needs no SWAP.
+- Its SABRE counts a SWAP right after a block on the same pair for the
+  CNOTs it costs once merged into the block, as NASSC does (Liu, Li and
+  Zhou, HPCA 2022). That, and 32 layout trials instead of 8, took 8% of the
+  two-qubit gates off: on the 16-qubit QFT, 479 CNOTs became 357, against
+  Qiskit's 356.
+- QCC uses a few more two-qubit gates than Qiskit on two circuits: Quantum
+  Volume at 8 qubits (111 against 108, with CX or CZ) and QAOA at 16 with
+  CX (188 against 187).

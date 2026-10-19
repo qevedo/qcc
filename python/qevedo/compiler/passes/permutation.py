@@ -35,6 +35,8 @@ class ElideSwaps(Pass):
     def run(self, circuit: Circuit, device: DeviceSpec | None = None) -> Circuit:
         if device is not None and device.topology != "all_to_all":
             return circuit
+        if not any(inst.name.lower() == "swap" for inst in circuit.instructions):
+            return circuit
         # The wire that holds each qubit's state, for the qubits that moved.
         wires: dict[Qubit, Qubit] = dict(circuit.output_permutation)
         instructions = []

@@ -18,14 +18,25 @@
 //! no gate runs for many SWAPs in a row (the release valve), the closest front
 //! gate is routed along a shortest path.
 //!
+//! Not every SWAP costs three CNOTs. One right after a block of gates on the
+//! same pair merges into it when the block is resynthesized: after a CX it
+//! costs one more CNOT, after a generic three-CNOT block nothing. As in NASSC
+//! (Liu, Li and Zhou, "Not All SWAPs Have the Same Cost", HPCA 2022), a SWAP
+//! that brings the front layer closer has its score lowered by
+//! `merge_weight` times the CNOTs it saves that way, and routings are
+//! compared by the CNOTs their SWAPs cost.
+//!
 //! The initial layout is found by routing the circuit forwards and backwards
 //! from a random layout, a few times: each pass starts from where the previous
 //! one ended, so the layout settles where the start of the circuit wants it.
 //! The best of several random starts is kept.
 
 use super::coupling::CouplingGraph;
+use crate::gates::{matrix_1q, matrix_2q};
 use crate::ir::Instruction;
+use crate::linalg::{M2, M4, kron};
 use crate::rng::Rng;
+use crate::two_qubit::cx_count;
 
 /// Tuning of SABRE; the defaults follow the paper and Qiskit.
 #[derive(Clone, Copy, Debug)]
@@ -42,6 +53,12 @@ pub struct SabreOptions {
     pub extended_weight: f64,
     /// How much a SWAP raises the decay of its qubits.
     pub decay: f64,
+    /// How much each CNOT a SWAP saves by merging with the block before it
+    /// lowers its score (0: plain SABRE).
+    pub merge_weight: f64,
+    /// Whether [`layout_and_route`] first looks for a layout that needs no
+    /// SWAP (see `perfect.rs`).
+    pub perfect_layout: bool,
     pub seed: u64,
 }
 
@@ -54,6 +71,8 @@ impl Default for SabreOptions {
             extended_set: 20,
             extended_weight: 0.5,
             decay: 0.001,
+            merge_weight: 0.0,
+            perfect_layout: false,
             seed: 1,
         }
     }
@@ -69,6 +88,8 @@ pub struct Routed {
     /// `final_layout[q]`: where logical qubit `q` ends up.
     pub final_layout: Vec<usize>,
     pub swaps: usize,
+    /// The CNOTs the SWAPs cost, merged with the blocks before them.
+    pub swap_cost: usize,
 }
 
 /// Route `circuit` (on logical qubits `0..logical`) onto `graph`, starting
@@ -127,6 +148,16 @@ pub fn layout_and_route(
         .filter(|i| needs_coupling(i))
         .cloned()
         .collect();
+    // A layout under which every gate's pair is coupled needs no SWAP.
+    if options.perfect_layout {
+        let pairs: Vec<(usize, usize)> = two_qubit
+            .iter()
+            .map(|i| (i.qubits[0], i.qubits[1]))
+            .collect();
+        if let Some(layout) = super::perfect::perfect_layout(&pairs, logical, graph) {
+            return Router::new(circuit, logical, graph, &layout, options).run();
+        }
+    }
     let reversed: Vec<Instruction> = two_qubit.iter().rev().cloned().collect();
     let mut best: Option<Routed> = None;
     for trial in 0..options.trials.max(1) {
@@ -155,7 +186,10 @@ pub fn layout_and_route(
                 ..*options
             };
             let routed = Router::new(circuit, logical, graph, &layout, &route_options).run()?;
-            if best.as_ref().is_none_or(|b| routed.swaps < b.swaps) {
+            if best
+                .as_ref()
+                .is_none_or(|b| (routed.swap_cost, routed.swaps) < (b.swap_cost, b.swaps))
+            {
                 best = Some(routed);
             }
         }
@@ -207,6 +241,20 @@ struct Router<'a> {
     initial: Vec<usize>,
     /// Gates after the circuit, for the extended set only.
     ahead: &'a [(usize, usize)],
+    /// The open block of gates on each physical qubit's pair, if any.
+    open: Vec<Option<usize>>,
+    blocks: Vec<OpenBlock>,
+    swap_cost: usize,
+}
+
+/// Gates on one pair of physical qubits since either last met another qubit.
+struct OpenBlock {
+    pair: [usize; 2],
+    /// The block's unitary, `pair[0]` most significant; None once a gate has
+    /// no known matrix.
+    matrix: Option<M4>,
+    /// CNOTs saved by a SWAP right after it, once computed.
+    saving: Option<usize>,
 }
 
 impl<'a> Router<'a> {
@@ -234,6 +282,9 @@ impl<'a> Router<'a> {
             swaps: 0,
             initial: initial.to_vec(),
             ahead: &[],
+            open: vec![None; graph.qubits()],
+            blocks: Vec::new(),
+            swap_cost: 0,
         }
     }
 
@@ -311,6 +362,7 @@ impl<'a> Router<'a> {
             initial_layout: self.initial,
             final_layout: self.physical,
             swaps: self.swaps,
+            swap_cost: self.swap_cost,
         })
     }
 
@@ -324,16 +376,95 @@ impl<'a> Router<'a> {
 
     fn emit(&mut self, node: usize) {
         let inst = &self.circuit[node];
-        self.out.push(Instruction {
+        let out = Instruction {
             name: inst.name.clone(),
             qubits: inst.qubits.iter().map(|&q| self.physical[q]).collect(),
             params: inst.params.clone(),
             clbits: inst.clbits.clone(),
-        });
+        };
+        if self.options.merge_weight > 0.0 {
+            self.track(&out);
+        }
+        self.out.push(out);
+    }
+
+    /// Add `inst` (on physical qubits) to the open blocks.
+    fn track(&mut self, inst: &Instruction) {
+        match *inst.qubits.as_slice() {
+            [p] if inst.is_gate() => {
+                if let Some(b) = self.open[p] {
+                    let block = &mut self.blocks[b];
+                    block.matrix = match (block.matrix, matrix_1q(&inst.name, &inst.params)) {
+                        (Some(m), Some(g)) if block.pair[0] == p => {
+                            Some(kron(&g, &M2::IDENTITY) * m)
+                        }
+                        (Some(m), Some(g)) => Some(kron(&M2::IDENTITY, &g) * m),
+                        _ => None,
+                    };
+                    block.saving = None;
+                }
+            }
+            [p, q] if inst.is_gate() => {
+                let g = matrix_2q(&inst.name, &inst.params);
+                match (self.open[p], self.open[q]) {
+                    (Some(b), Some(c)) if b == c => {
+                        let block = &mut self.blocks[b];
+                        let oriented = g.map(|g| orient(g, block.pair[0] == p));
+                        block.matrix = match (block.matrix, oriented) {
+                            (Some(m), Some(g)) => Some(g * m),
+                            _ => None,
+                        };
+                        block.saving = None;
+                    }
+                    _ => {
+                        self.blocks.push(OpenBlock {
+                            pair: [p, q],
+                            matrix: g,
+                            saving: None,
+                        });
+                        self.open[p] = Some(self.blocks.len() - 1);
+                        self.open[q] = Some(self.blocks.len() - 1);
+                    }
+                }
+            }
+            _ => {
+                for &p in &inst.qubits {
+                    self.open[p] = None;
+                }
+            }
+        }
+    }
+
+    /// CNOTs a SWAP on `(a, b)` would save by merging with the block before it.
+    fn saving(&mut self, a: usize, b: usize) -> usize {
+        let (Some(x), Some(y)) = (self.open[a], self.open[b]) else {
+            return 0;
+        };
+        if x != y {
+            return 0;
+        }
+        let block = &mut self.blocks[x];
+        if block.saving.is_none() {
+            block.saving = Some(match block.matrix {
+                Some(m) => {
+                    let swap = matrix_2q("swap", &[]).expect("a standard gate");
+                    (cx_count(&m) + 3).saturating_sub(cx_count(&(swap * m)))
+                }
+                None => 0,
+            });
+        }
+        block.saving.unwrap()
     }
 
     fn swap(&mut self, a: usize, b: usize) {
-        self.out.push(Instruction::gate("swap", vec![a, b], vec![]));
+        let swap = Instruction::gate("swap", vec![a, b], vec![]);
+        if self.options.merge_weight > 0.0 {
+            self.swap_cost += 3 - self.saving(a, b).min(3);
+            self.track(&swap);
+        } else {
+            self.swap_cost += 3;
+        }
+        self.out.push(swap);
         let (qa, qb) = (self.logical[a], self.logical[b]);
         self.logical[a] = qb;
         self.logical[b] = qa;
@@ -403,6 +534,10 @@ impl<'a> Router<'a> {
         }
         let mut best: Vec<(usize, usize)> = Vec::new();
         let mut best_score = f64::INFINITY;
+        let front_now: f64 = gates
+            .iter()
+            .map(|&(a, b)| self.graph.distance(self.physical[a], self.physical[b]) as f64)
+            .sum();
         for &(p1, p2) in &candidates {
             let at = |q: usize| {
                 let p = self.physical[q];
@@ -424,8 +559,14 @@ impl<'a> Router<'a> {
                     .sum::<f64>()
                     / pairs.len() as f64
             };
-            let score = self.decay[p1].max(self.decay[p2])
+            let mut score = self.decay[p1].max(self.decay[p2])
                 * (cost(&gates) + self.options.extended_weight * cost(extended));
+            // Merging is a bonus only for SWAPs that bring the front closer:
+            // a free SWAP that does not would be chosen again and again.
+            let closer = cost(&gates) * (gates.len() as f64) < front_now - 1e-9;
+            if self.options.merge_weight > 0.0 && closer {
+                score -= self.options.merge_weight * self.saving(p1, p2) as f64;
+            }
             if score < best_score - 1e-12 {
                 best_score = score;
                 best.clear();
@@ -450,6 +591,17 @@ impl<'a> Router<'a> {
         for w in path.windows(2).take(path.len().saturating_sub(2)) {
             self.swap(w[0], w[1]);
         }
+    }
+}
+
+/// Gate `g` (on its operands in order) in a block whose first qubit is its
+/// first operand (`forward`) or its second.
+fn orient(g: M4, forward: bool) -> M4 {
+    if forward {
+        g
+    } else {
+        let swap = matrix_2q("swap", &[]).expect("a standard gate");
+        swap * g * swap
     }
 }
 
