@@ -155,7 +155,7 @@ class Lowering:
         self.bases_2q = best_2q_bases(self.native)
         self._cost_1q = lru_cache(maxsize=None)(self._cost_1q_uncached)
         self._memo: dict[tuple[str, tuple[float, ...], int], list[Instruction]] = {}
-        self._memo_2q: dict[bytes, list[Instruction]] = {}
+        self._memo_2q: dict[tuple[bytes, bool], list[Instruction]] = {}
 
     def lower(self, inst: Instruction) -> list[Instruction]:
         name = inst.name.lower()
@@ -210,18 +210,23 @@ class Lowering:
         matrix = np.frombuffer(key, dtype=complex).reshape(2, 2)
         return count_1q(matrix, self.bases_1q) if self.bases_1q else 0
 
-    def two_qubit(self, matrix: np.ndarray, qubits: Sequence[Qubit]) -> list[Instruction]:
-        """The cheapest native sequence for the two-qubit unitary ``matrix`` on ``qubits``."""
-        key = np.ascontiguousarray(matrix, dtype=complex).tobytes()
+    def two_qubit(
+        self, matrix: np.ndarray, qubits: Sequence[Qubit], in_circuit: bool = False
+    ) -> list[Instruction]:
+        """The cheapest native sequence for the two-qubit unitary ``matrix`` on
+        ``qubits``; see ``synthesize_2q`` for ``in_circuit``."""
+        key = (np.ascontiguousarray(matrix, dtype=complex).tobytes(), in_circuit)
         if key not in self._memo_2q:
             placeholders = (Qubit("", 0), Qubit("", 1))
-            self._memo_2q[key] = self._two_qubit(matrix, placeholders)
+            self._memo_2q[key] = self._two_qubit(matrix, placeholders, in_circuit)
         return [
             Instruction(low.name, tuple(qubits[q.index] for q in low.qubits), low.params)
             for low in self._memo_2q[key]
         ]
 
-    def _two_qubit(self, matrix: np.ndarray, qubits: Sequence[Qubit]) -> list[Instruction]:
+    def _two_qubit(
+        self, matrix: np.ndarray, qubits: Sequence[Qubit], in_circuit: bool
+    ) -> list[Instruction]:
 
         def cost_1q(u: np.ndarray) -> int:
             return self._cost_1q(np.ascontiguousarray(u, dtype=complex).tobytes())
@@ -229,7 +234,7 @@ class Lowering:
         best: list[Instruction] | None = None
         for basis in self.bases_2q:
             out: list[Instruction] = []
-            for name, params, operands in synthesize_2q(matrix, basis, cost_1q):
+            for name, params, operands in synthesize_2q(matrix, basis, cost_1q, in_circuit):
                 if name == "u":
                     out.extend(self._one_qubit(params, qubits[operands[0]]))
                 else:

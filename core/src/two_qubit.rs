@@ -23,6 +23,22 @@ pub const TOL: f64 = 1e-9;
 /// controlled phases).
 pub const APPROXIMATION: f64 = 1e-9;
 
+/// What a synthesis minimises.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Objective {
+    /// All its gates: the unitary stands alone.
+    #[default]
+    Alone,
+    /// The single-qubit gates between its first and last two-qubit gate
+    /// first, then the others: in a circuit, the outer ones merge with their
+    /// neighbours', where saving a gate rarely saves one after the merge.
+    InCircuit,
+}
+
+/// How much more a single-qubit gate between two two-qubit gates weighs under
+/// [`Objective::InCircuit`]: more than all the outer ones together.
+const INNER_WEIGHT: usize = 64;
+
 /// `numpy.allclose` for one value: |a − b| ≤ atol + 1e-5 |b|.
 fn close(a: f64, b: f64, atol: f64) -> bool {
     (a - b).abs() <= atol + 1e-5 * b.abs()
@@ -429,6 +445,20 @@ fn approximate_cx(target: Kak) -> Kak {
     target
 }
 
+/// How many CX-like gates `u` needs (0–3), within [`APPROXIMATION`].
+pub fn cx_count(u: &M4) -> usize {
+    let [a, b, c] = approximate_cx(kak(u)).point;
+    if close3([a, b, c], [0.0; 3], TOL) {
+        0
+    } else if close3([a, b, c], [FRAC_PI_4, 0.0, 0.0], TOL) {
+        1
+    } else if c.abs() < TOL {
+        2
+    } else {
+        3
+    }
+}
+
 /// A single-qubit Clifford V with V P_src V† = P_dst (axes 0, 1, 2 = X, Y, Z).
 fn clifford_map(src: usize, dst: usize) -> M2 {
     use crate::gates::{h, s};
@@ -569,12 +599,14 @@ impl TwoQubitSynth {
 
     /// `u` as native `basis` gates and single-qubit unitaries, in time order.
     /// With `cost_1q` (the gate count of a single-qubit unitary), the cheapest
-    /// template variant is chosen and rotations are moved across the gates.
+    /// template variant under `objective` is chosen and rotations are moved
+    /// across the gates.
     pub fn synthesize(
         &mut self,
         u: &M4,
         basis: &TwoQubitBasis,
         cost_1q: Option<&dyn Fn(&M2) -> usize>,
+        objective: Objective,
     ) -> Result<Vec<Step>, String> {
         let target = match basis.kind {
             BasisKind::CxLike(_) => approximate_cx(kak(u)),
@@ -620,9 +652,11 @@ impl TwoQubitSynth {
             return Ok(candidates.swap_remove(0));
         };
         let total = |steps: &[Step]| -> usize {
-            steps
-                .iter()
-                .map(|s| if let Step::U(_, m) = s { cost(m) } else { 1 })
+            (0..steps.len())
+                .map(|j| match &steps[j] {
+                    Step::U(_, m) => step_cost(steps, j, m, cost, objective),
+                    Step::Gate(..) => 1,
+                })
                 .sum()
         };
         // Moving rotations is the expensive part: do it for the two variants
@@ -630,7 +664,7 @@ impl TwoQubitSynth {
         candidates.sort_by_key(|s| total(s));
         let mut best: Option<(usize, Vec<Step>)> = None;
         for steps in candidates.into_iter().take(2) {
-            let dressed = self.dress(steps, cost);
+            let dressed = self.dress(steps, cost, objective);
             let t = total(&dressed);
             if best.as_ref().is_none_or(|(b, _)| t < *b) {
                 best = Some((t, dressed));
@@ -698,6 +732,7 @@ impl TwoQubitSynth {
         work: &mut Vec<Step>,
         mut i: usize,
         cost: &dyn Fn(&M2) -> usize,
+        objective: Objective,
     ) -> usize {
         let Step::Gate(name, params, operands) = &work[i] else {
             return i;
@@ -710,14 +745,14 @@ impl TwoQubitSynth {
         let slots = neighbour_slots(work, i);
         for axis in axes {
             let [b0, b1, a0, a1] = slots.map(|j| local(&work[j]));
-            let mut best_cost = cost(&b0) + cost(&b1) + cost(&a0) + cost(&a1);
+            let mut best_cost = slots_cost(work, slots, [b0, b1, a0, a1], cost, objective);
             let mut best = None;
             let mut angles = candidate_angles(axis, &b0, &a0);
             angles.extend(candidate_angles(axis, &b1, &a1));
             for angle in angles {
                 let r = rotation(axis, angle);
                 let moved = [r.adjoint() * b0, r.adjoint() * b1, a0 * r, a1 * r];
-                let c: usize = moved.iter().map(cost).sum();
+                let c = slots_cost(work, slots, moved, cost, objective);
                 if c < best_cost {
                     (best_cost, best) = (c, Some(moved));
                 }
@@ -768,7 +803,12 @@ impl TwoQubitSynth {
 
     /// Shift rotations that commute with a two-qubit gate across it, and Pauli
     /// products across Clifford gates, when that cheapens the neighbours.
-    fn dress(&mut self, steps: Vec<Step>, cost: &dyn Fn(&M2) -> usize) -> Vec<Step> {
+    fn dress(
+        &mut self,
+        steps: Vec<Step>,
+        cost: &dyn Fn(&M2) -> usize,
+        objective: Objective,
+    ) -> Vec<Step> {
         let mut work = steps;
         // One pass over the gates: on the benchmarks a second never removed a
         // gate, and these passes are most of the time spent on generic
@@ -801,11 +841,15 @@ impl TwoQubitSynth {
                         }
                     };
                     let (b, a) = (local(&work[before]), local(&work[after]));
-                    let mut best_cost = cost(&b) + cost(&a);
+                    let pair_cost = |b: &M2, a: &M2| {
+                        step_cost(&work, before, b, cost, objective)
+                            + step_cost(&work, after, a, cost, objective)
+                    };
+                    let mut best_cost = pair_cost(&b, &a);
                     let mut best_angle = None;
                     for angle in candidate_angles(axis, &b, &a) {
                         let r = rotation(axis, angle);
-                        let c = cost(&(r.adjoint() * b)) + cost(&(a * r));
+                        let c = pair_cost(&(r.adjoint() * b), &(a * r));
                         if c < best_cost {
                             (best_cost, best_angle) = (c, Some(angle));
                         }
@@ -817,8 +861,8 @@ impl TwoQubitSynth {
                     }
                 }
             }
-            i = self.move_paired(&mut work, i, cost);
-            i = self.move_paulis(&mut work, i, cost);
+            i = self.move_paired(&mut work, i, cost, objective);
+            i = self.move_paulis(&mut work, i, cost, objective);
             i += 1;
         }
         work.retain(|s| !matches!(s, Step::U(_, m) if m.close(&M2::IDENTITY, 1e-8)));
@@ -832,6 +876,7 @@ impl TwoQubitSynth {
         work: &mut Vec<Step>,
         mut i: usize,
         cost: &dyn Fn(&M2) -> usize,
+        objective: Objective,
     ) -> usize {
         let Step::Gate(name, params, operands) = &work[i] else {
             return i;
@@ -843,7 +888,7 @@ impl TwoQubitSynth {
         i = ensure_neighbours(work, i);
         let slots = neighbour_slots(work, i);
         let [b0, b1, a0, a1] = slots.map(|j| local(&work[j]));
-        let mut best_cost = cost(&b0) + cost(&b1) + cost(&a0) + cost(&a1);
+        let mut best_cost = slots_cost(work, slots, [b0, b1, a0, a1], cost, objective);
         let mut best = None;
         for ([p, q], [p2, q2]) in images {
             let moved = [
@@ -852,7 +897,7 @@ impl TwoQubitSynth {
                 a0 * pauli4(p2),
                 a1 * pauli4(q2),
             ];
-            let c: usize = moved.iter().map(cost).sum();
+            let c = slots_cost(work, slots, moved, cost, objective);
             if c < best_cost {
                 (best_cost, best) = (c, Some(moved));
             }
@@ -889,6 +934,42 @@ fn neighbour_slots(work: &[Step], i: usize) -> [usize; 4] {
         neighbour(work, i, 0, 1).unwrap(),
         neighbour(work, i, 1, 1).unwrap(),
     ]
+}
+
+/// What single-qubit step `j`, set to `m`, costs under `objective`.
+fn step_cost(
+    steps: &[Step],
+    j: usize,
+    m: &M2,
+    cost: &dyn Fn(&M2) -> usize,
+    objective: Objective,
+) -> usize {
+    match objective {
+        Objective::InCircuit if is_inner(steps, j) => cost(m) * INNER_WEIGHT,
+        _ => cost(m),
+    }
+}
+
+/// What the steps at `slots`, set to `values`, cost under `objective`.
+fn slots_cost(
+    steps: &[Step],
+    slots: [usize; 4],
+    values: [M2; 4],
+    cost: &dyn Fn(&M2) -> usize,
+    objective: Objective,
+) -> usize {
+    (0..4)
+        .map(|k| step_cost(steps, slots[k], &values[k], cost, objective))
+        .sum()
+}
+
+/// Whether single-qubit step `j` lies between two gates on its qubit.
+fn is_inner(steps: &[Step], j: usize) -> bool {
+    let Step::U(q, _) = steps[j] else {
+        return false;
+    };
+    let on_q = |s: &Step| matches!(s, Step::Gate(_, _, operands) if operands.contains(&q));
+    steps[..j].iter().any(on_q) && steps[j + 1..].iter().any(on_q)
 }
 
 fn local(step: &Step) -> M2 {
@@ -1101,8 +1182,10 @@ mod tests {
             let basis = two_qubit_basis(native).unwrap();
             for u in &samples {
                 for steps in [
-                    synth.synthesize(u, &basis, None).unwrap(),
-                    synth.synthesize(u, &basis, Some(&cost)).unwrap(),
+                    synth.synthesize(u, &basis, None, Objective::Alone).unwrap(),
+                    synth
+                        .synthesize(u, &basis, Some(&cost), Objective::Alone)
+                        .unwrap(),
                 ] {
                     assert!(implements(&steps, u), "{native}");
                     assert!(steps.iter().all(|s| matches!(s, Step::U(..))
@@ -1118,7 +1201,7 @@ mod tests {
         let mut synth = TwoQubitSynth::new();
         let count = |synth: &mut TwoQubitSynth, u: &M4| {
             synth
-                .synthesize(u, &cx_basis, None)
+                .synthesize(u, &cx_basis, None, Objective::Alone)
                 .unwrap()
                 .iter()
                 .filter(|s| matches!(s, Step::Gate(..)))
@@ -1129,7 +1212,9 @@ mod tests {
             let theta = PI / 2f64.powi(k);
             let u = matrix_2q("cp", &[theta]).unwrap();
             assert_eq!(count(&mut synth, &u), expected, "cp(π/2^{k})");
-            let steps = synth.synthesize(&u, &cx_basis, None).unwrap();
+            let steps = synth
+                .synthesize(&u, &cx_basis, None, Objective::Alone)
+                .unwrap();
             let error = 1.0 - (steps_matrix(&steps).adjoint() * u).trace().norm_sqr() / 16.0;
             assert!(error < 1e-8, "{error}");
         }
@@ -1151,7 +1236,12 @@ mod tests {
             ("swap", vec![], 3),
         ] {
             let steps = synth
-                .synthesize(&matrix_2q(name, &params).unwrap(), &basis, None)
+                .synthesize(
+                    &matrix_2q(name, &params).unwrap(),
+                    &basis,
+                    None,
+                    Objective::Alone,
+                )
                 .unwrap();
             assert_eq!(
                 steps.iter().filter(|s| matches!(s, Step::Gate(..))).count(),

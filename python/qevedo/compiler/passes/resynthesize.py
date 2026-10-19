@@ -128,7 +128,9 @@ class ResynthesizeTwoQubitBlocks(Pass):
         two_qubit_gates = sum(1 for inst in block.instructions if len(inst.qubits) == 2)
         if two_qubit_gates < 2 and len(block.instructions) <= 3:
             return block.instructions
-        candidate = lowering.two_qubit(block.matrix(), block.pair)
+        # Inside counts the gates between the block's first and last
+        # two-qubit gates first, and so should the synthesis.
+        candidate = lowering.two_qubit(block.matrix(), block.pair, in_circuit=inside)
         measure = _block_cost if inside else cost
         return candidate if measure(candidate) < measure(block.instructions) else block.instructions
 

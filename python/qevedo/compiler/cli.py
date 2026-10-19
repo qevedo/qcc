@@ -46,6 +46,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Directory searched by include statements (repeatable)",
     )
     compile_cmd.add_argument(
+        "--relabel-outputs",
+        action="store_true",
+        help="Elide SWAP gates even when qubits' states then end on other wires "
+        "(printed to stderr)",
+    )
+    compile_cmd.add_argument(
         "--stats",
         action="store_true",
         help="Print gate counts and depth to stderr",
@@ -60,13 +66,23 @@ def main(argv: list[str] | None = None) -> int:
 def _run_compile(args: argparse.Namespace) -> int:
     device = DeviceSpec.from_yaml(args.device) if args.device else default_device()
     try:
-        options = CompileOptions(device=device, include_paths=args.include)
+        options = CompileOptions(
+            device=device, include_paths=args.include, relabel_outputs=args.relabel_outputs
+        )
         compiled = compile_file(args.input, options)
     except (QasmFrontendError, LoweringError) as error:
         print(f"qcc: {error}", file=sys.stderr)
         return 1
     output = emit_qasm(compiled, version=f"{args.qasm_version}.0")
     args.output.write_text(output + "\n", encoding="utf-8")
+    if compiled.output_permutation:
+        moved = ", ".join(
+            f"{q.label()} on {w.label()}"
+            for q, w in sorted(
+                compiled.output_permutation.items(), key=lambda item: (item[0].register, item[0].index)
+            )
+        )
+        print(f"output permutation: {moved}", file=sys.stderr)
     if args.stats:
         counts = compiled.gate_counts()
         print(f"device: {device.name}", file=sys.stderr)

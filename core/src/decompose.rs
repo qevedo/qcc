@@ -6,6 +6,7 @@ use crate::ir::Instruction;
 use crate::linalg::{C, M2, M4, ONE, ZERO};
 use crate::lower::Lowering;
 use crate::passes::{commutative_cancellation, compile, merge_single_qubit_runs};
+use crate::two_qubit::Objective;
 
 /// A dense matrix, rows of columns, qubit 0 the most significant.
 pub type Dense = Vec<Vec<C>>;
@@ -68,7 +69,7 @@ pub fn decompose_unitary(matrix: &Dense, native: &[String]) -> Result<Decomposit
             }
         }
         let synthesized = lowering
-            .two_qubit(&m, [0, 1])
+            .two_qubit(&m, [0, 1], Objective::Alone)
             .map_err(|e| e.replace("cannot lower ''", "cannot lower the unitary"))?;
         let merged = merge_single_qubit_runs(synthesized, &lowering.native, &lowering.bases_1q);
         merge_single_qubit_runs(

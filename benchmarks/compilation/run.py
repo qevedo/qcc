@@ -12,10 +12,9 @@ other (no routing):
 - pytket: FullPeepholeOptimise, then a rebase to the gate set;
 - UCC: ucc.compile, its default pipeline.
 
-Qiskit and pytket may remove SWAP gates by relabelling the output qubits
-(Qiskit's ElidePermutations, pytket's implicit wire swaps); QCC and UCC do
-not. That is part of what each does by default, so it is kept, and the
-checks below account for it.
+Qiskit, pytket and QCC may remove SWAP gates by relabelling the output
+qubits (Qiskit's ElidePermutations, pytket's implicit wire swaps, QCC's
+relabel_outputs); UCC does not. The checks below account for it.
 
 Times exclude reading the input, for every compiler.
 
@@ -53,12 +52,25 @@ def qcc(qasm: str, n: int):
     device = DeviceSpec(name="bench", topology="all_to_all", qubits=n, native_gates=set(GATES))
     circuit = parse_qasm(source=qasm)
     start = time.perf_counter()
-    out = compile_circuit(circuit, CompileOptions(device=device))
+    out = compile_circuit(circuit, CompileOptions(device=device, relabel_outputs=True))
     seconds = time.perf_counter() - start
     counts = out.gate_counts()
-    return out.two_qubit_gate_count(), sum(counts.values()), seconds, lambda: Operator(
-        QuantumCircuit.from_qasm_str(emit_qasm(out))
-    )
+
+    def unitary():
+        # Move every qubit's state back to its own wire.
+        qc = QuantumCircuit.from_qasm_str(emit_qasm(out))
+        wires = {q.index: w.index for q, w in out.output_permutation.items()}
+        holder = {w: q for q, w in wires.items()}
+        for q in range(qc.num_qubits):
+            w = wires.get(q, q)
+            if w != q:
+                qc.swap(w, q)
+                other = holder.get(q, q)
+                wires[other], holder[w] = w, other
+                wires[q], holder[q] = q, q
+        return Operator(qc)
+
+    return out.two_qubit_gate_count(), sum(counts.values()), seconds, unitary
 
 
 def qiskit(qasm: str, n: int):

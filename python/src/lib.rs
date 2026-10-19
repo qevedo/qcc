@@ -57,6 +57,30 @@ fn compile(py: Python<'_>, instructions: Vec<Raw>, native: Vec<String>) -> PyRes
     Ok(to_raw(out))
 }
 
+/// [`compile`], allowed to leave qubits' states on other wires: `relabel` is
+/// "never", "if_measured" (only when every moved state is measured last) or
+/// "always". Returns (instructions, wires): qubit q's state ends on wire
+/// `wires[q]`.
+#[pyfunction]
+fn compile_relabelling(
+    py: Python<'_>,
+    instructions: Vec<Raw>,
+    native: Vec<String>,
+    relabel: &str,
+) -> PyResult<(Vec<Raw>, Vec<usize>)> {
+    let relabel = match relabel {
+        "never" => qcc::passes::Relabel::Never,
+        "if_measured" => qcc::passes::Relabel::IfMeasured,
+        "always" => qcc::passes::Relabel::Always,
+        other => return Err(PyValueError::new_err(format!("unknown relabel '{other}'"))),
+    };
+    let instructions = from_raw(instructions);
+    let (out, wires) = py
+        .detach(move || qcc::passes::compile_relabelling(instructions, native, relabel))
+        .map_err(PyValueError::new_err)?;
+    Ok((to_raw(out), wires))
+}
+
 /// Run the named passes of the core in order ("decompose", "merge_1q",
 /// "commutative_cancellation", "resynthesize_2q"), for testing.
 #[pyfunction]
@@ -287,6 +311,7 @@ fn random_circuit_bounds(cores: usize, qubits: usize, two_qubit_gates: usize) ->
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compile, m)?)?;
+    m.add_function(wrap_pyfunction!(compile_relabelling, m)?)?;
     m.add_function(wrap_pyfunction!(run_passes, m)?)?;
     m.add_function(wrap_pyfunction!(map_to_cores, m)?)?;
     m.add_function(wrap_pyfunction!(random_circuit_bounds, m)?)?;

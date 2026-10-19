@@ -1,8 +1,13 @@
 """The default pipeline, run by the Rust core (``qevedo.compiler._core``).
 
-It does what the Python passes in this package do (lowering, single-qubit
-merging, commutative cancellation and two-qubit block resynthesis), the same
-way, much faster. The Python passes remain as the reference implementation.
+It does what the Python passes in this package do (lowering, phase folding,
+single-qubit merging, commutative cancellation and two-qubit block
+resynthesis), the same way, much faster. The Python passes remain as the
+reference implementation.
+
+Where qubits may be relabelled (see ``ElideSwaps``), the core's block
+resynthesis is also permutation-aware: it may synthesize a block U as SWAP·U
+and elide the SWAP, when that is cheaper. The Python passes do not do this.
 """
 
 from __future__ import annotations
@@ -26,9 +31,17 @@ def available() -> bool:
 
 
 class NativePipeline(Pass):
-    """Lower to the device's native gates and optimize, in Rust."""
+    """Lower to the device's native gates and optimize, in Rust.
+
+    With ``relabel_outputs``, qubits' states may end on other wires (recorded
+    in ``output_permutation``); without it, only when every moved state is
+    measured last. Never for devices that are not all-to-all.
+    """
 
     name = "native_pipeline"
+
+    def __init__(self, relabel_outputs: bool = False):
+        self.relabel_outputs = relabel_outputs
 
     def run(self, circuit: Circuit, device: DeviceSpec | None = None) -> Circuit:
         if _core is None:
@@ -44,12 +57,27 @@ class NativePipeline(Pass):
             )
             for inst in circuit.instructions
         ]
-        native = sorted(g.lower() for g in (device or default_device()).native_gates)
+        device = device or default_device()
+        native = sorted(g.lower() for g in device.native_gates)
+        if device.topology != "all_to_all":
+            relabel = "never"
+        else:
+            relabel = "always" if self.relabel_outputs else "if_measured"
         try:
-            lowered = _core.compile(raw, native)
+            lowered, wires = _core.compile_relabelling(raw, native, relabel)
         except ValueError as error:
             raise LoweringError(str(error)) from None
         out = circuit.copy()
+        # Compose with where earlier passes left each state.
+        moved = {}
+        for q in {q for inst in circuit.instructions for q in inst.qubits} | set(
+            circuit.output_permutation
+        ):
+            w = qubits.index(circuit.output_permutation.get(q, q))
+            final = qubits.bit(wires[w] if w < len(wires) else w, Qubit)
+            if final != q:
+                moved[q] = final
+        out.output_permutation = moved
         out.instructions = [
             Instruction(
                 name,

@@ -8,16 +8,20 @@ from qevedo.compiler.passes.optimize import (
     MergeSingleQubitGates,
 )
 from qevedo.compiler.passes.native import NativePipeline
+from qevedo.compiler.passes.permutation import ElideSwaps
+from qevedo.compiler.passes.phase_folding import PhaseFolding
 from qevedo.compiler.passes.resynthesize import ResynthesizeTwoQubitBlocks
 
 __all__ = [
     "CancelAdjacentInverses",
     "CommutativeCancellation",
     "DecomposeToNative",
+    "ElideSwaps",
     "LoweringError",
     "MergeSingleQubitGates",
     "NativePipeline",
     "Pass",
     "PassManager",
+    "PhaseFolding",
     "ResynthesizeTwoQubitBlocks",
 ]

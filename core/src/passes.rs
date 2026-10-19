@@ -1,5 +1,6 @@
 //! Circuit passes: single-qubit merging, commutative cancellation, two-qubit
-//! block resynthesis, and the default pipeline. Matches
+//! block resynthesis, and the default pipeline (which also runs
+//! `phase_folding`). Matches
 //! `qevedo/compiler/passes/{optimize,resynthesize,base}.py`.
 
 use crate::gates::{is_known_gate, matrix_1q, matrix_2q};
@@ -7,6 +8,9 @@ use crate::ir::{Instruction, NON_GATES, cost};
 use crate::linalg::{M2, M4, kron};
 use crate::lower::Lowering;
 use crate::one_qubit::{Basis1q, remainder, synthesize_1q};
+use crate::permutation::measured_out;
+use crate::phase_folding::phase_folding;
+use crate::two_qubit::{Objective, cx_count};
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::TAU;
 
@@ -337,8 +341,22 @@ pub fn resynthesize_two_qubit_blocks(
     instructions: Vec<Instruction>,
     lowering: &mut Lowering,
 ) -> Vec<Instruction> {
-    let inside = resynthesize_blocks(instructions.clone(), lowering, Measure::Inside);
-    let whole = resynthesize_blocks(instructions.clone(), lowering, Measure::Whole);
+    resynthesize_permuting(instructions, lowering, false).0
+}
+
+/// [`resynthesize_two_qubit_blocks`], and with `permute`, also permutation-aware:
+/// a block U may be synthesized as SWAP·U followed by a SWAP that is elided
+/// by relabelling the qubits after it, when that is cheaper (a CX each way is
+/// a SWAP and one CX). Returns the instructions and where each qubit's state
+/// ends: on wire `wires[q]`.
+pub fn resynthesize_permuting(
+    instructions: Vec<Instruction>,
+    lowering: &mut Lowering,
+    permute: bool,
+) -> (Vec<Instruction>, Vec<usize>) {
+    let inside = resynthesize_blocks(instructions.clone(), lowering, Measure::Inside, permute);
+    let whole = resynthesize_blocks(instructions.clone(), lowering, Measure::Whole, permute);
+    let unchanged = (0..qubit_count(&instructions)).collect();
     let merged = |c: &[Instruction]| {
         cost(&merge_single_qubit_runs(
             c.to_vec(),
@@ -347,10 +365,19 @@ pub fn resynthesize_two_qubit_blocks(
         ))
     };
     // The first of the cheapest, once merged: never worse than the input.
-    [inside, whole, instructions]
+    [inside, whole, (instructions, unchanged)]
         .into_iter()
-        .min_by_key(|c| merged(c))
+        .min_by_key(|(c, _)| merged(c))
         .expect("three candidates")
+}
+
+/// One more than the highest qubit index of `instructions`.
+fn qubit_count(instructions: &[Instruction]) -> usize {
+    instructions
+        .iter()
+        .flat_map(|i| i.qubits.iter().map(|&q| q + 1))
+        .max()
+        .unwrap_or(0)
 }
 
 /// How [`resynthesize_blocks`] compares a block with its synthesis.
@@ -366,7 +393,9 @@ fn resynthesize_blocks(
     instructions: Vec<Instruction>,
     lowering: &mut Lowering,
     measure: Measure,
-) -> Vec<Instruction> {
+    permute: bool,
+) -> (Vec<Instruction>, Vec<usize>) {
+    let mut wires: Vec<usize> = (0..qubit_count(&instructions)).collect();
     // A block stands where its first gate was: gates that come later on other
     // qubits commute with the rest of the block.
     let mut result: Vec<Item> = Vec::new();
@@ -453,39 +482,74 @@ fn resynthesize_blocks(
         }
     }
 
+    // A block synthesized with its SWAP elided moves its qubits' states to
+    // each other's wires, and everything after is relabelled to follow them.
     let mut blocks: Vec<Option<Block>> = blocks.into_iter().map(Some).collect();
     let mut out = Vec::new();
     for item in result {
         match item {
-            Item::Inst(inst) => out.push(inst),
+            Item::Inst(inst) => out.push(inst.relabel(&wires)),
             Item::Block(b) => {
-                out.extend(best_for_block(blocks[b].take().unwrap(), lowering, measure))
+                let block = blocks[b].take().unwrap();
+                let [p, q] = block.pair;
+                let (synthesized, swapped) = best_for_block(block, lowering, measure, permute);
+                out.extend(synthesized.iter().map(|i| i.relabel(&wires)));
+                if swapped {
+                    wires.swap(p, q);
+                }
             }
         }
     }
-    out
+    (out, wires)
 }
 
-fn best_for_block(block: Block, lowering: &mut Lowering, measure: Measure) -> Vec<Instruction> {
+/// The cheapest of the block, its synthesis and, with `permute`, the
+/// synthesis of SWAP·U; and whether that last one, whose SWAP the caller
+/// elides, was chosen.
+fn best_for_block(
+    block: Block,
+    lowering: &mut Lowering,
+    measure: Measure,
+    permute: bool,
+) -> (Vec<Instruction>, bool) {
     let two_qubit_gates = block
         .instructions
         .iter()
         .filter(|i| i.qubits.len() == 2)
         .count();
     if two_qubit_gates < 2 && block.instructions.len() <= 3 {
-        return block.instructions;
+        return (block.instructions, false);
     }
     let Some(m) = block.matrix() else {
-        return block.instructions;
+        return (block.instructions, false);
     };
     let better = |candidate: &[Instruction], original: &[Instruction]| match measure {
         Measure::Inside => block_cost(candidate) < block_cost(original),
         Measure::Whole => cost(candidate) < cost(original),
     };
-    match lowering.two_qubit(&m, block.pair) {
+    // Inside counts the gates between the block's first and last two-qubit
+    // gates first, and so should the synthesis.
+    let objective = match measure {
+        Measure::Inside => Objective::InCircuit,
+        Measure::Whole => Objective::Alone,
+    };
+    let mut best = match lowering.two_qubit(&m, block.pair, objective) {
         Ok(candidate) if better(&candidate, &block.instructions) => candidate,
         _ => block.instructions,
+    };
+    let mut swapped = false;
+    // Only when SWAP·U needs fewer CX-like gates than U: otherwise the
+    // relabelling saves nothing, and synthesizing every generic block twice
+    // would double the time.
+    let swap = matrix_2q("swap", &[]).expect("a standard gate");
+    if permute && cx_count(&(swap * m)) < cx_count(&m) {
+        if let Ok(candidate) = lowering.two_qubit(&(swap * m), block.pair, objective) {
+            if better(&candidate, &best) {
+                (best, swapped) = (candidate, true);
+            }
+        }
     }
+    (best, swapped)
 }
 
 /// What a block costs once its outer single-qubit gates have merged with
@@ -530,6 +594,7 @@ pub fn run_passes(
             "merge_1q" => merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q),
             "commutative_cancellation" => commutative_cancellation(current),
             "resynthesize_2q" => resynthesize_two_qubit_blocks(current, &mut lowering),
+            "phase_folding" => phase_folding(current),
             other => return Err(format!("unknown pass '{other}'")),
         };
     }
@@ -537,27 +602,61 @@ pub fn run_passes(
 }
 
 /// The default pipeline: lower to native gates, then two rounds of
-/// [merge single-qubit runs → commutative cancellation → block resynthesis],
-/// then a final merge.
+/// [phase folding → merge single-qubit runs → commutative cancellation →
+/// block resynthesis], then a final merge.
 pub fn compile(
     instructions: Vec<Instruction>,
     native: impl IntoIterator<Item = String>,
 ) -> Result<Vec<Instruction>, String> {
-    let mut lowering = Lowering::new(native);
+    Ok(compile_relabelling(instructions, native, Relabel::Never)?.0)
+}
+
+/// Whether the pipeline may leave qubits' states on other wires at the end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Relabel {
+    /// No: the output implements the input's unitary.
+    Never,
+    /// Only when that cannot be seen: every moved state is measured last.
+    IfMeasured,
+    /// Yes; the caller is told where each state ends.
+    Always,
+}
+
+/// [`compile`], with permutation-aware block resynthesis when `relabel`
+/// allows it. Returns the instructions and where each qubit's state ends: on
+/// wire `wires[q]`.
+pub fn compile_relabelling(
+    instructions: Vec<Instruction>,
+    native: impl IntoIterator<Item = String>,
+    relabel: Relabel,
+) -> Result<(Vec<Instruction>, Vec<usize>), String> {
+    let native: Vec<String> = native.into_iter().collect();
+    let mut lowering = Lowering::new(native.clone());
     let mut current = Vec::with_capacity(instructions.len());
     for inst in &instructions {
         current.extend(lowering.lower(inst)?);
     }
+    let mut wires: Vec<usize> = (0..qubit_count(&instructions)).collect();
     for _ in 0..2 {
+        // First, while rotations are still Z rotations between CNOTs.
+        current = phase_folding(current);
         current = merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q);
         current = commutative_cancellation(current);
-        current = resynthesize_two_qubit_blocks(current, &mut lowering);
+        let moved;
+        (current, moved) =
+            resynthesize_permuting(current, &mut lowering, relabel != Relabel::Never);
+        // A pass may drop every gate on the last qubits: those stay put.
+        wires = wires
+            .iter()
+            .map(|&w| moved.get(w).copied().unwrap_or(w))
+            .collect();
     }
-    Ok(merge_single_qubit_runs(
-        current,
-        &lowering.native,
-        &lowering.bases_1q,
-    ))
+    let current = merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q);
+    let moved = wires.iter().enumerate().any(|(q, &w)| q != w);
+    if relabel == Relabel::IfMeasured && moved && !measured_out(&current, &wires) {
+        return compile_relabelling(instructions, native, Relabel::Never);
+    }
+    Ok((current, wires))
 }
 
 #[cfg(test)]
@@ -705,5 +804,62 @@ mod tests {
         ]);
         // crx(π) crx(π) = crx(2π) is a CZ-like phase, not the identity: both stay.
         assert_eq!(twice.len(), 2);
+    }
+
+    /// `circuit` followed by SWAPs that move every state back from `wires`.
+    fn restored(mut circuit: Vec<Instruction>, mut wires: Vec<usize>) -> Vec<Instruction> {
+        for q in 0..wires.len() {
+            let w = wires[q];
+            if w != q {
+                circuit.push(Instruction::gate("swap", vec![w, q], vec![]));
+                let p = wires.iter().position(|&x| x == q).expect("a permutation");
+                wires[p] = w;
+                wires[q] = q;
+            }
+        }
+        circuit
+    }
+
+    #[test]
+    fn a_cx_each_way_becomes_one_cx_and_a_relabelling() {
+        let g = |name: &str, q: &[usize]| Instruction::gate(name, q.to_vec(), vec![]);
+        let circuit = vec![
+            g("h", &[0]),
+            g("cx", &[0, 1]),
+            g("cx", &[1, 0]),
+            g("t", &[1]),
+        ];
+        let native = natives(&["rz", "sx", "x", "cx"]);
+        let kept = compile(circuit.clone(), native.clone()).unwrap();
+        let (out, wires) =
+            compile_relabelling(circuit.clone(), native.clone(), Relabel::Always).unwrap();
+        assert_eq!(cost(&kept).0, 2);
+        assert_eq!(cost(&out).0, 1);
+        assert_eq!(wires, vec![1, 0]);
+        assert!(dense_equal_up_to_phase(
+            &circuit_unitary(&restored(out, wires), 2),
+            &circuit_unitary(&circuit, 2),
+            1e-8
+        ));
+        // Unmeasured, the relabelling would show: IfMeasured keeps the CXs.
+        let (unmeasured, wires) =
+            compile_relabelling(circuit, native, Relabel::IfMeasured).unwrap();
+        assert_eq!((cost(&unmeasured).0, wires), (2, vec![0, 1]));
+    }
+
+    #[test]
+    fn relabelled_compilations_agree_up_to_the_permutation() {
+        let mut rng = Rng::new(17);
+        let native = natives(&["rz", "sx", "x", "cx"]);
+        for _ in 0..60 {
+            let circuit = random_circuit(&mut rng, 3, 25);
+            let (out, wires) =
+                compile_relabelling(circuit.clone(), native.clone(), Relabel::Always).unwrap();
+            assert!(dense_equal_up_to_phase(
+                &circuit_unitary(&restored(out, wires), 3),
+                &circuit_unitary(&circuit, 3),
+                1e-7
+            ));
+        }
     }
 }

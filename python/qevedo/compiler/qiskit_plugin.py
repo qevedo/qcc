@@ -8,8 +8,9 @@ itself::
     compiled = transpile(circuit, backend, optimization_method="qcc")
 
 Qiskit still lays out, routes and translates the circuit to the backend's
-gates; QCC then optimizes it, with the Rust core's pipeline: single-qubit
-merging, commutative cancellation and two-qubit block resynthesis. QCC only
+gates; QCC then optimizes it, with the Rust core's pipeline: phase folding,
+single-qubit merging, commutative cancellation and two-qubit block
+resynthesis. QCC only
 rewrites gates on pairs of qubits that already interact, so the routing
 stays valid.
 

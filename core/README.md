@@ -15,7 +15,9 @@ cargo run --release --example multicore -- 100 10 # compare multi-core mappers
 | module | what it does |
 |---|---|
 | `ir.rs` | the instruction list every pass works on |
-| `passes.rs` | the default pipeline: lowering, single-qubit merging, commutative cancellation, two-qubit block resynthesis |
+| `passes.rs` | the default pipeline: lowering, phase folding, single-qubit merging, commutative cancellation, two-qubit block resynthesis |
+| `phase_folding.rs` | merging rotations that act on the same parity, however far apart |
+| `permutation.rs` | SWAP elision: removing SWAP gates by relabelling the qubits after them (block resynthesis in `passes.rs` can also elide the SWAP inside a block) |
 | `lower.rs` | lowering one gate to the device's native gates (definitions or synthesis, whichever is cheaper) |
 | `gates.rs` | matrices of the standard gates |
 | `linalg.rs` | small fixed-size complex matrices (2×2, 4×4) |

@@ -19,12 +19,16 @@ class CompileOptions:
     pass_manager: PassManager | None = None
     #: Directories searched by ``include`` statements, after the input's directory.
     include_paths: Sequence[str | Path] = field(default_factory=tuple)
+    #: Elide SWAP gates even when that leaves qubits' states on other wires at
+    #: the end, recorded in the result's ``output_permutation``. Without it,
+    #: SWAP gates are elided only when the moved states are measured last.
+    relabel_outputs: bool = False
 
 
 def compile_circuit(circuit: Circuit, options: CompileOptions | None = None) -> Circuit:
     opts = options or CompileOptions()
     device = opts.device or default_device()
-    manager = opts.pass_manager or PassManager.default(device)
+    manager = opts.pass_manager or PassManager.default(device, opts.relabel_outputs)
     return manager.run(circuit, device)
 
 

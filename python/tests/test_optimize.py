@@ -7,7 +7,7 @@ import pytest
 
 from qevedo.compiler.device import DeviceSpec
 from qevedo.compiler.ir import Circuit, Instruction, Qubit
-from qevedo.compiler.passes import CommutativeCancellation, ResynthesizeTwoQubitBlocks
+from qevedo.compiler.passes import CommutativeCancellation, PhaseFolding, ResynthesizeTwoQubitBlocks
 from qevedo.compiler.passes.optimize import MergeSingleQubitGates
 from qevedo.compiler.passes.decompose import cost
 from qevedo.compiler.synthesis.gates import embed, gate_matrix
@@ -69,7 +69,7 @@ def random_native_circuit(rng, native, length):
 
 
 @pytest.mark.parametrize("label", sorted(NATIVE))
-@pytest.mark.parametrize("make", [ResynthesizeTwoQubitBlocks, CommutativeCancellation])
+@pytest.mark.parametrize("make", [ResynthesizeTwoQubitBlocks, CommutativeCancellation, PhaseFolding])
 def test_passes_preserve_the_unitary_and_never_cost_more(label, make):
     rng = np.random.default_rng(11)
     dev = device(NATIVE[label])
@@ -135,3 +135,15 @@ def test_commutative_cancellation():
         ("cz", [0, 1], [])
     ]
     assert len(run(gate("x", 0), Instruction("barrier", (Q[0],)), gate("x", 0))) == 3
+
+
+def test_phase_folding_merges_rotations_across_cnots():
+    # T on q1's parity x0⊕x1 twice, separated by a CNOT pair and an X pair.
+    c = circuit(
+        gate("cx", 0, 1), gate("rz", 1, params=(0.3,)), gate("cx", 0, 1),
+        gate("h", 2), gate("cx", 0, 1), gate("x", 1), gate("rz", 1, params=(0.4,)),
+        gate("x", 1), gate("cx", 0, 1),
+    )  # fmt: skip
+    out = PhaseFolding().run(c)
+    assert sum(i.name == "rz" for i in out.instructions) == 1
+    assert equal_up_to_phase(unitary(out), unitary(c))

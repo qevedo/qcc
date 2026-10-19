@@ -61,6 +61,10 @@ class Circuit:
     qreg_sizes: Dict[str, int] = field(default_factory=dict)
     creg_sizes: Dict[str, int] = field(default_factory=dict)
     instructions: List[Instruction] = field(default_factory=list)
+    #: Where each qubit's state ends when SWAP gates were elided: the wire
+    #: ``output_permutation[q]`` holds qubit ``q``'s state. Unlisted qubits
+    #: end on their own wires.
+    output_permutation: Dict[Qubit, Qubit] = field(default_factory=dict)
 
     def append(self, inst: Instruction) -> None:
         self.instructions.append(inst)
@@ -75,6 +79,7 @@ class Circuit:
             qreg_sizes=dict(self.qreg_sizes),
             creg_sizes=dict(self.creg_sizes),
             instructions=[inst.copy() for inst in self.instructions],
+            output_permutation=dict(self.output_permutation),
         )
 
     def gate_counts(self) -> Dict[str, int]:

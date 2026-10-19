@@ -6,7 +6,7 @@ use crate::ir::{Instruction, NON_GATES, cost};
 use crate::linalg::{M2, M4};
 use crate::one_qubit::{Basis1q, bases_for, count_1q, synthesize_1q};
 use crate::passes::merge_single_qubit_runs;
-use crate::two_qubit::{Step, TwoQubitBasis, TwoQubitSynth, bases_2q};
+use crate::two_qubit::{Objective, Step, TwoQubitBasis, TwoQubitSynth, bases_2q};
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 
@@ -162,7 +162,7 @@ pub struct Lowering {
     bases_2q: Vec<TwoQubitBasis>,
     synth: TwoQubitSynth,
     memo: HashMap<(String, Vec<u64>, usize), Vec<Instruction>>,
-    memo_2q: HashMap<[u64; 32], Vec<Instruction>>,
+    memo_2q: HashMap<([u64; 32], Objective), Vec<Instruction>>,
 }
 
 impl Lowering {
@@ -219,7 +219,11 @@ impl Lowering {
                 candidates.push(self.one_qubit(&m, inst.qubits[0])?);
             } else if !self.bases_2q.is_empty() {
                 let m = matrix_2q(name, &inst.params).ok_or_else(|| bad_params(inst))?;
-                candidates.push(self.two_qubit(&m, [inst.qubits[0], inst.qubits[1]])?);
+                candidates.push(self.two_qubit(
+                    &m,
+                    [inst.qubits[0], inst.qubits[1]],
+                    Objective::Alone,
+                )?);
             }
         }
         if candidates.is_empty() {
@@ -259,8 +263,14 @@ impl Lowering {
             .collect())
     }
 
-    /// The cheapest native sequence for the two-qubit unitary `m` on `qubits`.
-    pub fn two_qubit(&mut self, m: &M4, qubits: [usize; 2]) -> Result<Vec<Instruction>, String> {
+    /// The cheapest native sequence for the two-qubit unitary `m` on `qubits`,
+    /// under `objective`.
+    pub fn two_qubit(
+        &mut self,
+        m: &M4,
+        qubits: [usize; 2],
+        objective: Objective,
+    ) -> Result<Vec<Instruction>, String> {
         let mut key = [0u64; 32];
         for i in 0..4 {
             for j in 0..4 {
@@ -268,8 +278,9 @@ impl Lowering {
                 key[8 * i + 2 * j + 1] = m.0[i][j].im.to_bits();
             }
         }
+        let key = (key, objective);
         if !self.memo_2q.contains_key(&key) {
-            let lowered = self.two_qubit_new(m)?;
+            let lowered = self.two_qubit_new(m, objective)?;
             self.memo_2q.insert(key, lowered);
         }
         Ok(self.memo_2q[&key]
@@ -278,7 +289,7 @@ impl Lowering {
             .collect())
     }
 
-    fn two_qubit_new(&mut self, m: &M4) -> Result<Vec<Instruction>, String> {
+    fn two_qubit_new(&mut self, m: &M4, objective: Objective) -> Result<Vec<Instruction>, String> {
         if self.bases_2q.is_empty() {
             let mut native: Vec<&String> = self.native.iter().collect();
             native.sort();
@@ -301,7 +312,7 @@ impl Lowering {
         let mut best: Option<Vec<Instruction>> = None;
         for basis in &self.bases_2q {
             let mut out = Vec::new();
-            for step in self.synth.synthesize(m, basis, Some(&cost_1q))? {
+            for step in self.synth.synthesize(m, basis, Some(&cost_1q), objective)? {
                 match step {
                     Step::U(q, u) => out.extend(
                         synthesize_1q(&u, bases_1q)

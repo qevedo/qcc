@@ -13,6 +13,8 @@ pub mod multicore;
 pub mod numeric;
 pub mod one_qubit;
 pub mod passes;
+pub mod permutation;
+pub mod phase_folding;
 pub mod rng;
 pub mod routing;
 #[cfg(test)]

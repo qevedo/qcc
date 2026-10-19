@@ -16,7 +16,7 @@ from qevedo.compiler.synthesis.gates import GATE_ARITY  # noqa: E402
 
 
 def test_default_pipeline_is_the_rust_core():
-    assert [p.name for p in PassManager.default().passes] == ["native_pipeline"]
+    assert [p.name for p in PassManager.default().passes] == ["elide_swaps", "native_pipeline"]
 
 
 @pytest.mark.parametrize("label", sorted(DEVICES))

@@ -335,13 +335,17 @@ def synthesize_2q(
     u: np.ndarray,
     basis: TwoQubitBasis,
     cost_1q: Callable[[np.ndarray], int] | None = None,
+    in_circuit: bool = False,
 ) -> list[Step]:
     """``u`` as native ``basis`` gates and single-qubit unitaries, in time order.
 
     The single-qubit steps are ("u", matrix, (qubit,)) and still need a
     single-qubit synthesis; adjacent ones on the same qubit are merged. When
     ``cost_1q`` gives the gate count of a single-qubit unitary, the template
-    variant with the fewest gates in total is chosen.
+    variant with the fewest gates in total is chosen; ``in_circuit``, with the
+    fewest between the first and last two-qubit gates first, as the outer ones
+    merge with their neighbours' in a circuit (the Rust core's
+    ``Objective::InCircuit``).
     """
     target = kak(u)
     if basis.kind == "ising":
@@ -359,13 +363,35 @@ def synthesize_2q(
     if cost_1q is None:
         return candidates[0]
 
+    def weigh(steps: Sequence, j: int, m: np.ndarray) -> int:
+        inner = in_circuit and _is_inner(steps, j)
+        return cost_1q(m) * (_INNER_WEIGHT if inner else 1)
+
     def total(steps: list[Step]) -> int:
-        return sum(cost_1q(params) if name == "u" else 1 for name, params, _ in steps)
+        return sum(
+            weigh(steps, j, params) if name == "u" else 1
+            for j, (name, params, _) in enumerate(steps)
+        )
 
     # Moving rotations across the gates is the expensive part: do it for the
     # two variants that start cheapest.
     candidates.sort(key=total)
-    return min((_dress(steps, cost_1q) for steps in candidates[:2]), key=total)
+    return min((_dress(steps, weigh) for steps in candidates[:2]), key=total)
+
+
+# How much more a single-qubit gate between two two-qubit gates weighs with
+# ``in_circuit``: more than all the outer ones together.
+_INNER_WEIGHT = 64
+
+
+def _is_inner(steps: Sequence, j: int) -> bool:
+    """Whether single-qubit step ``j`` lies between two gates on its qubit."""
+    (q,) = steps[j][2]
+
+    def on_q(step) -> bool:
+        return step[0] != "u" and q in step[2]
+
+    return any(map(on_q, steps[:j])) and any(map(on_q, steps[j + 1 :]))
 
 
 def infidelity(p: tuple[float, float, float], q: tuple[float, float, float]) -> float:
@@ -506,12 +532,13 @@ def _candidate_angles(axis: int, before: np.ndarray, after: np.ndarray) -> list[
     return list(unique.values())
 
 
-def _dress(steps: list[Step], cost_1q: Callable[[np.ndarray], int]) -> list[Step]:
+def _dress(steps: list[Step], weigh: Callable[[list, int, np.ndarray], int]) -> list[Step]:
     """Shift rotations that commute with a two-qubit gate across it to cheapen both sides.
 
     A rotation about Z on a CX's control (or X on its target) can move from the
     single-qubit gate before the CX to the one after it without changing the
     product; the angle that minimises the two gates' combined cost is kept.
+    ``weigh(work, j, m)`` is the cost of single-qubit step ``j`` set to ``m``.
     """
     work = [list(step) for step in steps]
     # One pass over the gates: on the benchmarks a second never removed a
@@ -535,17 +562,17 @@ def _dress(steps: list[Step], cost_1q: Callable[[np.ndarray], int]) -> list[Step
                     work.insert(i + 1, ["u", I2, (q,)])
                     after = i + 1
                 b, a = work[before][1], work[after][1]
-                best_cost, best_angle = cost_1q(b) + cost_1q(a), None
+                best_cost, best_angle = weigh(work, before, b) + weigh(work, after, a), None
                 for angle in _candidate_angles(axis, b, a):
                     r = _rotation(axis, angle)
-                    cost = cost_1q(r.conj().T @ b) + cost_1q(a @ r)
+                    cost = weigh(work, before, r.conj().T @ b) + weigh(work, after, a @ r)
                     if cost < best_cost:
                         best_cost, best_angle = cost, angle
                 if best_angle is not None:
                     r = _rotation(axis, best_angle)
                     work[before][1] = r.conj().T @ b
                     work[after][1] = a @ r
-        i = _move_paulis(work, i, cost_1q)
+        i = _move_paulis(work, i, weigh)
         i += 1
     return [tuple(step) for step in work if not (step[0] == "u" and np.allclose(step[1], I2))]
 
@@ -569,7 +596,7 @@ def _pauli_images(name: str, params: tuple, operands: tuple[int, int]) -> tuple:
     return tuple(out)
 
 
-def _move_paulis(work: list, i: int, cost_1q: Callable[[np.ndarray], int]) -> int:
+def _move_paulis(work: list, i: int, weigh: Callable[[list, int, np.ndarray], int]) -> int:
     """Move a Pauli product P⊗Q across Clifford gate ``i`` if that cheapens its neighbours.
 
     G (P⊗Q) = (P'⊗Q') G when G maps P⊗Q to another Pauli product, as CX maps X⊗I
@@ -591,7 +618,7 @@ def _move_paulis(work: list, i: int, cost_1q: Callable[[np.ndarray], int]) -> in
         _neighbour(work, i, q, 1) for q in (0, 1)
     ]
     b0, b1, a0, a1 = (work[j][1] for j in slots)
-    best_cost = sum(cost_1q(m) for m in (b0, b1, a0, a1))
+    best_cost = sum(weigh(work, j, m) for j, m in zip(slots, (b0, b1, a0, a1)))
     best = None
     for (p, q), (p2, q2) in images:
         moved = (
@@ -600,7 +627,7 @@ def _move_paulis(work: list, i: int, cost_1q: Callable[[np.ndarray], int]) -> in
             a0 @ _PAULI_1Q[p2],
             a1 @ _PAULI_1Q[q2],
         )
-        cost = sum(cost_1q(m) for m in moved)
+        cost = sum(weigh(work, j, m) for j, m in zip(slots, moved))
         if cost < best_cost:
             best_cost, best = cost, moved
     if best is not None:

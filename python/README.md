@@ -66,15 +66,26 @@ profile's `native_gates`, with the fewest gates:
 - standard gates with a shorter textbook definition, and gates on three or
   more qubits, through their definitions.
 
-After lowering, the circuit is optimized: single-qubit runs are merged,
-gates cancel or merge across gates they commute with, and every run of gates
-on one pair of qubits is resynthesized as a single two-qubit unitary when
-that is cheaper. Two-qubit interactions whose removal costs less than 10⁻⁹ in average gate
-infidelity are dropped, as Qiskit's default does. On a benchmark of 21
-circuits (QFT, QAOA, Quantum Volume, GHZ, Heisenberg, adders, Clifford+T)
-this uses as many two-qubit gates as Qiskit's `optimization_level=3` except
-on the QFT, where Qiskit relabels output qubits to drop SWAPs
+After lowering, the circuit is optimized: rotations acting on the same
+parity of the qubits are merged however far apart they are (phase folding),
+single-qubit runs are merged, gates cancel or merge across gates they
+commute with, and every run of gates on one pair of qubits is resynthesized
+as a single two-qubit unitary when that is cheaper, choosing among equally
+short syntheses the one with the fewest gates inside the block. Two-qubit
+interactions whose removal costs less than 10⁻⁹ in average gate infidelity
+are dropped, as Qiskit's default does. On a benchmark of 21 circuits (QFT,
+QAOA, Quantum Volume, GHZ, Heisenberg, adders, Clifford+T) this uses 0.968×
+the two-qubit gates of Qiskit's `optimization_level=3` and 0.913× its gates
+in all, and no more of either on any circuit
 ([benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation)).
+
+SWAP gates are removed by relabelling the qubits after them, and blocks that
+are a SWAP away from fewer CX are synthesized that way, whenever the moved
+qubits are measured last, so that the output is equivalent. With
+`CompileOptions(relabel_outputs=True)` (`qcc compile --relabel-outputs`)
+QCC does so for any circuit, as Qiskit does, and the result's
+`output_permutation` says on which wire each qubit's state ends. Neither
+happens on devices that are not all-to-all.
 
 ```python
 from qevedo.compiler import CompileOptions, compile_source
@@ -98,8 +109,8 @@ from qiskit import transpile
 compiled = transpile(circuit, backend, optimization_method="qcc")
 ```
 
-On a 19-qubit heavy-hex chip with CX gates, this uses the same two-qubit
-gates as Qiskit's level 3 and 7% fewer gates in all (up to 46% on a QFT); see
+On a 19-qubit heavy-hex chip with CX gates, this uses 3% fewer two-qubit
+gates than Qiskit's level 3 and 13% fewer gates in all (61% on a QFT); see
 [benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation).
 
 ## Multi-core architectures

@@ -19,11 +19,20 @@ OpenQASM 2/3  →  openqasm.parse + analyze  →  frontend  →  IR  →  passes
 
 ### Implemented passes
 
-The default pipeline is: decompose, then two rounds of [merge single-qubit
-runs → commutative cancellation → two-qubit block resynthesis], then a final
-merge. Each optimization can expose work for the others.
+The default pipeline is: elide SWAPs, decompose, then two rounds of [phase
+folding → merge single-qubit runs → commutative cancellation → two-qubit
+block resynthesis], then a final merge. Each optimization can expose work for
+the others.
 
-1. **DecomposeToNative**: rewrites every gate that is not in the device's
+1. **ElideSwaps** (`passes/permutation.py`; `core/src/permutation.rs`):
+   removes SWAP gates by relabelling the qubits of everything after them, as
+   Qiskit's `ElidePermutations` does. That leaves qubits' states on other
+   wires at the end, which cannot be seen when each moved state is measured
+   last; otherwise the pass only runs with `CompileOptions(relabel_outputs=True)`,
+   and the result's `output_permutation` says where each state ends. It
+   leaves circuits for devices that are not all-to-all alone, since
+   relabelled gates may act on uncoupled pairs.
+2. **DecomposeToNative**: rewrites every gate that is not in the device's
    `native_gates` with the fewest native gates, keeping the cheapest of the
    routes that apply (fewest two-qubit gates first, then fewest gates):
    - *Single-qubit gates*: a ZYZ Euler decomposition emitted in the device's
@@ -41,25 +50,40 @@ merge. Each optimization can expose work for the others.
      known short definition (`crz` is `rz, cx, rz, cx`), lowered recursively.
      Gates on three or more qubits (`ccx`, `cswap`, `rccx`, and the `c3x`
      family through their `qelib1.inc` bodies) take this route.
-2. **MergeSingleQubitGates**: replaces each run of single-qubit gates on a
+3. **PhaseFolding** (`passes/phase_folding.py`; `core/src/phase_folding.rs`):
+   merges rotations that act on the same parity of the qubits, however far
+   apart (Amy, Maslov and Mosca 2014; Nam et al. 2018). Each wire carries an
+   affine parity of variables: CNOTs XOR parities, X flips their constant,
+   and any other non-diagonal gate gives its qubits fresh variables. Diagonal
+   rotations (Rz, phase, T, S, Z, Rzz) add phases on their parity, and those
+   on the same parity merge into the last adjustable one.
+4. **MergeSingleQubitGates**: replaces each run of single-qubit gates on a
    qubit by its shortest equivalent in the native basis.
-3. **CommutativeCancellation**: each gate looks back along its qubits,
+5. **CommutativeCancellation**: each gate looks back along its qubits,
    through gates it commutes with (Z-type gates on a CX control, X-type
    gates on a CX target, diagonal gates with each other), for an inverse to
    cancel or a rotation to merge with: `rz(a) q0; cx q0, q1; rz(b) q0`
    becomes `rz(a + b) q0; cx q0, q1`. (`CancelAdjacentInverses` is the
    simpler adjacent-only version.)
-4. **ResynthesizeTwoQubitBlocks**: collects maximal runs of gates that only
+6. **ResynthesizeTwoQubitBlocks**: collects maximal runs of gates that only
    touch one pair of qubits, multiplies each into its 4×4 unitary and
    replaces it by a fresh KAK synthesis when that has fewer two-qubit
    gates, or as many and fewer gates. Two SWAPs on the same pair vanish;
-   four CXs that amount to two become two.
+   four CXs that amount to two become two. A block's outer single-qubit
+   gates merge with its neighbours' afterwards, so the synthesis here
+   minimises the gates between its first and last two-qubit gates first
+   (`Objective::InCircuit`): saving an outer gate in isolation usually saves
+   nothing once merged, and on Quantum Volume that alone was 1% of the gates.
+   Where qubits may be relabelled (as for ElideSwaps), the Rust core's
+   resynthesis is also permutation-aware: a block U whose SWAP·U needs fewer
+   CX (a CX each way is a SWAP and one CX) becomes SWAP·U, its SWAP elided,
+   and everything after it is relabelled (`compile_relabelling` in
+   `core/src/passes.rs`; the Python passes do not do this).
 
-Against Qiskit 2.5 (`optimization_level=3`, target `rz, sx, x, cx`, with
-Qiskit's SWAP elision turned off so both outputs implement the same
-unitary), the CX counts are equal on a 12-qubit QFT and on Qiskit's random
-circuits, and the total gate counts are equal on the QFT and 7–9% lower on
-the random circuits.
+On the compilation benchmark (`benchmarks/compilation`: 21 circuits against
+Qiskit's level 3, pytket and UCC), QCC uses no more two-qubit gates and no
+more gates in all than Qiskit on any circuit, and fewer on most; phase
+folding is most of the difference (19% fewer CNOTs on adders).
 
 The synthesis lives in `qevedo/compiler/synthesis/` (`gates.py`: matrices of
 the standard gates; `one_qubit.py`: Euler decompositions; `two_qubit.py`: KAK
