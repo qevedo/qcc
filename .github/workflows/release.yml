@@ -1,37 +1,65 @@
 name: Release
 
-# Publish qevedo-compiler to PyPI when a version tag (vX.Y.Z) is pushed. The
-# tag must match the version in python/pyproject.toml and python/Cargo.toml,
-# and the tests must pass. The package contains the Rust core
-# (qevedo.compiler._core), so it ships one abi3 wheel per platform.
+# Publish qevedo-compiler to PyPI when the version in python/pyproject.toml
+# changes on master and has no tag yet, or when a version tag (vX.Y.Z) is
+# pushed. pyproject.toml and python/Cargo.toml must agree (and a pushed tag
+# with them), and the tests must pass. Releasing from master needs no tag push
+# (the daily improvement routine cannot push tags): the GitHub release creates
+# the tag vX.Y.Z at the released commit, and a tag made with the workflow's
+# own token starts no further workflow run. The package contains the Rust
+# core (qevedo.compiler._core), so it ships one abi3 wheel per platform.
 #
 # Publishing uses PyPI trusted publishing: on pypi.org, add a (pending) trusted
 # publisher for project "qevedo-compiler", owner "qevedo", repository "qcc",
 # workflow "release.yml", environment "pypi". No API token is stored in GitHub.
 on:
   push:
+    branches: [master]
+    # Path filters apply to the branch only: every version tag runs.
+    paths: [python/pyproject.toml, python/Cargo.toml, .github/workflows/release.yml]
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
 
 jobs:
-  test:
-    uses: ./.github/workflows/python.yml
-
   check:
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Check the tag against the versions
+      - name: Decide whether to release, and which tag
+        id: version
         working-directory: python
         run: |
           version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
           crate=$(python -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")
-          if [ "v$version" != "$GITHUB_REF_NAME" ] || [ "$crate" != "$version" ]; then
-            echo "::error::tag $GITHUB_REF_NAME, pyproject.toml $version and Cargo.toml $crate must agree"
+          tag="v$version"
+          if [ "$crate" != "$version" ]; then
+            echo "::error::pyproject.toml $version and Cargo.toml $crate must agree"
             exit 1
           fi
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$tag" != "$GITHUB_REF_NAME" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match version $version"
+              exit 1
+            fi
+            release=true
+          elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "$tag is already released: nothing to do"
+            release=false
+          else
+            release=true
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    uses: ./.github/workflows/python.yml
 
   wheels:
     needs: [test, check]
@@ -97,7 +125,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   github-release:
-    needs: publish
+    needs: [check, publish]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -106,7 +134,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Create the GitHub release
+      - name: Create the GitHub release (and the tag, if it is new)
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+          TAG: ${{ needs.check.outputs.tag }}
+        run: gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
