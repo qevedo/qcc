@@ -142,16 +142,27 @@ are, the Rust core also synthesizes the circuit again from scratch
    controlled-Pauli gates on two qubits of a rotation that can come next,
    the one that most lowers the weights of the rotations ahead (discounted
    by commuting layer) and of the Clifford left; a rotation is emitted as an
-   Rz once it acts on one qubit.
+   Rz once it acts on one qubit. The local Cliffords that set up a CX are
+   not undone after it (the rotations ahead are read in the new frame, with
+   the same weights), each CX is placed whichever way round needs fewer of
+   them, and basis changes use √X rather than H: together they take about
+   half the network's single-qubit gates off.
 3. The Clifford left is synthesized one qubit at a time, as in the greedy
    synthesis of Bravyi et al. (2021); where qubits may be relabelled, it
    may end as a permutation.
+4. The greedy choice is blind between gates that do about as well, so eight
+   syntheses run side by side (one thread each), seven of them breaking
+   those ties with seeded noise, as pytket's GreedyPauliSimp does with
+   `trials`; the cheapest after the pipeline is kept, the same on any
+   machine.
 
 It runs only on circuits with three or more CXs per non-Clifford rotation
-(at most 400 rotations) and on all-to-all devices, and its result must also
-win with a CX counted as ten single-qubit gates. On one Trotter step of
-random Hamiltonians QCC then uses 43% fewer CXs than Qiskit's level 3 at 8
-qubits and 17% at 16.
+(at most 400 rotations) and on all-to-all devices, and its result is kept
+only when it needs no more two-qubit gates and no more gates in all than
+the direct compilation. On one Trotter step of random Hamiltonians QCC then
+uses 44% fewer CXs than Qiskit's level 3 at 8 qubits and 20% at 16, and 38%
+and 19% fewer gates in all; at 32 qubits the network would save 10% of the
+CXs for 2% more gates, and is not kept.
 
 ### Multi-core mapping
 

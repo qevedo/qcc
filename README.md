@@ -12,7 +12,7 @@ Rust core compiled to WebAssembly.
 
 ## Status
 
-`qevedo-compiler` 0.2 on PyPI:
+`qevedo-compiler` on PyPI:
 
 - QCC IR (`Circuit`, `Instruction`, `DeviceSpec`)
 - OpenQASM 2 and 3 frontend and emitter, built on [`openqasm`](https://pypi.org/project/openqasm) 3.x ([repository](https://github.com/qevedo/openqasm))
@@ -39,9 +39,10 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [python/README.md](python/R
 
 ## Releases
 
-Pushing a tag `vX.Y.Z` that matches `python/pyproject.toml` runs the tests,
-builds the package and publishes it to PyPI through trusted publishing
-(`.github/workflows/release.yml`).
+A new version in `python/pyproject.toml` (and `python/Cargo.toml`) on
+master, or a pushed tag `vX.Y.Z` that matches them, runs the tests, builds
+the package, publishes it to PyPI through trusted publishing and creates the
+tag and GitHub release (`.github/workflows/release.yml`).
 
 ## License
 

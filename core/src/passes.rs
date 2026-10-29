@@ -763,17 +763,18 @@ pub(crate) fn best_pipeline(
         }
     }
     if new_pairs {
-        // The network trades single-qubit gates for CXs: it must also win
-        // with a CX counted as ten of them.
-        let weighted = |out: &[Instruction]| {
-            let (two, all) = cost(out);
-            10 * two + all
-        };
-        let best = candidates.iter().map(|(out, _)| weighted(out)).min();
-        candidates.extend(
-            through_pauli_network(instructions, native, permute)
-                .filter(|(out, _)| best.is_none_or(|b| weighted(out) < b)),
-        );
+        // The network can trade single-qubit gates for CXs, and on the
+        // 32-qubit Hamiltonian it would: 663 CXs and 1598 gates in all,
+        // against 740 and 1568. Whether that pays depends on the device's
+        // error rates, which the pipeline does not know, so it keeps the
+        // network only when it needs no more of either.
+        let best = candidates.iter().map(|(out, _)| cost(out)).min();
+        candidates.extend(through_pauli_network(instructions, native, permute).filter(
+            |(out, _)| {
+                let (two, all) = cost(out);
+                best.is_none_or(|(b_two, b_all)| two <= b_two && all <= b_all)
+            },
+        ));
     }
     let allowed = |(out, wires): &(Vec<Instruction>, Vec<usize>)| {
         let moved = wires.iter().enumerate().any(|(q, &w)| q != w);
@@ -800,14 +801,39 @@ fn through_pauli_network(
     permute: bool,
 ) -> Option<(Vec<Instruction>, Vec<usize>)> {
     let lowered = lowered_for_network(instructions, native)?;
-    let (network, first) = crate::pauli_network::synthesize(&lowered, permute)?;
-    let (out, second) = pipeline(&network, native, permute).ok()?;
-    let wires = first
-        .iter()
-        .map(|&w| second.get(w).copied().unwrap_or(w))
-        .collect();
-    Some((out, wires))
+    let trial = |seed: u64| -> Option<(Vec<Instruction>, Vec<usize>)> {
+        let (network, first) = crate::pauli_network::synthesize_seeded(&lowered, permute, seed)?;
+        let (out, second) = pipeline(&network, native, permute).ok()?;
+        let wires = first
+            .iter()
+            .map(|&w| second.get(w).copied().unwrap_or(w))
+            .collect();
+        Some((out, wires))
+    };
+    let seeds = 0..NETWORK_TRIALS;
+    let results: Vec<Option<(Vec<Instruction>, Vec<usize>)>> = if cfg!(target_arch = "wasm32") {
+        seeds.map(trial).collect()
+    } else {
+        // Trials are independent: one thread each.
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = seeds.map(|seed| scope.spawn(move || trial(seed))).collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a Pauli-network thread"))
+                .collect()
+        })
+    };
+    // The first of the cheapest, so that the result does not depend on the
+    // threads.
+    results
+        .into_iter()
+        .flatten()
+        .min_by_key(|(out, _)| cost(out))
 }
+
+/// How many Pauli networks [`through_pauli_network`] synthesizes, with seeds
+/// 0 (no randomness) to this minus one, side by side.
+const NETWORK_TRIALS: u64 = 8;
 
 /// The circuit lowered to CX, if the Pauli network is worth trying on it.
 fn lowered_for_network(
@@ -1064,6 +1090,73 @@ mod tests {
         let (unmeasured, wires) =
             compile_relabelling(circuit, native, Relabel::IfMeasured).unwrap();
         assert_eq!((cost(&unmeasured).0, wires), (2, vec![0, 1]));
+    }
+
+    /// Exponentials of random Pauli strings of weight 2 to 4 on `n` qubits,
+    /// each as basis changes around a ladder of CXs, as Qiskit writes them.
+    fn pauli_exponentials(rng: &mut Rng, n: usize, terms: usize) -> Vec<Instruction> {
+        let g =
+            |name: &str, q: &[usize], params: Vec<f64>| Instruction::gate(name, q.to_vec(), params);
+        let mut circuit = Vec::new();
+        for _ in 0..terms {
+            let mut qubits: Vec<usize> = (0..n).collect();
+            for i in 0..n {
+                qubits.swap(i, i + rng.below(n - i));
+            }
+            qubits.truncate(2 + rng.below(3));
+            let letters: Vec<usize> = qubits.iter().map(|_| rng.below(3)).collect();
+            let into: Vec<Instruction> = qubits
+                .iter()
+                .zip(&letters)
+                .flat_map(|(&q, &letter)| match letter {
+                    0 => vec![g("h", &[q], vec![])],
+                    1 => vec![g("sdg", &[q], vec![]), g("h", &[q], vec![])],
+                    _ => vec![],
+                })
+                .collect();
+            let ladder: Vec<Instruction> = qubits
+                .windows(2)
+                .map(|w| g("cx", &[w[0], w[1]], vec![]))
+                .collect();
+            let back = |inst: &Instruction| match inst.name.as_str() {
+                "sdg" => g("s", &inst.qubits, vec![]),
+                _ => inst.clone(),
+            };
+            circuit.extend(into.iter().cloned());
+            circuit.extend(ladder.iter().cloned());
+            let last = *qubits.last().expect("a qubit");
+            circuit.push(g("rz", &[last], vec![rng.range(-3.0, 3.0)]));
+            circuit.extend(ladder.iter().rev().cloned());
+            circuit.extend(into.iter().rev().map(back));
+        }
+        circuit
+    }
+
+    #[test]
+    fn pauli_networks_are_kept_only_when_they_cost_no_more() {
+        let mut rng = Rng::new(23);
+        let native = natives(&["rz", "sx", "x", "cx"]);
+        let mut kept = 0;
+        for _ in 0..12 {
+            let n = 5;
+            let circuit = pauli_exponentials(&mut rng, n, 6);
+            let (out, wires) =
+                compile_relabelling(circuit.clone(), native.clone(), Relabel::Always).unwrap();
+            assert!(dense_equal_up_to_phase(
+                &circuit_unitary(&restored(out.clone(), wires.clone()), n),
+                &circuit_unitary(&circuit, n),
+                1e-7
+            ));
+            // No more two-qubit gates, nor gates in all, than without it.
+            let (direct, _) = pipeline(&circuit, &native, true).unwrap();
+            let ((two, all), (direct_two, direct_all)) = (cost(&out), cost(&direct));
+            assert!(two <= direct_two && all <= direct_all);
+            kept += usize::from(two < direct_two);
+            // The seeded trials run side by side, but the result is always the same.
+            let again = compile_relabelling(circuit, native.clone(), Relabel::Always).unwrap();
+            assert_eq!((out, wires), again);
+        }
+        assert!(kept >= 6, "the network was kept {kept} times in 12");
     }
 
     #[test]

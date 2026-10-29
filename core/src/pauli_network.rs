@@ -14,12 +14,28 @@
 //! ("Clifford circuit optimization with templates and symbolic Pauli
 //! gates", 2021).
 //!
+//! Single-qubit gates are most of what such networks cost, so three choices
+//! keep them few:
+//!
+//! - The local Cliffords that set up a CX are not undone after it. The
+//!   rotations still to come are read in the new frame, which changes none
+//!   of their weights, and the frame is paid for once, by the Clifford left
+//!   at the end. Undoing them nearly doubled the single-qubit gates.
+//! - Each CX is placed whichever way round needs fewer local Cliffords: X on
+//!   `a` controlling Z on `b` is a bare CX(b, a), where CX(a, b) needs a
+//!   basis change on both qubits.
+//! - Basis changes use √X where a Hadamard would do (Y to Z is one √X; X to
+//!   Z is S then √X), as √X is native on IBM-style devices and H costs three
+//!   gates there.
+//!
 //! Commuting rotations may be reordered, and CNOTs shared between them,
 //! which sequences of rotations written one after the other cannot do: on
 //! the QFT this finds a third fewer CNOTs. It is a candidate the pipeline
-//! keeps only when it is cheaper.
+//! keeps only when it needs no more two-qubit gates and no more gates in
+//! all.
 
 use crate::ir::Instruction;
+use crate::rng::Rng;
 use std::f64::consts::FRAC_PI_2;
 
 /// Circuits up to this many qubits (bits of the Pauli bitsets).
@@ -131,6 +147,8 @@ enum Gate {
     H(usize),
     S(usize),
     Sdg(usize),
+    /// √X, which is H S H.
+    Sx(usize),
     Cx(usize, usize),
 }
 
@@ -154,6 +172,11 @@ impl Gate {
                 p.phase = (p.phase + 3 * x as u8) % 4;
                 p.z ^= x << q;
             }
+            Gate::Sx(q) => {
+                for g in [Gate::H(q), Gate::S(q), Gate::H(q)] {
+                    g.conjugate(p);
+                }
+            }
             Gate::Cx(c, t) => {
                 p.x ^= ((p.x >> c) & 1) << t;
                 p.z ^= ((p.z >> t) & 1) << c;
@@ -161,8 +184,10 @@ impl Gate {
         }
     }
 
+    /// The inverse, for the gates [`read`] gives.
     fn inverse(&self) -> Gate {
         match *self {
+            Gate::Sx(_) => unreachable!("read gives no √X"),
             Gate::S(q) => Gate::Sdg(q),
             Gate::Sdg(q) => Gate::S(q),
             g => g,
@@ -174,6 +199,7 @@ impl Gate {
             Gate::H(q) => Instruction::gate("h", vec![q], vec![]),
             Gate::S(q) => Instruction::gate("s", vec![q], vec![]),
             Gate::Sdg(q) => Instruction::gate("sdg", vec![q], vec![]),
+            Gate::Sx(q) => Instruction::gate("sx", vec![q], vec![]),
             Gate::Cx(c, t) => Instruction::gate("cx", vec![c, t], vec![]),
         }
     }
@@ -363,7 +389,7 @@ const MERGE_LOOKBACK: usize = 256;
 /// `(gC)† P (gC) = C† (g† P g) C`.
 fn apply_to_map(m: &mut [Pauli], g: Gate, image: &dyn Fn(&[Pauli], &Pauli) -> Pauli) {
     let support: &[usize] = match g {
-        Gate::H(q) | Gate::S(q) | Gate::Sdg(q) => &[q, q],
+        Gate::H(q) | Gate::S(q) | Gate::Sdg(q) | Gate::Sx(q) => &[q, q],
         Gate::Cx(c, t) => &[c, t],
     };
     let inverse = g.inverse();
@@ -391,6 +417,29 @@ const TABLEAU_WEIGHT: f64 = 0.1;
 const LOCAL_PENALTY: f64 = 0.01;
 /// Pairs of qubits tried as places for the next gate, at most.
 const MAX_PAIRS: usize = 64;
+/// With seed k, at most k times this much random noise is added to each
+/// candidate gate's score. Well under a weight, it only reorders gates that
+/// do about as well, which is where the greedy synthesis is blind; the seeds
+/// spread from gentle to bolder reorderings.
+const NOISE: f64 = 0.05;
+
+/// Local Cliffords on `q` taking `letter` (1 = X, 2 = Z, 3 = Y) to Z.
+fn to_z(q: usize, letter: u8) -> Vec<Gate> {
+    match letter {
+        1 => vec![Gate::S(q), Gate::Sx(q)],
+        3 => vec![Gate::Sx(q)],
+        _ => vec![],
+    }
+}
+
+/// Local Cliffords on `q` taking `letter` to X.
+fn to_x(q: usize, letter: u8) -> Vec<Gate> {
+    match letter {
+        2 => vec![Gate::Sx(q), Gate::S(q)],
+        3 => vec![Gate::Sdg(q)],
+        _ => vec![],
+    }
+}
 
 /// The circuit synthesized again as a Pauli network, and where each qubit's
 /// state ends (`wires[q]`; always `q` unless `permute`), or None if it has
@@ -399,6 +448,18 @@ const MAX_PAIRS: usize = 64;
 pub fn synthesize(
     instructions: &[Instruction],
     permute: bool,
+) -> Option<(Vec<Instruction>, Vec<usize>)> {
+    synthesize_seeded(instructions, permute, 0)
+}
+
+/// [`synthesize`], breaking ties between candidate gates at random when
+/// `seed` is not 0. The greedy choice of each CX looks only a few layers
+/// ahead, and between gates that do equally well there it can lose a tenth of
+/// the CNOTs; a few seeds, run side by side, find the better ones.
+pub fn synthesize_seeded(
+    instructions: &[Instruction],
+    permute: bool,
+    seed: u64,
 ) -> Option<(Vec<Instruction>, Vec<usize>)> {
     let n = instructions
         .iter()
@@ -412,6 +473,8 @@ pub fn synthesize(
         rows,
         out: Vec::new(),
         n,
+        rng: (seed != 0).then(|| Rng::new(seed)),
+        noise: NOISE * seed as f64,
     };
     state.rotations();
     let wires = state.clifford(permute);
@@ -425,6 +488,10 @@ struct State {
     rows: Vec<Pauli>,
     out: Vec<Instruction>,
     n: usize,
+    /// Breaks ties between candidate gates, when seeded, adding up to
+    /// `noise` to each one's score.
+    rng: Option<Rng>,
+    noise: f64,
 }
 
 impl State {
@@ -442,13 +509,8 @@ impl State {
 
     /// Turn the letter on `q` into Z.
     fn turn_to_z(&mut self, letter: u8, q: usize) {
-        match letter {
-            1 => self.emit(Gate::H(q)),
-            3 => {
-                self.emit(Gate::Sdg(q));
-                self.emit(Gate::H(q));
-            }
-            _ => {}
+        for g in to_z(q, letter) {
+            self.emit(g);
         }
     }
 
@@ -504,64 +566,84 @@ impl State {
         }
     }
 
-    /// How much `gates`, on qubits `a` and `b`, change the cost of the
-    /// rotations in the window and of the Clifford left: their weights beyond
-    /// one, discounted by layer for the rotations, and weighted by
-    /// [`TABLEAU_WEIGHT`] for the Clifford's images. Only the Paulis that act
-    /// on `a` or `b` change.
-    fn change(&self, gates: &[Gate], layers: &[usize], a: usize, b: usize) -> f64 {
+    /// The Paulis whose weights a gate on qubits `a` and `b` can change: the
+    /// rotations in the window, discounted by layer, and the Clifford's
+    /// images, weighted by [`TABLEAU_WEIGHT`]. Each as (how much it counts,
+    /// its weight, its letters on `a` and `b`).
+    fn touching(&self, layers: &[usize], a: usize, b: usize) -> Vec<(f64, u32, usize)> {
         let mask = (1u128 << a) | (1u128 << b);
-        let weight_change = |p: &Pauli| -> i64 {
-            let mut q = *p;
-            gates.iter().for_each(|g| g.conjugate(&mut q));
-            i64::from(q.weight().max(1)) - i64::from(p.weight().max(1))
+        let entry = |count: f64, p: &Pauli| {
+            (
+                count,
+                p.weight(),
+                (p.letter(a) | (p.letter(b) << 2)) as usize,
+            )
         };
-        let mut total = 0.0;
-        for (i, &layer) in layers.iter().enumerate() {
-            let p = &self.pending[i].0;
-            if p.support() & mask != 0 {
-                total += DISCOUNT.powi(layer as i32) * weight_change(p) as f64;
-            }
-        }
-        let tableau: i64 = self
-            .rows
+        let rotations = layers
             .iter()
-            .filter(|p| p.support() & mask != 0)
-            .map(weight_change)
-            .sum();
-        total + TABLEAU_WEIGHT * tableau as f64
+            .enumerate()
+            .map(|(i, &layer)| (DISCOUNT.powi(layer as i32), &self.pending[i].0));
+        let images = self.rows.iter().map(|p| (TABLEAU_WEIGHT, p));
+        rotations
+            .chain(images)
+            .filter(|(_, p)| p.support() & mask != 0)
+            .map(|(count, p)| entry(count, p))
+            .collect()
+    }
+
+    /// How much `gates`, on qubits `a` and `b`, change the cost of the
+    /// rotations in the window and of the Clifford left: the weights beyond
+    /// one of the Paulis [`State::touching`] gives. Only their letters on
+    /// `a` and `b` change, and only as those letters say, so the gates are
+    /// applied once to each of the 16 pairs of letters rather than to every
+    /// Pauli.
+    fn change(gates: &[Gate], touching: &[(f64, u32, usize)], a: usize, b: usize) -> f64 {
+        let mut letters_after = [0u32; 16];
+        for (pair, after) in letters_after.iter_mut().enumerate() {
+            let mut p = Pauli::IDENTITY;
+            for (q, letter) in [(a, pair & 3), (b, pair >> 2)] {
+                p.x |= ((letter & 1) as u128) << q;
+                p.z |= ((letter >> 1) as u128) << q;
+            }
+            gates.iter().for_each(|g| g.conjugate(&mut p));
+            *after = p.weight();
+        }
+        let letters_before = |pair: usize| u32::from(pair & 3 != 0) + u32::from(pair >> 2 != 0);
+        touching
+            .iter()
+            .map(|&(count, weight, pair)| {
+                let after = weight - letters_before(pair) + letters_after[pair];
+                count * (f64::from(after.max(1)) - f64::from(weight.max(1)))
+            })
+            .sum()
     }
 
     /// The controlled-Pauli gate, σ on `a` controlling τ on `b`, as local
-    /// Cliffords around a CX (which is Z controlling X).
+    /// Cliffords then a CX (which is Z controlling X), whichever way round
+    /// needs fewer local Cliffords. The local Cliffords are not undone after
+    /// the CX (see the module's documentation), so different ways round leave
+    /// different frames, but the same weights.
     fn controlled_pauli(sigma: u8, tau: u8, a: usize, b: usize) -> Vec<Gate> {
-        // Local Cliffords taking σ to Z on a and τ to X on b.
-        let to_z = |q: usize, letter: u8| -> Vec<Gate> {
-            match letter {
-                1 => vec![Gate::H(q)],
-                3 => vec![Gate::Sdg(q), Gate::H(q)],
-                _ => vec![],
-            }
-        };
-        let to_x = |q: usize, letter: u8| -> Vec<Gate> {
-            match letter {
-                2 => vec![Gate::H(q)],
-                3 => vec![Gate::Sdg(q)],
-                _ => vec![],
-            }
-        };
-        let (la, lb) = (to_z(a, sigma), to_x(b, tau));
-        let mut gates: Vec<Gate> = la.iter().chain(&lb).copied().collect();
-        gates.push(Gate::Cx(a, b));
-        gates.extend(lb.iter().rev().map(Gate::inverse));
-        gates.extend(la.iter().rev().map(Gate::inverse));
-        gates
+        let [forward, backward] = State::both_ways(sigma, tau, a, b);
+        if backward.len() < forward.len() {
+            backward
+        } else {
+            forward
+        }
+    }
+
+    /// σ on `a` controlling τ on `b` with a CX(a, b), and as τ on `b`
+    /// controlling σ on `a`, with a CX(b, a).
+    fn both_ways(sigma: u8, tau: u8, a: usize, b: usize) -> [Vec<Gate>; 2] {
+        [
+            [to_z(a, sigma), to_x(b, tau), vec![Gate::Cx(a, b)]].concat(),
+            [to_x(a, sigma), to_z(b, tau), vec![Gate::Cx(b, a)]].concat(),
+        ]
     }
 
     /// The controlled-Pauli gate on two qubits of a first-layer rotation that
     /// lowers [`State::cost`] most, if any lowers it.
-    fn best_gate(&self, layers: &[usize]) -> Option<Vec<Gate>> {
-        let mut best: Option<(f64, Vec<Gate>)> = None;
+    fn best_gate(&mut self, layers: &[usize]) -> Option<Vec<Gate>> {
         let mut pairs = Vec::new();
         for i in (0..layers.len()).filter(|&i| layers[i] == 0) {
             let p = self.pending[i].0;
@@ -577,22 +659,28 @@ impl State {
                 break;
             }
         }
+        // (score, change in cost, gates) of the best so far.
+        let mut best: Option<(f64, f64, Vec<Gate>)> = None;
         for &(a, b) in &pairs {
+            let touching = self.touching(layers, a, b);
             for sigma in 1..=3 {
                 for tau in 1..=3 {
                     let gates = State::controlled_pauli(sigma, tau, a, b);
+                    let change = State::change(&gates, &touching, a, b);
                     // Of gates that do as well, those with fewer local
-                    // Cliffords around their CX.
-                    let locals = (gates.len() - 1) as f64;
-                    let score = self.change(&gates, layers, a, b) + LOCAL_PENALTY * locals;
-                    if best.as_ref().is_none_or(|(s, _)| score < *s - 1e-9) {
-                        best = Some((score, gates));
+                    // Cliffords before their CX.
+                    let mut score = change + LOCAL_PENALTY * (gates.len() - 1) as f64;
+                    if let Some(rng) = self.rng.as_mut() {
+                        score += self.noise * rng.uniform();
+                    }
+                    if best.as_ref().is_none_or(|(s, _, _)| score < *s - 1e-9) {
+                        best = Some((score, change, gates));
                     }
                 }
             }
         }
-        best.filter(|(score, gates)| *score - LOCAL_PENALTY * ((gates.len() - 1) as f64) < -1e-9)
-            .map(|(_, g)| g)
+        best.filter(|(_, change, _)| *change < -1e-9)
+            .map(|(_, _, g)| g)
     }
 
     /// Lower the weight of rotation `i` by one, whatever it does to the others.
@@ -609,11 +697,7 @@ impl State {
     fn reduction(p: &Pauli, c: usize, t: usize) -> Vec<Gate> {
         let mut gates = Vec::new();
         for q in [c, t] {
-            match p.letter(q) {
-                1 => gates.push(Gate::H(q)),
-                3 => gates.extend([Gate::Sdg(q), Gate::H(q)]),
-                _ => {}
-            }
+            gates.extend(to_z(q, p.letter(q)));
         }
         gates.push(Gate::Cx(c, t));
         gates
@@ -800,14 +884,16 @@ mod tests {
     fn random_circuits_keep_their_unitary() {
         let mut rng = Rng::new(8);
         for n in [2, 3, 4] {
-            for _ in 0..60 {
+            for k in 0..60 {
                 let circuit = random_circuit(&mut rng, n, 25);
                 for permute in [false, true] {
-                    let (mut out, wires) =
-                        synthesize(&circuit, permute).expect("Clifford gates and rotations");
+                    // Seeded or not.
+                    let seed = (k % 3) as u64;
+                    let (mut out, wires) = synthesize_seeded(&circuit, permute, seed)
+                        .expect("Clifford gates and rotations");
                     assert!(
                         out.iter()
-                            .all(|i| ["h", "s", "sdg", "cx", "rz"].contains(&i.name.as_str()))
+                            .all(|i| ["h", "s", "sdg", "sx", "cx", "rz"].contains(&i.name.as_str()))
                     );
                     assert!(permute || wires.iter().enumerate().all(|(q, &w)| q == w));
                     // Move every state back to its own wire.
@@ -832,6 +918,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn controlled_paulis_either_way_change_the_same_weights() {
+        let letters = |p: &Pauli| (p.letter(0) != 0, p.letter(1) != 0);
+        for sigma in 1..=3 {
+            for tau in 1..=3 {
+                let [forward, backward] = State::both_ways(sigma, tau, 0, 1);
+                // Each Pauli on two qubits keeps the same support either way.
+                for pair in 0..16u8 {
+                    let p = Pauli {
+                        x: u128::from(pair & 1) | (u128::from((pair >> 2) & 1) << 1),
+                        z: u128::from((pair >> 1) & 1) | (u128::from(pair >> 3) << 1),
+                        phase: 0,
+                    };
+                    let (mut f, mut b) = (p, p);
+                    forward.iter().for_each(|g| g.conjugate(&mut f));
+                    backward.iter().for_each(|g| g.conjugate(&mut b));
+                    assert_eq!(letters(&f), letters(&b), "σ = {sigma}, τ = {tau}");
+                }
+                let chosen = State::controlled_pauli(sigma, tau, 0, 1);
+                assert_eq!(chosen.len(), forward.len().min(backward.len()));
+            }
+        }
+        // X controlling Z is a CX the other way round, with nothing around it.
+        assert_eq!(State::controlled_pauli(1, 2, 0, 1), vec![Gate::Cx(1, 0)]);
+        assert_eq!(State::controlled_pauli(2, 1, 0, 1), vec![Gate::Cx(0, 1)]);
     }
 
     #[test]
