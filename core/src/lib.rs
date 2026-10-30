@@ -4,6 +4,7 @@
 // Index loops read best in the small fixed-size matrix code.
 #![allow(clippy::needless_range_loop)]
 
+pub mod commuting_blocks;
 pub mod decompose;
 pub mod device;
 pub mod gates;

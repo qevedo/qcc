@@ -79,8 +79,8 @@ around few rotations, as Pauli exponentials are, are also synthesized again
 from scratch as a Pauli network, which shares CNOTs between commuting
 rotations, and kept if cheaper. On a benchmark of 24 circuits (QFT, QAOA,
 Quantum Volume, GHZ, Heisenberg, adders, Clifford+T, random Hamiltonians)
-this uses 0.942× the two-qubit gates of Qiskit's `optimization_level=3` and
-0.916× its gates in all, and no more two-qubit gates on any circuit
+this uses 0.938× the two-qubit gates of Qiskit's `optimization_level=3` and
+0.877× its gates in all, and no more two-qubit gates on any circuit
 ([benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation)).
 
 SWAP gates are removed by relabelling the qubits after them, and blocks that

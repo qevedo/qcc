@@ -3,6 +3,7 @@
 //! `phase_folding`). Matches
 //! `qevedo/compiler/passes/{optimize,resynthesize,base}.py`.
 
+use crate::commuting_blocks::gather_blocks;
 use crate::gates::{is_known_gate, matrix_1q, matrix_2q, signature};
 use crate::ir::{Instruction, NON_GATES, cost};
 use crate::linalg::{M2, M4, kron};
@@ -10,7 +11,7 @@ use crate::lower::Lowering;
 use crate::one_qubit::{Basis1q, count_1q, remainder, synthesize_1q};
 use crate::permutation::measured_out;
 use crate::phase_folding::phase_folding;
-use crate::symmetric_blocks::shift_through_symmetric_blocks;
+use crate::symmetric_blocks::{shift_through_blocks, shift_through_symmetric_blocks};
 use crate::two_qubit::{Objective, cx_count};
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::TAU;
@@ -710,7 +711,7 @@ pub fn compile(
     native: impl IntoIterator<Item = String>,
 ) -> Result<Vec<Instruction>, String> {
     let native: Vec<String> = native.into_iter().collect();
-    Ok(best_pipeline(&instructions, &native, Relabel::Never, false)?.0)
+    Ok(best_pipeline(&instructions, &native, Relabel::Never, false, true)?.0)
 }
 
 /// Whether the pipeline may leave qubits' states on other wires at the end.
@@ -738,23 +739,27 @@ pub fn compile_relabelling(
     relabel: Relabel,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let native: Vec<String> = native.into_iter().collect();
-    best_pipeline(&instructions, &native, relabel, true)
+    best_pipeline(&instructions, &native, relabel, true, true)
 }
 
 /// The cheapest of [`pipeline`], for CX-like devices [`pipeline`] through
 /// CX, and with `new_pairs` (two-qubit gates may act on pairs of qubits the
 /// input does not use) the Pauli network, among those `relabel` allows.
+/// `last` says the result will not be optimized again (routed, then
+/// optimized on the chip's qubits, for one), so its single-qubit gates may
+/// be shifted through CX-like gates (`symmetric_blocks.rs`).
 pub(crate) fn best_pipeline(
     instructions: &[Instruction],
     native: &[String],
     relabel: Relabel,
     new_pairs: bool,
+    last: bool,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let permute = relabel != Relabel::Never;
-    let mut candidates = vec![pipeline(instructions, native, permute)?];
+    let mut candidates = vec![pipeline(instructions, native, permute, last)?];
     if let Some(via) = through_cx(native) {
-        if let Ok((middle, first)) = pipeline(instructions, &via, permute) {
-            let (out, second) = pipeline(&middle, native, permute)?;
+        if let Ok((middle, first)) = pipeline(instructions, &via, permute, false) {
+            let (out, second) = pipeline(&middle, native, permute, last)?;
             let wires = first
                 .iter()
                 .map(|&w| second.get(w).copied().unwrap_or(w))
@@ -769,12 +774,12 @@ pub(crate) fn best_pipeline(
         // error rates, which the pipeline does not know, so it keeps the
         // network only when it needs no more of either.
         let best = candidates.iter().map(|(out, _)| cost(out)).min();
-        candidates.extend(through_pauli_network(instructions, native, permute).filter(
-            |(out, _)| {
+        candidates.extend(
+            through_pauli_network(instructions, native, permute, last).filter(|(out, _)| {
                 let (two, all) = cost(out);
                 best.is_none_or(|(b_two, b_all)| two <= b_two && all <= b_all)
-            },
-        ));
+            }),
+        );
     }
     let allowed = |(out, wires): &(Vec<Instruction>, Vec<usize>)| {
         let moved = wires.iter().enumerate().any(|(q, &w)| q != w);
@@ -787,7 +792,7 @@ pub(crate) fn best_pipeline(
         .min_by_key(|(out, _)| cost(out))
     {
         Some(best) => Ok(best),
-        None => best_pipeline(instructions, native, Relabel::Never, new_pairs),
+        None => best_pipeline(instructions, native, Relabel::Never, new_pairs, last),
     }
 }
 
@@ -799,11 +804,12 @@ fn through_pauli_network(
     instructions: &[Instruction],
     native: &[String],
     permute: bool,
+    last: bool,
 ) -> Option<(Vec<Instruction>, Vec<usize>)> {
     let lowered = lowered_for_network(instructions, native)?;
     let trial = |seed: u64| -> Option<(Vec<Instruction>, Vec<usize>)> {
         let (network, first) = crate::pauli_network::synthesize_seeded(&lowered, permute, seed)?;
-        let (out, second) = pipeline(&network, native, permute).ok()?;
+        let (out, second) = pipeline(&network, native, permute, last).ok()?;
         let wires = first
             .iter()
             .map(|&w| second.get(w).copied().unwrap_or(w))
@@ -876,11 +882,13 @@ fn through_cx(native: &[String]) -> Option<Vec<String>> {
 }
 
 /// The default pipeline (see [`compile`]), with permutation-aware block
-/// resynthesis if `permute`.
+/// resynthesis if `permute`, and for a result that will not be optimized
+/// again (`last`) single-qubit gates shifted through CX-like gates.
 fn pipeline(
     instructions: &[Instruction],
     native: &[String],
     permute: bool,
+    last: bool,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let mut lowering = Lowering::new(native.iter().cloned());
     let mut current = Vec::with_capacity(instructions.len());
@@ -896,13 +904,33 @@ fn pipeline(
         commutative_cancellation(current)
     };
     let current = cleanup(current, &lowering);
-    let (current, wires) = resynthesize_permuting(current, &mut lowering, permute);
-    // Once more, without resynthesis: a second one never removed a gate on
-    // the benchmarks, and resynthesis is most of the time.
-    let current = cleanup(current, &lowering);
-    let current = shift_through_symmetric_blocks(current, &lowering.bases_1q);
-    let current = merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q);
-    Ok((current, wires))
+    let mut finish = |current: Vec<Instruction>| {
+        let (current, wires) = resynthesize_permuting(current, &mut lowering, permute);
+        // Once more, without resynthesis: a second one never removed a gate
+        // on the benchmarks, and resynthesis is most of the time.
+        let current = cleanup(current, &lowering);
+        let current = shift_through_blocks(current, &lowering.bases_1q, last);
+        let current = merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q);
+        (current, wires)
+    };
+    // Gathering blocks through commuting gates can trade single-qubit gates
+    // for two-qubit ones: on the 16-qubit adder, with relabelling, 85 CXs
+    // and 252 gates in all against 92 and 245, as the SWAPs elided from the
+    // gathered blocks leave generic single-qubit gates behind. As for the
+    // Pauli network (`best_pipeline`), the gathered circuit is kept only
+    // when it needs no more of either.
+    let gathered = gather_blocks(current.clone(), permute);
+    if gathered == current {
+        return Ok(finish(current));
+    }
+    let with = finish(gathered);
+    let without = finish(current);
+    let ((two, all), (b_two, b_all)) = (cost(&with.0), cost(&without.0));
+    Ok(if two <= b_two && all <= b_all {
+        with
+    } else {
+        without
+    })
 }
 
 #[cfg(test)]
@@ -1148,7 +1176,7 @@ mod tests {
                 1e-7
             ));
             // No more two-qubit gates, nor gates in all, than without it.
-            let (direct, _) = pipeline(&circuit, &native, true).unwrap();
+            let (direct, _) = pipeline(&circuit, &native, true, true).unwrap();
             let ((two, all), (direct_two, direct_all)) = (cost(&out), cost(&direct));
             assert!(two <= direct_two && all <= direct_all);
             kept += usize::from(two < direct_two);

@@ -94,9 +94,10 @@ pub fn compile_for_device(
         &native,
         Relabel::Always,
         false,
+        false,
     )?];
     if network_promising(&instructions, &native) {
-        let with_network = best_pipeline(&instructions, &native, Relabel::Always, true)?;
+        let with_network = best_pipeline(&instructions, &native, Relabel::Always, true, false)?;
         if with_network.0 != logical_candidates[0].0 {
             logical_candidates.push(with_network);
         }
@@ -129,7 +130,7 @@ fn on_physical_qubits(
     native: &[String],
     device: &Device,
 ) -> Result<Vec<Instruction>, String> {
-    let (mut out, _) = best_pipeline(physical, native, Relabel::Never, false)?;
+    let (mut out, _) = best_pipeline(physical, native, Relabel::Never, false, true)?;
     if device.directed {
         let allowed: HashSet<(usize, usize)> = device.edges.iter().copied().collect();
         out = turn_around(out, &allowed, native);

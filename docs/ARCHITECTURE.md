@@ -20,8 +20,8 @@ OpenQASM 2/3  →  openqasm.parse + analyze  →  frontend  →  IR  →  passes
 ### Implemented passes
 
 The default pipeline is: elide SWAPs, decompose, [rotation merging → phase
-folding → merge single-qubit runs → commutative cancellation → two-qubit
-block resynthesis], the same again without resynthesis, then moving gates through
+folding → merge single-qubit runs → commutative cancellation → gathering
+blocks through commuting gates → two-qubit block resynthesis], the same again without resynthesis, then moving gates through
 symmetric blocks and a final merge. Each optimization can expose work for
 the others; a second resynthesis never removed a gate on the benchmarks, and
 resynthesis is most of the time. The Rust core synthesizes a pass's blocks
@@ -79,7 +79,24 @@ of 49 and 113).
    cancel or a rotation to merge with: `rz(a) q0; cx q0, q1; rz(b) q0`
    becomes `rz(a + b) q0; cx q0, q1`. (`CancelAdjacentInverses` is the
    simpler adjacent-only version.)
-6. **ResynthesizeTwoQubitBlocks**: collects maximal runs of gates that only
+6. **Gathering blocks** (`core/src/commuting_blocks.rs`, Rust only): two
+   gates on the same pair that a gate on one of their qubits and a third
+   separates fall in different blocks, even when that gate commutes with
+   one of them: `cx a,b; cx a,c; cx b,a` is two blocks, but `cx a,c`
+   commutes with `cx a,b`, and the two CXs on `{a, b}` are a SWAP and one CX.
+   This pass moves such gates out of the way, as tket's Clifford
+   simplification does for CXs (Sivarajah et al., arXiv:2003.10611; Fagan
+   and Duncan, arXiv:1901.10114), but for any two-qubit gate and with an
+   exact check: a gate moves only if it commutes with the product of the
+   pair's gates it crosses (an 8×8 check, so single-qubit gates count
+   together), taking along the gates on its third qubit that depend on it,
+   and only where the gathered block needs fewer CX-like gates. A gathered
+   block can trade single-qubit gates for CXs (the SWAP elided from it
+   leaves generic single-qubit gates behind), so the pipeline finishes the
+   circuit with and without gathering whenever gathering moved a gate, and
+   keeps the gathered one only when it needs no more two-qubit gates and
+   no more gates in all.
+7. **ResynthesizeTwoQubitBlocks**: collects maximal runs of gates that only
    touch one pair of qubits, multiplies each into its 4×4 unitary and
    replaces it by a fresh KAK synthesis when that has fewer two-qubit
    gates, or as many and fewer gates. Two SWAPs on the same pair vanish;
@@ -99,14 +116,24 @@ of 49 and 113).
    a = b = ±c, as for XX + YY + ZZ. The Rust core tries the outer gates those
    symmetries allow and keeps the cheapest (`symmetric_variants` in
    `core/src/two_qubit.rs`).
-7. **Symmetric blocks** (`core/src/symmetric_blocks.rs`, Rust only): the same
+8. **Symmetric blocks** (`core/src/symmetric_blocks.rs`, Rust only): the same
    symmetry lets a factor V ⊗ V move through a whole block, from the
    single-qubit runs before it to those after it. Blocks are synthesized
    without seeing their neighbours, so this pass picks V for each symmetric
    block to make the four runs around it cheapest. On Heisenberg chains
    (XX + YY + ZZ blocks) it saves 8–9% of the gates, and with the
    symmetric outer gates above it turned QCC's output for CZ from a fifth
-   longer than Qiskit's to 7–13% shorter.
+   longer than Qiskit's to 7–13% shorter. A block at the point (a, 0, 0),
+   a lone CX for one, commutes with an X rotation on either qubit alone in
+   its canonical frame (a Z rotation on a CX's control, an X rotation on
+   its target), so each of its qubits trades its own rotation, chosen to
+   make the runs before and after it cheapest; nothing else chooses those
+   angles. It changes runs of Z rotations into generic ones, which phase
+   folding cannot merge, so it runs only on a circuit that will not be
+   optimized again (not before routing, nor in the first half of compiling
+   through CX for a CZ device). With gathering, it took the benchmark's
+   random Clifford+T circuits from 293, 525 and 1074 gates to 278, 505 and
+   1034.
 On the compilation benchmark (`benchmarks/compilation`: 24 circuits against
 Qiskit's level 3, pytket and UCC), QCC uses no more two-qubit gates than
 Qiskit on any circuit, and fewer on most; phase folding is most of the
@@ -196,8 +223,8 @@ The result is a circuit on a register `q` of the device's qubits;
 `Circuit.initial_layout` and `Circuit.output_permutation` say on which
 physical qubit each logical qubit starts and ends. A circuit whose two-qubit
 gates already act on coupled pairs keeps its layout. On a 19-qubit
-heavy-hex chip (`benchmarks/compilation/device.py`) this uses 6% fewer
-two-qubit gates than Qiskit's level 3, and 12–17% fewer gates in all.
+heavy-hex chip (`benchmarks/compilation/device.py`) this uses 7–8% fewer
+two-qubit gates than Qiskit's level 3, and 13–18% fewer gates in all.
 
 Still to come: technology-specific constraints from `DeviceSpec.gate_rules`,
 and error rates in the layout.

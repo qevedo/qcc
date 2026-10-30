@@ -1087,7 +1087,7 @@ fn neighbour(steps: &[Step], i: usize, q: usize, direction: isize) -> Option<usi
 
 /// Angles α where `f(α) = |m(α)_00|²` is 1, 1/2 or 0, i.e. where the Euler
 /// angle θ of `m(α)` is 0, π/2 or π, which many bases implement with fewer gates.
-fn special_angles(f: impl Fn(f64) -> f64) -> Vec<f64> {
+pub(crate) fn special_angles(f: impl Fn(f64) -> f64) -> Vec<f64> {
     let (f0, f1, f2) = (f(0.0), f(FRAC_PI_2), f(PI));
     let (a, b, c) = ((f0 + f2) / 2.0, (f0 - f2) / 2.0, f1 - (f0 + f2) / 2.0);
     let r = b.hypot(c);

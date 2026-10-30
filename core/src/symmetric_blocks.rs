@@ -14,12 +14,12 @@
 //! Heisenberg chain compiled for CZ, the runs between blocks are what made
 //! QCC's output a fifth longer than Qiskit's.
 
-use crate::gates::{matrix_1q, pauli};
+use crate::gates::{matrix_1q, pauli, rotation};
 use crate::ir::Instruction;
-use crate::linalg::{M2, equal_up_to_phase4, kron};
+use crate::linalg::{M2, M4, equal_up_to_phase4, kron};
 use crate::one_qubit::{Basis1q, count_1q, synthesize_1q};
 use crate::passes::Block;
-use crate::two_qubit::{TOL, kak};
+use crate::two_qubit::{Kak, TOL, kak, special_angles};
 
 /// A run of single-qubit gates on one qubit, or any other instruction.
 enum Item {
@@ -49,6 +49,21 @@ pub fn shift_through_symmetric_blocks(
     instructions: Vec<Instruction>,
     bases: &[Basis1q],
 ) -> Vec<Instruction> {
+    shift_through_blocks(instructions, bases, false)
+}
+
+/// [`shift_through_symmetric_blocks`], and with `cx_like` also through
+/// blocks at the point (a, 0, 0), a lone CX for one (see
+/// [`shift_independently`]). That leaves generic runs where there were Z
+/// rotations, which phase folding could have merged: only for a circuit
+/// that will not be optimized again. On the heavy-hex chip with CZ, running
+/// it before routing and before compiling CX to CZ cost the 8-qubit
+/// Clifford+T circuit 100 more gates.
+pub fn shift_through_blocks(
+    instructions: Vec<Instruction>,
+    bases: &[Basis1q],
+    cx_like: bool,
+) -> Vec<Instruction> {
     if bases.is_empty() {
         return instructions;
     }
@@ -57,7 +72,7 @@ pub fn shift_through_symmetric_blocks(
     // Runs to create, as (item index to put them before, qubit, matrix).
     let mut created: Vec<(usize, usize, M2)> = Vec::new();
     for block in &blocks {
-        shift(&mut items, block, bases, &mut created);
+        shift(&mut items, block, bases, cx_like, &mut created);
     }
     created.sort_by_key(|&(at, _, _)| at);
     let mut created = created.into_iter().peekable();
@@ -227,6 +242,7 @@ fn shift(
     items: &mut [Item],
     block: &SymBlock,
     bases: &[Basis1q],
+    cx_like: bool,
     created: &mut Vec<(usize, usize, M2)>,
 ) {
     // The block's core: its gates and the runs between them.
@@ -250,6 +266,10 @@ fn shift(
     };
     let k = kak(&u);
     let [a, b, c] = k.point;
+    if cx_like && a > TOL && b < TOL && c.abs() < TOL {
+        shift_independently(items, block, &k, &u, bases, created);
+        return;
+    }
     if a < TOL || (a - b).abs() > TOL || (b - c.abs()).abs() > TOL {
         return;
     }
@@ -305,7 +325,18 @@ fn shift(
     if !equal_up_to_phase4(&shifted, &u, 1e-8) {
         return;
     }
-    let runs = moved(&v);
+    set_runs(items, block, moved(&v), created);
+}
+
+/// Replace the four runs around `block` (before it on each qubit, then
+/// after), creating those it did not have.
+fn set_runs(
+    items: &mut [Item],
+    block: &SymBlock,
+    runs: [M2; 4],
+    created: &mut Vec<(usize, usize, M2)>,
+) {
+    let (first, last) = (block.ops[0], *block.ops.last().unwrap());
     let slots = [
         (block.before[0], first, block.pair[0]),
         (block.before[1], first, block.pair[1]),
@@ -327,6 +358,76 @@ fn shift(
             None => {}
         }
     }
+}
+
+/// [`shift`] for a block at the point (a, 0, 0), a CX-like gate for one:
+/// exp(i a XX) commutes with an X rotation on either qubit alone, so each
+/// qubit trades its own rotation, `B_j† Rx(t_j) B_j` before the block for
+/// `A_j Rx(t_j) A_j†` after it, independently of the other. A CX commutes
+/// with a Z rotation on its control and an X rotation on its target, and
+/// nothing else chooses those angles: a block that was synthesized as SWAP·U
+/// with its SWAP elided, for one, leaves generic runs around its one CX.
+fn shift_independently(
+    items: &mut [Item],
+    block: &SymBlock,
+    k: &Kak,
+    u: &M4,
+    bases: &[Basis1q],
+    created: &mut Vec<(usize, usize, M2)>,
+) {
+    let (outer_a, outer_b) = ([k.a1, k.a0], [k.b1, k.b0]);
+    let before = block.before.map(|r| run_matrix(items, r));
+    let after = block.after.map(|r| run_matrix(items, r));
+    let factors = |j: usize, t: f64| -> (M2, M2) {
+        let r = rotation(0, t);
+        (
+            outer_b[j].adjoint() * r * outer_b[j],
+            outer_a[j] * r * outer_a[j].adjoint(),
+        )
+    };
+    let runs = |j: usize, t: f64| -> (M2, M2) {
+        let (x, y) = factors(j, t);
+        (x.adjoint() * before[j], after[j] * y)
+    };
+    let cost = |(b, a): (M2, M2)| count_1q(&b, bases) + count_1q(&a, bases);
+    let mut angles = [0.0; 2];
+    for j in 0..2 {
+        // Angles where either run's middle Euler angle is 0, π/2 or π (see
+        // `special_angles`), and those that turn either run into the
+        // identity when it is an X rotation in the block's frame.
+        let mut candidates = special_angles(|t| runs(j, t).0.0[0][0].norm_sqr());
+        candidates.extend(special_angles(|t| runs(j, t).1.0[0][0].norm_sqr()));
+        for m in [
+            outer_b[j] * before[j] * outer_b[j].adjoint(),
+            (outer_a[j].adjoint() * after[j] * outer_a[j]).adjoint(),
+        ] {
+            // If m = e^{iφ} Rx(t), its diagonal is e^{iφ} cos(t/2) and its
+            // off-diagonal e^{iφ} (−i sin(t/2)): their ratio gives t.
+            let (diagonal, off) = (m.0[0][0] + m.0[1][1], m.0[0][1] + m.0[1][0]);
+            let w = off * diagonal.conj();
+            candidates.push(2.0 * (-w.im).atan2(diagonal.norm_sqr()));
+        }
+        let mut best = (cost(runs(j, 0.0)), 0.0);
+        for t in candidates {
+            let c = cost(runs(j, t));
+            if c < best.0 {
+                best = (c, t);
+            }
+        }
+        angles[j] = best.1;
+    }
+    if angles == [0.0; 2] {
+        return;
+    }
+    // Y U X† = U, checked rather than trusted to the tolerance of the point.
+    let ((x0, y0), (x1, y1)) = (factors(0, angles[0]), factors(1, angles[1]));
+    let shifted = kron(&y0, &y1) * *u * kron(&x0, &x1).adjoint();
+    if !equal_up_to_phase4(&shifted, u, 1e-8) {
+        return;
+    }
+    let (b0, a0) = runs(0, angles[0]);
+    let (b1, a1) = runs(1, angles[1]);
+    set_runs(items, block, [b0, b1, a0, a1], created);
 }
 
 #[cfg(test)]
@@ -415,6 +516,37 @@ mod tests {
         let native: Vec<String> = ["rz", "sx", "x", "cz"].map(String::from).to_vec();
         let out = compile(circuit.clone(), native).unwrap();
         assert!(out.len() <= 20, "{} gates", out.len());
+        assert!(dense_equal_up_to_phase(
+            &circuit_unitary(&out, 2),
+            &circuit_unitary(&circuit, 2),
+            1e-8
+        ));
+    }
+
+    #[test]
+    fn a_cx_trades_rotations_with_its_neighbours() {
+        // A Z rotation on the control and an X rotation on the target pass
+        // through a CX: the runs before and after can share them so that
+        // each run becomes cheaper, here two of them nothing.
+        let native: std::collections::HashSet<String> =
+            ["rz", "sx", "x", "cx"].map(String::from).into();
+        let bases = crate::one_qubit::bases_for(&native);
+        let g = |name: &str, q: Vec<usize>, p: Vec<f64>| Instruction::gate(name, q, p);
+        let circuit = vec![
+            g("rz", vec![0], vec![0.3]),
+            g("sx", vec![0], vec![]),
+            g("rx", vec![1], vec![0.8]),
+            g("cx", vec![0, 1], vec![]),
+            g("sx", vec![1], vec![]),
+            g("rx", vec![1], vec![-0.8]),
+            g("rz", vec![0], vec![-0.3]),
+            g("h", vec![0], vec![]),
+        ];
+        let count = |c: &[Instruction]| {
+            crate::passes::merge_single_qubit_runs(c.to_vec(), &native, &bases).len()
+        };
+        let out = shift_through_blocks(circuit.clone(), &bases, true);
+        assert!(count(&out) < count(&circuit), "{} gates", count(&out));
         assert!(dense_equal_up_to_phase(
             &circuit_unitary(&out, 2),
             &circuit_unitary(&circuit, 2),
