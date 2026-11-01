@@ -6,7 +6,7 @@
 //! `qevedo/compiler/synthesis/one_qubit.py`.
 
 use crate::gates::h;
-use crate::linalg::M2;
+use crate::linalg::{C, M2};
 use std::collections::HashSet;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
@@ -148,8 +148,54 @@ impl Basis1q {
         out
     }
 
+    /// `self.emit(u).len()`, without building the sequence, from what
+    /// [`Shape`] reads off `u`'s entries; from the ZYZ angles
+    /// ([`Basis1q::count_from_angles`]) only where the shape cannot tell.
+    pub fn count(&self, u: &M2, shape: &Shape) -> usize {
+        let fallback = || self.count_from_angles(u, euler_zyz(u));
+        match self {
+            Basis1q::U3(_) => usize::from(!(shape.theta_zero && is_one(shape.plus))),
+            Basis1q::Zsx { x, .. } => {
+                if shape.theta_zero {
+                    nonzero_turns(&[shape.plus])
+                } else if shape.theta_half {
+                    // λ - π/2 and φ + π/2
+                    match (shape.lambda, shape.phi) {
+                        (Some(l), Some(p)) => 1 + nonzero_turns(&[l * -I, p * I]),
+                        _ => fallback(),
+                    }
+                } else if *x && shape.theta_pi {
+                    // φ - λ + π
+                    1 + nonzero_turns(&[-shape.minus])
+                } else {
+                    // λ, θ + π (zero exactly when θ = π) and φ + π
+                    match (shape.lambda, shape.phi) {
+                        (Some(l), Some(p)) => {
+                            2 + nonzero_turns(&[l, -p]) + usize::from(!shape.theta_pi)
+                        }
+                        _ => fallback(),
+                    }
+                }
+            }
+            Basis1q::Zxz { .. } | Basis1q::Zyz { .. } => {
+                if shape.theta_zero {
+                    return nonzero_turns(&[shape.plus]);
+                }
+                let (Some(l), Some(p)) = (shape.lambda, shape.phi) else {
+                    return fallback();
+                };
+                match self {
+                    // λ - π/2 and φ + π/2
+                    Basis1q::Zxz { .. } => 1 + nonzero_turns(&[l * -I, p * I]),
+                    _ => 1 + nonzero_turns(&[l, p]),
+                }
+            }
+            Basis1q::Xyx => self.emit(u).len(),
+        }
+    }
+
     /// `self.emit(u).len()`, given the ZYZ angles of `u`, without building the sequence.
-    pub fn count(&self, u: &M2, angles: (f64, f64, f64)) -> usize {
+    pub fn count_from_angles(&self, u: &M2, angles: (f64, f64, f64)) -> usize {
         let (theta, phi, lam) = angles;
         match self {
             Basis1q::U3(_) => usize::from(!(is_zero(theta) && is_zero(phi + lam))),
@@ -230,8 +276,100 @@ pub fn synthesize_1q(u: &M2, bases: &[Basis1q]) -> Vec<Op> {
 
 /// `synthesize_1q(u, bases).len()`, without building the sequence.
 pub fn count_1q(u: &M2, bases: &[Basis1q]) -> usize {
-    let angles = euler_zyz(u);
-    bases.iter().map(|b| b.count(u, angles)).min().unwrap_or(0)
+    let shape = Shape::of(u);
+    bases.iter().map(|b| b.count(u, &shape)).min().unwrap_or(0)
+}
+
+/// What [`Basis1q::count`] needs of the ZYZ angles of a unitary, read off
+/// its entries with products and square roots instead of the inverse
+/// trigonometric functions [`euler_zyz`] calls.
+///
+/// Counting is what two-qubit synthesis does most: it prices every way of
+/// moving a rotation across a gate by the single-qubit gates it leaves, and
+/// on the 32-qubit Quantum Volume circuit it counts some 650 000 unitaries,
+/// where `atan2`, `hypot` and the complex square root of the determinant were
+/// a quarter of the compilation. A count only asks whether some angle is a
+/// multiple of 2π, and the angles are those of products of the entries: with
+/// `s = det(u)^(-1/2)`, `a = s·u₁₁ = e^{i(φ+λ)/2} cos(θ/2)` and
+/// `b = s·u₁₀ = e^{i(φ-λ)/2} sin(θ/2)`,
+///
+/// - `e^{i(φ+λ)} ∝ a² ∝ u₁₁² · conj(det u)` and `e^{i(φ-λ)} ∝ u₁₀² · conj(det u)`,
+/// - `e^{iφ} ∝ a·b ∝ u₁₁ u₁₀ · conj(det u)` and `e^{iλ} ∝ a·conj(b) ∝ u₁₁ · conj(u₁₀)`,
+///
+/// up to positive factors, which do not change an angle. The square root's
+/// sign never enters (s appears squared, or times its conjugate). θ is read
+/// from |a| and |b| as `euler_zyz` does, compared through its tangent or
+/// cosine rather than computed.
+///
+/// [`euler_zyz`] drops the phase of an entry no larger than [`TOL`] (its
+/// angle is then 0). When exactly one of `a` and `b` is that small, φ and λ
+/// alone are half that angle, whose direction needs `s` itself, and `phi`
+/// and `lambda` are None: the count then falls back
+/// to the angles. The sums the bases need there (φ + λ when θ = 0, φ - λ when
+/// θ = π) do not.
+pub struct Shape {
+    /// θ = 0, π/2 and π, within [`TOL`].
+    theta_zero: bool,
+    theta_half: bool,
+    theta_pi: bool,
+    /// Proportional to e^{i(φ+λ)} and e^{i(φ-λ)} (1 where `euler_zyz` drops the angle).
+    plus: C,
+    minus: C,
+    /// Proportional to e^{iφ} and e^{iλ}, unless exactly one of `a` and `b`
+    /// loses its phase.
+    phi: Option<C>,
+    lambda: Option<C>,
+}
+
+impl Shape {
+    pub fn of(u: &M2) -> Shape {
+        let (a, b) = (u.0[1][1], u.0[1][0]);
+        let det = u.det();
+        // |s| = |det u|^(-1/2) is 1 for a unitary, up to rounding.
+        let scale = det.norm_sqr().sqrt().sqrt();
+        let (na2, nb2) = (a.norm_sqr(), b.norm_sqr());
+        let (na, nb) = (na2.sqrt(), nb2.sqrt());
+        let (keep_a, keep_b) = (na > TOL * scale, nb > TOL * scale);
+        let conj_det = det.conj();
+        // θ/2 = atan2(|b|, |a|) is below TOL/2 when |b| < tan(TOL/2)·|a|,
+        // and θ is within TOL of π/2 when |cos θ| < sin(TOL).
+        Shape {
+            theta_zero: nb < TAN_HALF_TOL * na,
+            theta_half: (na2 - nb2).abs() < SIN_TOL * (na2 + nb2),
+            theta_pi: na < TAN_HALF_TOL * nb,
+            plus: if keep_a { a * a * conj_det } else { ONE_C },
+            minus: if keep_b { b * b * conj_det } else { ONE_C },
+            phi: match (keep_a, keep_b) {
+                (true, true) => Some(a * b * conj_det),
+                (false, false) => Some(ONE_C),
+                _ => None,
+            },
+            lambda: match (keep_a, keep_b) {
+                (true, true) => Some(a * b.conj()),
+                (false, false) => Some(ONE_C),
+                _ => None,
+            },
+        }
+    }
+}
+
+const ONE_C: C = C::new(1.0, 0.0);
+/// tan(TOL/2) and sin(TOL), which differ from TOL/2 and TOL by parts in
+/// 10²¹, far below a double's precision.
+const TAN_HALF_TOL: f64 = TOL / 2.0;
+const SIN_TOL: f64 = TOL;
+const I: C = C::new(0.0, 1.0);
+
+/// Whether the angle of `w` (any non-zero multiple of `e^{iα}` by a positive
+/// number) is a multiple of 2π within [`TOL`], as [`is_zero`] says of α:
+/// |α| < TOL modulo 2π exactly when `w` points right and |sin α| < sin(TOL).
+fn is_one(w: C) -> bool {
+    w.re > 0.0 && w.im.abs() < SIN_TOL * w.norm_sqr().sqrt()
+}
+
+/// How many of the angles of `turns` (see [`is_one`]) are not multiples of 2π.
+fn nonzero_turns(turns: &[C]) -> usize {
+    turns.iter().filter(|w| !is_one(**w)).count()
 }
 
 #[cfg(test)]
@@ -276,6 +414,52 @@ mod tests {
                 );
                 assert_eq!(count_1q(&u, &bases), ops.len());
                 assert!(ops.iter().all(|op| set.contains(&op.name.as_str())));
+            }
+        }
+    }
+
+    #[test]
+    fn counting_from_the_entries_agrees_with_the_angles() {
+        // Unitaries at the special angles a count looks for, as two-qubit
+        // synthesis makes them (θ of 0, π/2 or π, outer angles that are
+        // multiples of π/2, entries that vanish), times random phases and
+        // nudged to either side of the tolerance (not onto it, where
+        // rounding decides either way), besides random ones.
+        let mut rng = Rng::new(11);
+        let quarter = |k: usize| k as f64 * FRAC_PI_2;
+        let mut samples: Vec<M2> = (0..300).map(|_| rng.unitary2()).collect();
+        for t in 0..5 {
+            for p in 0..4 {
+                for l in 0..4 {
+                    for nudge in [0.0, 1e-13, 2e-11, 3e-10, 1e-9] {
+                        let theta = t as f64 * PI / 4.0 + nudge;
+                        let (phi, lam) = (quarter(p) - nudge, quarter(l) + 2.0 * nudge);
+                        let u = matrix_1q("u3", &[theta, phi, lam]).unwrap();
+                        let phase = C::from_polar(1.0, rng.uniform() * TAU);
+                        samples.push(u.scale(phase));
+                        samples.push(u);
+                    }
+                }
+            }
+        }
+        let sets: [&[&str]; 6] = [
+            &["rz", "sx", "x"],
+            &["rz", "sx"],
+            &["rz", "rx"],
+            &["rz", "ry"],
+            &["rx", "ry"],
+            &["u3"],
+        ];
+        for set in sets {
+            for basis in bases_for(&native(set)) {
+                for u in &samples {
+                    assert_eq!(
+                        basis.count(u, &Shape::of(u)),
+                        basis.count_from_angles(u, euler_zyz(u)),
+                        "{basis:?} {u:?}"
+                    );
+                    assert_eq!(basis.count(u, &Shape::of(u)), basis.emit(u).len());
+                }
             }
         }
     }

@@ -410,10 +410,12 @@ pub fn resynthesize_permuting(
 ) -> (Vec<Instruction>, Vec<usize>) {
     let qubits = qubit_count(&instructions);
     let (items, blocks) = collect_blocks(instructions.clone());
+    // What each block needs, worked out once for the requests and both measures.
+    let plans: Vec<Option<Plan>> = blocks.iter().map(|b| plan(b, permute)).collect();
     // Both measures' syntheses at once, on all cores.
-    lowering.prefetch_two_qubit(&synthesis_requests(&blocks, permute));
-    let inside = resynthesize_blocks(&items, &blocks, qubits, lowering, Measure::Inside, permute);
-    let whole = resynthesize_blocks(&items, &blocks, qubits, lowering, Measure::Whole, permute);
+    lowering.prefetch_two_qubit(&synthesis_requests(&plans));
+    let inside = resynthesize_blocks(&items, &blocks, &plans, qubits, lowering, Measure::Inside);
+    let whole = resynthesize_blocks(&items, &blocks, &plans, qubits, lowering, Measure::Whole);
     let unchanged = (0..qubits).collect();
     let merged = |c: &[Instruction]| merged_cost(c, &lowering.native, &lowering.bases_1q);
     // The first of the cheapest, once merged: never worse than the input.
@@ -421,6 +423,28 @@ pub fn resynthesize_permuting(
         .into_iter()
         .min_by_key(|(c, _)| merged(c))
         .expect("three candidates")
+}
+
+/// A block worth resynthesizing: its unitary, and whether SWAP·U is also
+/// worth synthesizing, as it needs fewer CX-like gates than U (otherwise the
+/// relabelling saves nothing, and synthesizing every generic block twice
+/// would double the time).
+struct Plan {
+    matrix: M4,
+    swapped: Option<M4>,
+}
+
+/// The block's [`Plan`], or None if a synthesis could not beat it (see
+/// [`worth_resynthesizing`]) or one of its gates has no matrix.
+fn plan(block: &Block, permute: bool) -> Option<Plan> {
+    if !worth_resynthesizing(block) {
+        return None;
+    }
+    let matrix = block.matrix()?;
+    let swap = matrix_2q("swap", &[]).expect("a standard gate");
+    let swapped =
+        (permute && cx_count(&(swap * matrix)) < cx_count(&matrix)).then(|| swap * matrix);
+    Some(Plan { matrix, swapped })
 }
 
 /// One more than the highest qubit index of `instructions`.
@@ -536,10 +560,10 @@ fn collect_blocks(instructions: Vec<Instruction>) -> (Vec<Item>, Vec<Block>) {
 fn resynthesize_blocks(
     items: &[Item],
     blocks: &[Block],
+    plans: &[Option<Plan>],
     qubits: usize,
     lowering: &mut Lowering,
     measure: Measure,
-    permute: bool,
 ) -> (Vec<Instruction>, Vec<usize>) {
     // A block synthesized with its SWAP elided moves its qubits' states to
     // each other's wires, and everything after is relabelled to follow them.
@@ -549,9 +573,11 @@ fn resynthesize_blocks(
         match item {
             Item::Inst(inst) => out.push(inst.relabel(&wires)),
             &Item::Block(b) => {
-                let block = blocks[b].clone();
+                let block = &blocks[b];
                 let [p, q] = block.pair;
-                let (synthesized, swapped) = best_for_block(block, lowering, measure, permute);
+                let (synthesized, swapped) =
+                    best_for_block(block, plans[b].as_ref(), lowering, measure);
+                let synthesized = synthesized.as_deref().unwrap_or(&block.instructions);
                 out.extend(synthesized.iter().map(|i| i.relabel(&wires)));
                 if swapped {
                     wires.swap(p, q);
@@ -564,20 +590,13 @@ fn resynthesize_blocks(
 
 /// The unitaries [`resynthesize_blocks`] will synthesize, under both
 /// measures' objectives.
-fn synthesis_requests(blocks: &[Block], permute: bool) -> Vec<(M4, Objective)> {
-    let swap = matrix_2q("swap", &[]).expect("a standard gate");
+fn synthesis_requests(plans: &[Option<Plan>]) -> Vec<(M4, Objective)> {
     let mut requests = Vec::new();
-    for block in blocks {
-        if !worth_resynthesizing(block) {
-            continue;
-        }
-        if let Some(m) = block.matrix() {
-            let swapped = permute && cx_count(&(swap * m)) < cx_count(&m);
-            for objective in [Objective::InCircuit, Objective::Alone] {
-                requests.push((m, objective));
-                if swapped {
-                    requests.push((swap * m, objective));
-                }
+    for plan in plans.iter().flatten() {
+        for objective in [Objective::InCircuit, Objective::Alone] {
+            requests.push((plan.matrix, objective));
+            if let Some(swapped) = plan.swapped {
+                requests.push((swapped, objective));
             }
         }
     }
@@ -595,20 +614,17 @@ fn worth_resynthesizing(block: &Block) -> bool {
     two_qubit_gates >= 2 || block.instructions.len() > 3
 }
 
-/// The cheapest of the block, its synthesis and, with `permute`, the
+/// The cheapest of the block, its synthesis and, if its plan says so, the
 /// synthesis of SWAP·U; and whether that last one, whose SWAP the caller
-/// elides, was chosen.
+/// elides, was chosen. None stands for the block itself, left uncopied.
 fn best_for_block(
-    block: Block,
+    block: &Block,
+    plan: Option<&Plan>,
     lowering: &mut Lowering,
     measure: Measure,
-    permute: bool,
-) -> (Vec<Instruction>, bool) {
-    if !worth_resynthesizing(&block) {
-        return (block.instructions, false);
-    }
-    let Some(m) = block.matrix() else {
-        return (block.instructions, false);
+) -> (Option<Vec<Instruction>>, bool) {
+    let Some(plan) = plan else {
+        return (None, false);
     };
     let better = |candidate: &[Instruction], original: &[Instruction]| match measure {
         Measure::Inside => block_cost(candidate) < block_cost(original),
@@ -620,19 +636,15 @@ fn best_for_block(
         Measure::Inside => Objective::InCircuit,
         Measure::Whole => Objective::Alone,
     };
-    let mut best = match lowering.two_qubit(&m, block.pair, objective) {
-        Ok(candidate) if better(&candidate, &block.instructions) => candidate,
-        _ => block.instructions,
+    let mut best = match lowering.two_qubit(&plan.matrix, block.pair, objective) {
+        Ok(candidate) if better(&candidate, &block.instructions) => Some(candidate),
+        _ => None,
     };
     let mut swapped = false;
-    // Only when SWAP·U needs fewer CX-like gates than U: otherwise the
-    // relabelling saves nothing, and synthesizing every generic block twice
-    // would double the time.
-    let swap = matrix_2q("swap", &[]).expect("a standard gate");
-    if permute && cx_count(&(swap * m)) < cx_count(&m) {
-        if let Ok(candidate) = lowering.two_qubit(&(swap * m), block.pair, objective) {
-            if better(&candidate, &best) {
-                (best, swapped) = (candidate, true);
+    if let Some(m) = &plan.swapped {
+        if let Ok(candidate) = lowering.two_qubit(m, block.pair, objective) {
+            if better(&candidate, best.as_deref().unwrap_or(&block.instructions)) {
+                (best, swapped) = (Some(candidate), true);
             }
         }
     }

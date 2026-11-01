@@ -275,21 +275,6 @@ fn extract_indexed(instructions: &[Instruction], n: usize) -> Option<(Vec<Locate
     }
     // m[2q] = C† X_q C and m[2q + 1] = C† Z_q C, for the Clifford C so far.
     let mut m: Vec<Pauli> = (0..n).flat_map(|q| [Pauli::x(q), Pauli::z(q)]).collect();
-    let image = |m: &[Pauli], p: &Pauli| -> Pauli {
-        let mut out = Pauli {
-            phase: p.phase,
-            ..Pauli::IDENTITY
-        };
-        for q in 0..n {
-            if (p.x >> q) & 1 == 1 {
-                out = out.times(&m[2 * q]);
-            }
-            if (p.z >> q) & 1 == 1 {
-                out = out.times(&m[2 * q + 1]);
-            }
-        }
-        out
-    };
     let mut rotations = Vec::new();
     for (index, inst) in instructions.iter().enumerate() {
         for step in read(inst)? {
@@ -300,13 +285,13 @@ fn extract_indexed(instructions: &[Instruction], n: usize) -> Option<(Vec<Locate
                     if (quarter - quarter.round()).abs() < 1e-12 {
                         let k = quarter.round().rem_euclid(4.0) as usize;
                         for _ in 0..k {
-                            apply_to_map(&mut m, Gate::S(q), &image);
+                            apply_to_map(&mut m, Gate::S(q));
                         }
                     } else {
                         rotations.push((m[2 * q + 1], theta, index));
                     }
                 }
-                Step::Clifford(g) => apply_to_map(&mut m, g, &image),
+                Step::Clifford(g) => apply_to_map(&mut m, g),
             }
         }
     }
@@ -385,23 +370,52 @@ pub fn merge_rotations(instructions: Vec<Instruction>) -> Vec<Instruction> {
 /// How many rotations [`merge_rotations`] looks back past, at most.
 const MERGE_LOOKBACK: usize = 256;
 
+/// `C† P C` for the Clifford C whose images `m` holds: the product of the
+/// images of P's letters, in the order of the qubits, X before Z on each.
+/// Only the qubits in P's support are visited (two at most for the
+/// generators [`apply_to_map`] maps), not all of them: on the 32-qubit
+/// Quantum Volume circuit, looping over every qubit for every gate was most
+/// of rotation merging's time.
+fn image(m: &[Pauli], p: &Pauli) -> Pauli {
+    let mut out = Pauli {
+        phase: p.phase,
+        ..Pauli::IDENTITY
+    };
+    let mut support = p.support();
+    while support != 0 {
+        let q = support.trailing_zeros() as usize;
+        support &= support - 1;
+        if (p.x >> q) & 1 == 1 {
+            out = out.times(&m[2 * q]);
+        }
+        if (p.z >> q) & 1 == 1 {
+            out = out.times(&m[2 * q + 1]);
+        }
+    }
+    out
+}
+
 /// `m ← m ∘ conj(g†)`: appending `g` to the Clifford C makes
-/// `(gC)† P (gC) = C† (g† P g) C`.
-fn apply_to_map(m: &mut [Pauli], g: Gate, image: &dyn Fn(&[Pauli], &Pauli) -> Pauli) {
+/// `(gC)† P (gC) = C† (g† P g) C`. Only the rows of the qubits `g` acts on
+/// change.
+fn apply_to_map(m: &mut [Pauli], g: Gate) {
     let support: &[usize] = match g {
-        Gate::H(q) | Gate::S(q) | Gate::Sdg(q) | Gate::Sx(q) => &[q, q],
+        Gate::H(q) | Gate::S(q) | Gate::Sdg(q) | Gate::Sx(q) => &[q],
         Gate::Cx(c, t) => &[c, t],
     };
     let inverse = g.inverse();
-    let mut updates = Vec::with_capacity(4);
+    // Every new row is computed from the old ones before any is written.
+    let mut updates = [(0, Pauli::IDENTITY); 4];
+    let mut count = 0;
     for &q in support {
         for (row, generator) in [(2 * q, Pauli::x(q)), (2 * q + 1, Pauli::z(q))] {
             let mut p = generator;
             inverse.conjugate(&mut p);
-            updates.push((row, image(m, &p)));
+            updates[count] = (row, image(m, &p));
+            count += 1;
         }
     }
-    for (row, p) in updates {
+    for &(row, p) in &updates[..count] {
         m[row] = p;
     }
 }

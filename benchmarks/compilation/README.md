@@ -69,10 +69,10 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
 
 | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|
-| QCC | 0.938× | 0.877× | 8 ms |
-| Qiskit | 1.000× | 1.000× | 12 ms |
-| pytket | 0.998× | 1.093× | 1730 ms |
-| UCC | 1.015× | 2.400× | 32 ms |
+| QCC | 0.938× | 0.877× | 7 ms |
+| Qiskit | 1.000× | 1.000× | 16 ms |
+| pytket | 0.998× | 1.093× | 1862 ms |
+| UCC | 1.015× | 2.400× | 42 ms |
 
 - QCC uses the fewest gates of the four compilers: 6% fewer two-qubit gates
   than Qiskit (0.938×) and 12% fewer gates in all, and no more two-qubit
@@ -133,15 +133,28 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
 - On the Heisenberg chain, moving single-qubit gates through its symmetric
   XX + YY + ZZ blocks (`core/src/symmetric_blocks.rs`) saves another 8–9%
   of the gates: 1173 at 32 qubits, against Qiskit's 1568.
-- QCC is faster than Qiskit on most circuits (17 of 24; a median of 8 ms,
-  against 12), but 4.3× slower on Quantum Volume at 32 qubits, where most
-  of the work is resynthesizing generic two-qubit blocks (on all cores, of
-  which this machine has four), 3–26× on the Hamiltonian, where it also
-  tries the Pauli networks (eight of them, side by side), and 1.1–9× on
-  Clifford+T at 16 and 32 qubits, where gathering moves gates and the
-  pipeline finishes the circuit both with and without it to compare. Times
-  are single compilations and vary between runs on this VM: the 183 ms of
-  the 32-qubit Clifford+T circuit here was 23 and 25 ms in two other runs.
+- QCC is faster than Qiskit on most circuits (20 of 24; a median of 7 ms,
+  against 16), but slower on the Hamiltonian (2.4–12×), where it also tries
+  the Pauli networks (eight of them, side by side), and on Quantum Volume at
+  32 qubits (3.2× in this run), where most of the work is resynthesizing
+  generic two-qubit blocks (on all cores, of which this machine has four).
+  Times are single compilations and vary between runs on this VM: the
+  32-qubit Quantum Volume circuit's 316 ms here was a median of 191 ms over
+  nine compilations, against Qiskit's 69 ms.
+- 0.4.3 made every circuit faster without changing a gate (the outputs are
+  identical): a median of 11 compilations of each circuit, 0.4.2 and 0.4.3
+  side by side on this machine, gave 0.73× the time in geometric mean, and
+  0.56–0.92× on each; Quantum Volume at 32 qubits went from 230 to 155 ms,
+  the Rust core's share from about 165 to 95 ms. Counting single-qubit gates
+  (what two-qubit synthesis does most, for every way of moving a rotation
+  across a gate) now reads the Euler angles' tests off the unitary's entries
+  instead of computing the angles with `atan2` (`Shape` in
+  `core/src/one_qubit.rs`); phase folding keeps parities as short lists of
+  variables rather than bitsets over thousands of them; rotation merging
+  updates its Clifford's images on the qubits a gate touches only; and block
+  resynthesis works out each block's unitary and CX counts once instead of
+  three times. Of the rest, about a third of the time at 32 qubits is the
+  Python wrapper around the core (converting and copying the instructions).
 - Like Qiskit's default, QCC drops two-qubit interactions whose removal
   costs less than 10⁻⁹ in average gate infidelity (the QFT's tiniest
   controlled phases); see `core/src/two_qubit.rs`.
@@ -185,10 +198,10 @@ Qiskit's level 3:
 
 | gates | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|---|
-| {rz, sx, x, cx} | QCC | 0.935× | 0.825× | 56 ms |
-|  | Qiskit + QCC | 0.970× | 0.844× | 40 ms |
-| {rz, sx, x, cz} | QCC | 0.917× | 0.868× | 109 ms |
-|  | Qiskit + QCC | 0.947× | 0.861× | 89 ms |
+| {rz, sx, x, cx} | QCC | 0.935× | 0.825× | 67 ms |
+|  | Qiskit + QCC | 0.970× | 0.844× | 44 ms |
+| {rz, sx, x, cz} | QCC | 0.917× | 0.868× | 99 ms |
+|  | Qiskit + QCC | 0.947× | 0.861× | 85 ms |
 
 Two-qubit gates / all gates with CX:
 

@@ -4,6 +4,67 @@ One entry per change made by the daily improvement routine: what changed,
 why, what it measured, and what to try next. Numbers come from the scripts
 in `benchmarks/`.
 
+## 2026-11-01 — Faster compilation, the same gates
+
+**What.** Four exact speed-ups in the Rust core, none changing a gate:
+
+- `core/src/one_qubit.rs`: `count_1q`, the single-qubit gate count that
+  two-qubit synthesis calls for every way of moving a rotation across a gate
+  (some 650 000 times on the 32-qubit Quantum Volume circuit), no longer
+  computes the ZYZ angles. A count only asks whether certain angles are
+  multiples of 2π, and those angles are the phases of products of the
+  unitary's entries (`e^{i(φ+λ)} ∝ u₁₁² conj(det u)`, `e^{iλ} ∝ u₁₁ conj(u₁₀)`,
+  …), which `Shape` tests with products and square roots; θ is compared
+  through its tangent or cosine. Where `euler_zyz` drops the phase of
+  exactly one tiny entry, φ and λ alone need the square root's sign, and the
+  count falls back to the angles.
+- `core/src/phase_folding.rs`: parities are sorted lists of variables, not
+  bitsets over every variable created (thousands on Quantum Volume, where
+  each rotation's key was tens of words to copy and hash).
+- `core/src/pauli_network.rs`: rotation merging updates its Clifford's images
+  by visiting only the qubits in a generator's support, and a single-qubit
+  gate's rows once instead of twice.
+- `core/src/passes.rs`: block resynthesis works out each block's unitary and
+  whether SWAP·U is worth synthesizing once (`Plan`), instead of three times
+  (for the requests and for each measure), and no longer copies blocks.
+
+**Why.** Quantum Volume compile time was the oldest open problem in this
+log (named under "Next" twice): 3.2× Qiskit's time at 32 qubits on this
+machine (median of five: 250 ms against 77). A profile (callgrind) showed
+`atan2`, `hypot` and the complex square root inside `euler_zyz` at a quarter
+of all instructions, and rotation merging, phase folding's hashing and
+repeated KAK decompositions at most of the serial rest. These are exact
+changes whose effect can be checked bit for bit, which a new synthesis
+method could not offer.
+
+**Measured** (4-vCPU Xeon VM). Outputs: the 112 compilations of the
+benchmark circuits (all-to-all with CX and CZ, the heavy-hex chip with CX and
+CZ, inside Qiskit) give byte-identical QASM before and after; `run.py`,
+`device.py` and `plugin.py`, complete runs, record the same gate counts.
+Time, 0.4.2 and this version side by side, median of 11 compilations per
+circuit: every circuit faster, 0.73× in geometric mean (0.56–0.92×); Quantum
+Volume 9.3 / 45.0 / 229.5 ms → 7.5 / 29.6 / 154.8 ms at 8 / 16 / 32 qubits;
+the Hamiltonian 38 / 132 / 336 → 31 / 121 / 281 ms. The Rust core alone on
+Quantum Volume 32: about 165 → 95 ms. Qiskit takes 69 ms there (median of
+nine), so QCC is still 2.8× slower on it, a third of that now in the Python
+wrapper. The recorded single-run medians: 7 ms against Qiskit's 16.
+
+**Learned.** With four cores the parallel block syntheses were not the
+bottleneck: the serial passes were (rotation merging alone was a quarter of
+the main thread). A count test at exactly the tolerance (θ − π/2 = 1e-10) can
+go either way under rounding in both methods; the new test checks to either
+side of it.
+
+**Next.**
+1. The Python wrapper: about a third of Quantum Volume 32's time is
+   converting and copying instructions (`PassManager.run` copies the circuit,
+   `NativePipeline` builds 9 000 dataclasses).
+2. Win back the adder's gathered CNOTs without the single-qubit cost (see
+   2026-10-30).
+3. The Hamiltonian's time (8 Pauli-network trials, 2.4–12× Qiskit): cache
+   the templates' KAK per Weyl point, or stop trials early once one is
+   clearly worse.
+
 ## 2026-10-30 — Gathering blocks through commuting gates, and single-qubit trades through CXs
 
 **What.**

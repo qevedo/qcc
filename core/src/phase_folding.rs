@@ -26,40 +26,58 @@ use crate::ir::Instruction;
 use std::collections::HashMap;
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
-/// The XOR of some variables, as a bitset, plus a constant.
+/// The XOR of some variables, as their indices in increasing order, plus a
+/// constant.
+///
+/// Every gate this pass does not see through gives its qubits fresh
+/// variables, so a circuit of thousands of gates has thousands of variables,
+/// while a parity holds a few: as a bitset over all of them, each rotation's
+/// key was tens of words to copy and hash (on the 32-qubit Quantum Volume
+/// circuit, a tenth of the compilation), as a list it is a word or two.
 #[derive(Clone, Debug, Default)]
 struct Parity {
-    variables: Vec<u64>,
+    variables: Vec<usize>,
     constant: bool,
 }
 
 impl Parity {
     fn variable(v: usize) -> Parity {
-        let mut variables = vec![0; v / 64 + 1];
-        variables[v / 64] |= 1 << (v % 64);
         Parity {
-            variables,
+            variables: vec![v],
             constant: false,
         }
     }
 
+    /// `self ⊕= other`: the variables in exactly one of the two, merged in order.
     fn xor(&mut self, other: &Parity) {
-        if self.variables.len() < other.variables.len() {
-            self.variables.resize(other.variables.len(), 0);
+        let (a, b) = (&self.variables, &other.variables);
+        let mut out = Vec::with_capacity(a.len() + b.len());
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() && j < b.len() {
+            match a[i].cmp(&b[j]) {
+                std::cmp::Ordering::Less => {
+                    out.push(a[i]);
+                    i += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    out.push(b[j]);
+                    j += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                }
+            }
         }
-        for (a, b) in self.variables.iter_mut().zip(&other.variables) {
-            *a ^= b;
-        }
+        out.extend_from_slice(&a[i..]);
+        out.extend_from_slice(&b[j..]);
+        self.variables = out;
         self.constant ^= other.constant;
     }
 
-    /// The variables, without trailing zero words, as a key.
-    fn key(&self) -> Vec<u64> {
-        let mut key = self.variables.clone();
-        while key.last() == Some(&0) {
-            key.pop();
-        }
-        key
+    /// The variables, as a key.
+    fn key(&self) -> Vec<usize> {
+        self.variables.clone()
     }
 }
 
@@ -114,8 +132,8 @@ pub fn phase_folding(instructions: Vec<Instruction>) -> Vec<Instruction> {
         next_variable += 1;
     };
     // Terms grouped by parity, in the order the parities first appear.
-    let mut groups: HashMap<Vec<u64>, Vec<Term>> = HashMap::new();
-    let mut order: Vec<Vec<u64>> = Vec::new();
+    let mut groups: HashMap<Vec<usize>, Vec<Term>> = HashMap::new();
+    let mut order: Vec<Vec<usize>> = Vec::new();
     let mut add = |parity: &Parity, index: usize, theta: f64, adjustable: bool| {
         let key = parity.key();
         let sign = if parity.constant { -1.0 } else { 1.0 };
