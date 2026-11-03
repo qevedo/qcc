@@ -4,6 +4,71 @@ One entry per change made by the daily improvement routine: what changed,
 why, what it measured, and what to try next. Numbers come from the scripts
 in `benchmarks/`.
 
+## 2026-11-03 — Optimizing again until the circuit stops shrinking, for CZ devices
+
+**What.** `core/src/passes.rs`: `until_fixed_point` runs the default
+pipeline again on its own result, without relabelling or new pairs, while
+that strictly lowers (two-qubit gates, all gates), at most eight times. It
+runs only for devices whose two-qubit gate is CX-like but not CX (CZ, ECR,
+…), in `compile` (the Qiskit plugin), `compile_relabelling` (all-to-all) and
+on the physical qubits after routing (`on_the_same_pairs`, used by
+`core/src/device.rs`). New test:
+`repeated_rounds_keep_the_unitary_and_the_pairs_and_never_cost_more`
+(CZ and ECR circuits get cheaper on some inputs and are never worse, keep
+the unitary and the input's pairs; for CX the result is identical).
+
+**Why.** On the heavy-hex chip with CZ, Qiskit routing plus QCC's
+optimization left fewer gates in all than QCC alone (16-qubit Hamiltonian
+4509 against 5372; Clifford+T 2579 against 2880, where QCC alone used more
+gates than Qiskit's 2844). Running QCC's pipeline a second time on its own
+CZ output removed more gates every time (5372 → 5205 → … → 4633 over five
+rounds), while on CX it was already a fixed point. The cause: for CZ the
+pipeline reads the circuit through CX (each CZ as H·CX·H, the H on its
+second qubit) for phase folding, then translates it back, and every
+translation leaves the single-qubit gates where the next reading finds
+parities and blocks the last did not. Repeating to a fixed point is what
+Qiskit's level 3 does with its optimization loop (`DoWhileController` with
+`MinimumPoint` on depth and size), and alternating cheap rewrites with
+resynthesis until nothing improves is the core of GUOQ (Xu, Molavi, Tannu
+and Albarghouthi, "Optimizing Quantum Circuits, Fast and Slow", ASPLOS 2025,
+arXiv:2411.04104). It is exact (every round is the verified pipeline, kept
+only when strictly cheaper) and could be verified end to end today. A
+per-CZ choice of which side gets the H (the side whose neighbouring runs
+become diagonal, or need fewest √X) was tried as a Python prototype: it won
+on some circuits (Hamiltonian 8 on the chip, 1352 → 1206 gates after a
+second pass) and lost on others, so it was left out.
+
+**Measured** (4-vCPU Xeon VM; `device.py` and `plugin.py` complete runs,
+every output's state checked; `check.py` passes; `run.py` is CX only and
+unaffected, its outputs identical by construction and by `check.py`).
+With CZ every row got cheaper or stayed the same, none worse; with CX none
+changed. On the chip, QCC alone with CZ: 0.917× → 0.908× Qiskit's two-qubit
+gates, 0.868× → 0.848× its gates; Hamiltonian 16 1379 / 5372 → 1292 / 4572
+(Qiskit 1477 / 5357), Hamiltonian 8 336 / 1378 → 331 / 1333, Clifford+T 16
+722 / 2880 → 708 / 2790, 8 234 / 865 → 227 / 826, QAOA 16 182 / 726 →
+180 / 704. Inside Qiskit with CZ: 0.947× / 0.861× → 0.936× / 0.837×;
+QFT 16 1312 → 1244 gates, Hamiltonian 16 1405 / 4509 → 1312 / 4416,
+Heisenberg 8 430 → 391. Time, against 0.4.3 side by side (median of five):
+CZ on the chip 1.65× in geometric mean (Hamiltonian 16 1.69 s → 4.37 s,
+Clifford+T 16 0.45 → 0.97 s), the plugin's pipeline with CZ 2.5× (tens of
+milliseconds; Heisenberg 16 18 → 108 ms); CX 0.99× / 1.00×.
+
+**Learned.** The first physical pass on the CZ Hamiltonian chose the
+through-CX candidate for 37 fewer CZs at the price of 768 more gates (1379 /
+5372 against the direct 1416 / 4604); the rounds then descend slowly, and
+the eighth still removed CZs. The translation from CX back to CZ is where
+the single-qubit gates come from.
+
+**Next.**
+1. Make the CX → CZ translation good enough in one pass, so the rounds are
+   not needed (and the time comes back): choose each CZ's H side with the
+   whole run in view, or resynthesize the runs around each CZ with the
+   neighbouring blocks.
+2. The Python wrapper: about a third of Quantum Volume 32's time (see
+   2026-11-01).
+3. Win back the adder's gathered CNOTs without the single-qubit cost (see
+   2026-10-30).
+
 ## 2026-11-01 — Faster compilation, the same gates
 
 **What.** Four exact speed-ups in the Rust core, none changing a gate:

@@ -12,7 +12,9 @@ use crate::gates::matrix_2q;
 use crate::ir::{Instruction, cost};
 use crate::linalg::{M2, equal_up_to_phase4, kron};
 use crate::lower::Lowering;
-use crate::passes::{Relabel, best_pipeline, merge_single_qubit_runs, network_promising};
+use crate::passes::{
+    Relabel, best_pipeline, merge_single_qubit_runs, network_promising, on_the_same_pairs,
+};
 use crate::routing::{CouplingGraph, SabreOptions, layout_and_route};
 use crate::two_qubit::kak;
 use std::collections::HashSet;
@@ -124,13 +126,14 @@ pub fn compile_for_device(
 }
 
 /// The pipeline on physical qubits: no relabelling, every pass keeps the
-/// pairs; then gates turned around where the couplings have a direction.
+/// pairs, repeated while it shrinks the circuit (for CZ-like devices); then
+/// gates turned around where the couplings have a direction.
 fn on_physical_qubits(
     physical: &[Instruction],
     native: &[String],
     device: &Device,
 ) -> Result<Vec<Instruction>, String> {
-    let (mut out, _) = best_pipeline(physical, native, Relabel::Never, false, true)?;
+    let mut out = on_the_same_pairs(physical, native)?;
     if device.directed {
         let allowed: HashSet<(usize, usize)> = device.edges.iter().copied().collect();
         out = turn_around(out, &allowed, native);

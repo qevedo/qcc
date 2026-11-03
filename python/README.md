@@ -139,9 +139,9 @@ from qiskit import transpile
 compiled = transpile(circuit, backend, optimization_method="qcc")
 ```
 
-On a 19-qubit heavy-hex chip with CX gates, this uses 2% fewer two-qubit
-gates than Qiskit's level 3 and 15% fewer gates in all (61% on a QFT); with
-CZ gates, 10% fewer gates in all; see
+On a 19-qubit heavy-hex chip with CX gates, this uses 3% fewer two-qubit
+gates than Qiskit's level 3 and 16% fewer gates in all (61% on a QFT); with
+CZ gates, 6% fewer two-qubit gates and 16% fewer gates in all; see
 [benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation).
 
 ## Multi-core architectures

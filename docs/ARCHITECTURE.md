@@ -30,7 +30,12 @@ two-qubit gate is CX-like but not CX (CZ, ECR, …), the Rust core also
 compiles for CX first and then for the device, and keeps the cheaper result:
 phase folding sees parities through CNOTs but not through the single-qubit
 gates that make a CZ one (on the benchmark's adders, 40 and 92 CZs instead
-of 49 and 113).
+of 49 and 113). For such devices the pipeline is then run again on its own
+result, without relabelling or new pairs, while that gets cheaper (at most
+eight rounds; `until_fixed_point` in `core/src/passes.rs`): each translation
+back from CX leaves single-qubit gates where the next reading through CX
+finds more to fold. On the heavy-hex chip with CZ it took the 16-qubit
+Hamiltonian from 1379 CZs and 5372 gates to 1292 and 4572.
 
 1. **ElideSwaps** (`passes/permutation.py`; `core/src/permutation.rs`):
    removes SWAP gates by relabelling the qubits of everything after them, as

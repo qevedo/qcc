@@ -723,7 +723,54 @@ pub fn compile(
     native: impl IntoIterator<Item = String>,
 ) -> Result<Vec<Instruction>, String> {
     let native: Vec<String> = native.into_iter().collect();
-    Ok(best_pipeline(&instructions, &native, Relabel::Never, false, true)?.0)
+    on_the_same_pairs(&instructions, &native)
+}
+
+/// [`compile`] on borrowed instructions, as device compilation runs it on the
+/// physical qubits once routed.
+pub(crate) fn on_the_same_pairs(
+    instructions: &[Instruction],
+    native: &[String],
+) -> Result<Vec<Instruction>, String> {
+    let (out, _) = best_pipeline(instructions, native, Relabel::Never, false, true)?;
+    until_fixed_point(out, native)
+}
+
+/// How many times at most [`until_fixed_point`] runs the pipeline again.
+/// On the 16-qubit Hamiltonian, on the heavy-hex chip with CZ, the eighth
+/// round still removed CZs; each round costs about as much as the first.
+const MAX_ROUNDS: usize = 8;
+
+/// For a device whose two-qubit gate is CX-like but not CX, the pipeline run
+/// again on its own result, without relabelling or new pairs, while that
+/// needs fewer gates (two-qubit gates first), at most [`MAX_ROUNDS`] times.
+///
+/// For CX the pipeline is nearly a fixed point already: a second run never
+/// removed a two-qubit gate on the benchmarks. For CZ it is not. The
+/// circuit is read through CX (each CZ as H·CX·H, the H on its second
+/// qubit) so that phase folding sees parities, and is then translated back,
+/// and every translation leaves its single-qubit gates in other places, so
+/// the next reading sees parities and blocks the last one did not. On the
+/// heavy-hex chip the 16-qubit Hamiltonian went from 1379 CZs and 5372 gates
+/// to 1292 and 4572 this way. Qiskit's optimization stage likewise repeats
+/// its passes until the circuit stops shrinking. Every round is the default
+/// pipeline, and a round is kept only when it is strictly cheaper, so the
+/// result is never worse than one run.
+fn until_fixed_point(
+    mut out: Vec<Instruction>,
+    native: &[String],
+) -> Result<Vec<Instruction>, String> {
+    if through_cx(native).is_none() {
+        return Ok(out);
+    }
+    for _ in 0..MAX_ROUNDS {
+        let (next, _) = best_pipeline(&out, native, Relabel::Never, false, true)?;
+        if cost(&next) >= cost(&out) {
+            break;
+        }
+        out = next;
+    }
+    Ok(out)
 }
 
 /// Whether the pipeline may leave qubits' states on other wires at the end.
@@ -744,14 +791,17 @@ pub enum Relabel {
 /// For a device whose two-qubit gate is CX-like but not CX (CZ, ECR, …), the
 /// circuit is also compiled for CX first and then for the device, and the
 /// cheaper result kept: phase folding sees parities through CNOTs, but not
-/// through the single-qubit gates that turn a CZ into one.
+/// through the single-qubit gates that turn a CZ into one. The result is
+/// then optimized again until it stops shrinking ([`until_fixed_point`]);
+/// those rounds move no state to another wire.
 pub fn compile_relabelling(
     instructions: Vec<Instruction>,
     native: impl IntoIterator<Item = String>,
     relabel: Relabel,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let native: Vec<String> = native.into_iter().collect();
-    best_pipeline(&instructions, &native, relabel, true, true)
+    let (out, wires) = best_pipeline(&instructions, &native, relabel, true, true)?;
+    Ok((until_fixed_point(out, &native)?, wires))
 }
 
 /// The cheapest of [`pipeline`], for CX-like devices [`pipeline`] through
@@ -1002,6 +1052,58 @@ mod tests {
                     &circuit_unitary(&circuit, 3),
                     1e-8
                 ));
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_rounds_keep_the_unitary_and_the_pairs_and_never_cost_more() {
+        // Rounds of the pipeline on its own result, for CZ-like devices
+        // (`until_fixed_point`): each must keep the circuit and its pairs,
+        // never end costlier than one run, and on some of these circuits
+        // find something the first run left. For CX they change nothing.
+        let devices: [&[&str]; 3] = [
+            &["rz", "sx", "x", "cz"],
+            &["u3", "ecr"],
+            &["rz", "sx", "x", "cx"],
+        ];
+        let mut rng = Rng::new(17);
+        for device in devices {
+            let native = natives(device);
+            let mut cheaper = 0;
+            for _ in 0..30 {
+                let circuit = random_circuit(&mut rng, 4, 40);
+                let (once, _) =
+                    best_pipeline(&circuit, &native, Relabel::Never, false, true).unwrap();
+                let out = compile(circuit.clone(), native.clone()).unwrap();
+                assert!(dense_equal_up_to_phase(
+                    &circuit_unitary(&out, 4),
+                    &circuit_unitary(&circuit, 4),
+                    1e-8
+                ));
+                let pair = |i: &Instruction| {
+                    let mut p = [i.qubits[0], i.qubits[1]];
+                    p.sort();
+                    p
+                };
+                let pairs: HashSet<[usize; 2]> = circuit
+                    .iter()
+                    .filter(|i| i.qubits.len() == 2)
+                    .map(pair)
+                    .collect();
+                assert!(
+                    out.iter()
+                        .filter(|i| i.qubits.len() == 2)
+                        .all(|i| pairs.contains(&pair(i)))
+                );
+                assert!(cost(&out) <= cost(&once), "{device:?}");
+                if through_cx(&native).is_none() {
+                    assert_eq!(out, once);
+                }
+                cheaper += usize::from(cost(&out) < cost(&once));
+            }
+            if through_cx(&native).is_some() {
+                assert!(cheaper > 0, "{device:?}: no circuit got cheaper");
             }
         }
     }
