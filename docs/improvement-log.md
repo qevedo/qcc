@@ -4,6 +4,77 @@ One entry per change made by the daily improvement routine: what changed,
 why, what it measured, and what to try next. Numbers come from the scripts
 in `benchmarks/`.
 
+## 2026-11-06 — Independent candidates side by side, the same outputs
+
+**What.** `core/src/parallel.rs` (new): `map_ordered` and `join` run
+independent work on all cores and return results in the order of the work,
+on one thread on WebAssembly. Used in:
+
+- `core/src/routing/sabre.rs`: `layout_and_route`'s trials (32 on the chip),
+  each seeded by its number alone, side by side; the first of the cheapest
+  is kept, as in the loop.
+- `core/src/passes.rs`: `direct_candidates` compiles the direct pipeline and
+  the one through CX side by side (for CZ-like devices, in every round of
+  `until_fixed_point`); the Pauli networks are synthesized beside them and
+  judged after (`beside_network`); below 64 instructions, one thread.
+- `core/src/device.rs`: `with_and_without_network` gives the logical
+  candidates to route from one compilation of the direct candidates (they
+  were compiled twice, once in each `best_pipeline` call), and each
+  candidate is routed and optimized on the chip on its own thread.
+
+New tests: `parallel::tests` (order of results), `trials_side_by_side_
+choose_as_one_after_the_other` (SABRE against a loop of single trials) and
+`candidates_side_by_side_choose_as_one_after_the_other` (`best_pipeline`
+and the device candidates against a serial reference of the old choice,
+for CX and CZ, with and without networks).
+
+**Why.** 0.4.4's repeated rounds made QCC 1.65× slower on the CZ chip (the
+16-qubit Hamiltonian 4.4 s, against Qiskit's 0.13 s), and the log's
+speed items were all open. A profile of the device path showed it serial
+where the work is independent: 32 SABRE trials one after another, the
+direct and through-CX pipelines one after another in each round, and the
+direct candidates compiled twice. Running them side by side is exact (the
+choice among candidates is unchanged by construction and checked byte for
+byte), and could be verified end to end today; making the CZ translation
+good in one pass, the other way to win the time back, changes outputs and
+was tried before with mixed results (2026-11-03). On Quantum Volume 32
+all-to-all, by contrast, the Rust core takes about 100 ms of QCC's 142 and
+most of it is serial passes (resynthesis lookups, merging, phase folding),
+so the Python wrapper (about 20 ms there, not a third) was left for later.
+
+**Measured** (4-vCPU Xeon VM). Outputs: the 112 compilations of the
+benchmark circuits (all-to-all, on the heavy-hex chip and inside Qiskit,
+CX and CZ, 8–32 qubits) give byte-identical QASM and permutations against
+0.4.4; `check.py` passes; `device.py`, a complete run, records the same
+gate counts and every state checked (only its times changed). Time, 0.4.4
+and 0.4.5 side by side, best of two medians of five, geometric mean: on
+the chip 0.51× with CX (0.29–1.08×) and 0.62× with CZ (0.39–1.05×); inside
+Qiskit with CZ 0.82×; all-to-all with CZ 0.85×. The 16-qubit Hamiltonian
+on the chip: 1377 → 566 ms with CX, 5583 → 2205 ms with CZ; Clifford+T 16
+with CZ 1291 → 700 ms; Quantum Volume 16 with CX 463 → 180 ms. Where
+nothing new runs side by side (CX all-to-all, CX inside Qiskit): 1.04× and
+1.00× in this run, 0.98× and 0.98× in the one before, individual circuits
+of a few milliseconds 0.8–1.4×: noise. `device.py`'s median for QCC with
+CX went from 64 ms (0.4.4's run) to 38 ms, Qiskit's 36 ms in the same run.
+
+**Learned.** A thread costs a few tenths of a millisecond: the first
+version spawned one for every compilation and made 8-qubit GHZ with CZ
+1.2× slower (1.5 → 1.7 ms); hence the 64-instruction threshold and no
+thread when there is no second candidate. Under valgrind threads run one
+at a time, so callgrind's per-thread totals say nothing about balance.
+
+**Next.**
+1. The CZ rounds themselves (the 16-qubit Hamiltonian on the chip is still
+   2.2 s against Qiskit's 0.15 s): a one-pass CX → CZ translation, or
+   rounds that resynthesize only the blocks the last round changed.
+2. Quantum Volume all-to-all (QCC 142 ms against Qiskit's 61 ms at 32
+   qubits): the serial passes after synthesis — instructions own a `String`
+   and three `Vec`s, so every copy and relabel allocates four times (malloc
+   and free are a fifth of the instructions); the two measures' block
+   resyntheses and merged costs could run side by side.
+3. The few extra two-qubit gates against Qiskit on the chip (Quantum
+   Volume 8: 111 against 108).
+
 ## 2026-11-03 — Optimizing again until the circuit stops shrinking, for CZ devices
 
 **What.** `core/src/passes.rs`: `until_fixed_point` runs the default

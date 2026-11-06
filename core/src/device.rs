@@ -12,9 +12,7 @@ use crate::gates::matrix_2q;
 use crate::ir::{Instruction, cost};
 use crate::linalg::{M2, equal_up_to_phase4, kron};
 use crate::lower::Lowering;
-use crate::passes::{
-    Relabel, best_pipeline, merge_single_qubit_runs, network_promising, on_the_same_pairs,
-};
+use crate::passes::{merge_single_qubit_runs, on_the_same_pairs, with_and_without_network};
 use crate::routing::{CouplingGraph, SabreOptions, layout_and_route};
 use crate::two_qubit::kak;
 use std::collections::HashSet;
@@ -91,35 +89,31 @@ pub fn compile_for_device(
     // On logical qubits, where relabelling is free (the final layout reports
     // it). A Pauli network can need far more routing than it saves, so a
     // result with one is routed next to one without, and the cheaper kept.
-    let mut logical_candidates = vec![best_pipeline(
-        &instructions,
-        &native,
-        Relabel::Always,
-        false,
-        false,
-    )?];
-    if network_promising(&instructions, &native) {
-        let with_network = best_pipeline(&instructions, &native, Relabel::Always, true, false)?;
-        if with_network.0 != logical_candidates[0].0 {
-            logical_candidates.push(with_network);
-        }
-    }
-    let mut best: Option<DeviceCircuit> = None;
-    for (optimized, moved) in logical_candidates {
-        let routed = layout_and_route(&optimized, logical, &graph, options)?;
-        let final_layout = (0..logical)
+    let logical_candidates = with_and_without_network(&instructions, &native, false)?;
+    // Each candidate is routed and optimized on the chip's qubits on its own
+    // thread (the rounds of `until_fixed_point` make that most of the time
+    // for CZ), and the cheapest kept: the first on ties, as in a loop.
+    let routed = crate::parallel::map_ordered(logical_candidates.len(), |i| {
+        let (optimized, moved) = &logical_candidates[i];
+        let routed = layout_and_route(optimized, logical, &graph, options)?;
+        let final_layout: Vec<usize> = (0..logical)
             .map(|q| routed.final_layout[moved.get(q).copied().unwrap_or(q)])
             .collect();
         let out = on_physical_qubits(&routed.instructions, &native, device)?;
+        Ok::<_, String>(DeviceCircuit {
+            instructions: out,
+            initial_layout: routed.initial_layout,
+            final_layout,
+        })
+    });
+    let mut best: Option<DeviceCircuit> = None;
+    for candidate in routed {
+        let candidate = candidate?;
         if best
             .as_ref()
-            .is_none_or(|b| cost(&out) < cost(&b.instructions))
+            .is_none_or(|b| cost(&candidate.instructions) < cost(&b.instructions))
         {
-            best = Some(DeviceCircuit {
-                instructions: out,
-                initial_layout: routed.initial_layout,
-                final_layout,
-            });
+            best = Some(candidate);
         }
     }
     Ok(best.expect("a candidate"))

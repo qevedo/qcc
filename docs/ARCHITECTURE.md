@@ -25,7 +25,13 @@ blocks through commuting gates → two-qubit block resynthesis], the same again 
 symmetric blocks and a final merge. Each optimization can expose work for
 the others; a second resynthesis never removed a gate on the benchmarks, and
 resynthesis is most of the time. The Rust core synthesizes a pass's blocks
-on all cores when there are many (`Lowering::prefetch_two_qubit`). For a device whose
+on all cores when there are many (`Lowering::prefetch_two_qubit`), and runs
+work that reads only the same input side by side (`core/src/parallel.rs`):
+the direct and through-CX compilations below, the Pauli networks beside
+them, SABRE's layout trials, and the routing of each logical candidate on a
+chip. The results come back in the order a loop would produce them, and the
+first of the cheapest is kept, so the output does not depend on the
+threads. For a device whose
 two-qubit gate is CX-like but not CX (CZ, ECR, …), the Rust core also
 compiles for CX first and then for the device, and keeps the cheaper result:
 phase folding sees parities through CNOTs but not through the single-qubit

@@ -159,8 +159,10 @@ pub fn layout_and_route(
         }
     }
     let reversed: Vec<Instruction> = two_qubit.iter().rev().cloned().collect();
-    let mut best: Option<Routed> = None;
-    for trial in 0..options.trials.max(1) {
+    // Each trial is seeded by its number alone, so the trials run side by
+    // side and come back in order; the best is then chosen as one loop over
+    // them would (the first of the cheapest), whatever the threads did.
+    let trial = |trial: usize| -> Result<Routed, String> {
         let mut rng = Rng::new(options.seed.wrapping_add(trial as u64 * 0x9E37_79B9));
         let mut physical: Vec<usize> = (0..graph.qubits()).collect();
         for i in (1..physical.len()).rev() {
@@ -180,21 +182,33 @@ pub fn layout_and_route(
                 .final_layout;
         }
         // Route the layout a few times with different tie-breaking, keep the best.
+        let mut best: Option<Routed> = None;
         for swap_trial in 0..options.swap_trials.max(1) {
             let route_options = SabreOptions {
                 seed: pass_options.seed.wrapping_add(swap_trial as u64),
                 ..*options
             };
             let routed = Router::new(circuit, logical, graph, &layout, &route_options).run()?;
-            if best
-                .as_ref()
-                .is_none_or(|b| (routed.swap_cost, routed.swaps) < (b.swap_cost, b.swaps))
-            {
+            if best.as_ref().is_none_or(|b| better(&routed, b)) {
                 best = Some(routed);
             }
         }
+        Ok(best.expect("at least one swap trial"))
+    };
+    let mut best: Option<Routed> = None;
+    for routed in crate::parallel::map_ordered(options.trials.max(1), trial) {
+        let routed = routed?;
+        if best.as_ref().is_none_or(|b| better(&routed, b)) {
+            best = Some(routed);
+        }
     }
     Ok(best.expect("at least one trial"))
+}
+
+/// Whether routing `a` costs less than `b`: fewer CNOTs for its SWAPs, then
+/// fewer SWAPs.
+fn better(a: &Routed, b: &Routed) -> bool {
+    (a.swap_cost, a.swaps) < (b.swap_cost, b.swaps)
 }
 
 fn needs_coupling(inst: &Instruction) -> bool {
@@ -655,6 +669,42 @@ mod tests {
             }
         }
         assert!(dense_equal_up_to_phase(&lhs, &rhs, 1e-9));
+    }
+
+    #[test]
+    fn trials_side_by_side_choose_as_one_after_the_other() {
+        // Trial t is the single trial of seed + t·0x9E3779B9, so a loop over
+        // single trials is the search as it ran before the trials were
+        // spread over threads: the first of the cheapest must be chosen.
+        let mut rng = TestRng::new(12);
+        for graph in [CouplingGraph::line(6), CouplingGraph::grid(2, 4)] {
+            let n = graph.qubits();
+            for seed in 0..4 {
+                let circuit = random_circuit(&mut rng, n, 40);
+                let options = SabreOptions {
+                    trials: 6,
+                    seed,
+                    ..SabreOptions::default()
+                };
+                let mut serial: Option<Routed> = None;
+                for trial in 0..options.trials {
+                    let single = SabreOptions {
+                        trials: 1,
+                        seed: seed.wrapping_add(trial as u64 * 0x9E37_79B9),
+                        ..options
+                    };
+                    let routed = layout_and_route(&circuit, n, &graph, &single).unwrap();
+                    if serial.as_ref().is_none_or(|b| better(&routed, b)) {
+                        serial = Some(routed);
+                    }
+                }
+                let serial = serial.unwrap();
+                let parallel = layout_and_route(&circuit, n, &graph, &options).unwrap();
+                assert_eq!(parallel.instructions, serial.instructions);
+                assert_eq!(parallel.initial_layout, serial.initial_layout);
+                assert_eq!(parallel.final_layout, serial.final_layout);
+            }
+        }
     }
 
     #[test]

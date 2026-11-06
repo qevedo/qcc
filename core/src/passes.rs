@@ -818,31 +818,12 @@ pub(crate) fn best_pipeline(
     last: bool,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let permute = relabel != Relabel::Never;
-    let mut candidates = vec![pipeline(instructions, native, permute, last)?];
-    if let Some(via) = through_cx(native) {
-        if let Ok((middle, first)) = pipeline(instructions, &via, permute, false) {
-            let (out, second) = pipeline(&middle, native, permute, last)?;
-            let wires = first
-                .iter()
-                .map(|&w| second.get(w).copied().unwrap_or(w))
-                .collect();
-            candidates.push((out, wires));
-        }
-    }
-    if new_pairs {
-        // The network can trade single-qubit gates for CXs, and on the
-        // 32-qubit Hamiltonian it would: 663 CXs and 1598 gates in all,
-        // against 740 and 1568. Whether that pays depends on the device's
-        // error rates, which the pipeline does not know, so it keeps the
-        // network only when it needs no more of either.
-        let best = candidates.iter().map(|(out, _)| cost(out)).min();
-        candidates.extend(
-            through_pauli_network(instructions, native, permute, last).filter(|(out, _)| {
-                let (two, all) = cost(out);
-                best.is_none_or(|(b_two, b_all)| two <= b_two && all <= b_all)
-            }),
-        );
-    }
+    let lowered = new_pairs
+        .then(|| lowered_for_network(instructions, native))
+        .flatten();
+    let (candidates, network) = beside_network(instructions, native, lowered, permute, last);
+    let mut candidates = candidates?;
+    candidates.extend(network.filter(|network| network_pays(network, &candidates)));
     let allowed = |(out, wires): &(Vec<Instruction>, Vec<usize>)| {
         let moved = wires.iter().enumerate().any(|(q, &w)| q != w);
         !moved || relabel == Relabel::Always || measured_out(out, wires)
@@ -858,19 +839,117 @@ pub(crate) fn best_pipeline(
     }
 }
 
-/// The circuit lowered to CX, synthesized again as a Pauli network
-/// (`pauli_network.rs`), then through the [`pipeline`]; None when the
-/// circuit is not Clifford gates and Z rotations once lowered, or has too
-/// many rotations.
-fn through_pauli_network(
+/// For [`compile_for_device`](crate::device::compile_for_device), which
+/// routes both: the cheapest of [`best_pipeline`] without new pairs, and the
+/// Pauli network when [`best_pipeline`] with new pairs would choose it
+/// instead. Each is what those two calls return, with relabelling always
+/// allowed, but the direct candidates are compiled once, beside the network,
+/// instead of once for each call.
+pub(crate) fn with_and_without_network(
+    instructions: &[Instruction],
+    native: &[String],
+    last: bool,
+) -> Result<Vec<Candidate>, String> {
+    let lowered = lowered_for_network(instructions, native);
+    let (candidates, network) = beside_network(instructions, native, lowered, true, last);
+    let candidates = candidates?;
+    let network = network.filter(|network| network_pays(network, &candidates));
+    let best = candidates
+        .into_iter()
+        .min_by_key(|(out, _)| cost(out))
+        .expect("the direct compilation");
+    // Chosen with new pairs only if strictly cheaper: the direct ones win ties.
+    let network = network.filter(|(out, _)| cost(out) < cost(&best.0) && *out != best.0);
+    Ok(std::iter::once(best).chain(network).collect())
+}
+
+/// Below this many instructions, candidates are compiled one after the
+/// other: a thread costs a few tenths of a millisecond, as much as the
+/// whole compilation of an 8-qubit GHZ circuit for CZ.
+const SIDE_BY_SIDE_MIN: usize = 64;
+
+/// A compiled circuit, and where each qubit's state ends.
+pub(crate) type Candidate = (Vec<Instruction>, Vec<usize>);
+
+/// The [`direct_candidates`], and the Pauli network if the circuit was
+/// lowered for one (`lowered`). The network is synthesized from the input
+/// alone, so it is worked out beside the other candidates, and judged
+/// against them after.
+fn beside_network(
+    instructions: &[Instruction],
+    native: &[String],
+    lowered: Option<Vec<Instruction>>,
+    permute: bool,
+    last: bool,
+) -> (Result<Vec<Candidate>, String>, Option<Candidate>) {
+    match lowered {
+        Some(lowered) => crate::parallel::join_if(
+            instructions.len() >= SIDE_BY_SIDE_MIN,
+            || direct_candidates(instructions, native, permute, last),
+            || through_pauli_network(&lowered, native, permute, last),
+        ),
+        None => (direct_candidates(instructions, native, permute, last), None),
+    }
+}
+
+/// The [`pipeline`], and for CX-like devices the [`pipeline`] through CX,
+/// in that order. The two read only the input, so they run side by side;
+/// most of the time of the rounds of [`until_fixed_point`] is these two.
+fn direct_candidates(
     instructions: &[Instruction],
     native: &[String],
     permute: bool,
     last: bool,
+) -> Result<Vec<Candidate>, String> {
+    let Some(via) = through_cx(native) else {
+        return Ok(vec![pipeline(instructions, native, permute, last)?]);
+    };
+    let (direct, through) = crate::parallel::join_if(
+        instructions.len() >= SIDE_BY_SIDE_MIN,
+        || pipeline(instructions, native, permute, last),
+        || {
+            let (middle, first) = pipeline(instructions, &via, permute, false).ok()?;
+            Some(
+                pipeline(&middle, native, permute, last).map(|(out, second)| {
+                    let wires = first
+                        .iter()
+                        .map(|&w| second.get(w).copied().unwrap_or(w))
+                        .collect();
+                    (out, wires)
+                }),
+            )
+        },
+    );
+    let mut candidates = vec![direct?];
+    if let Some(through) = through {
+        candidates.push(through?);
+    }
+    Ok(candidates)
+}
+
+/// Whether a Pauli network is worth keeping among `candidates`: it can
+/// trade single-qubit gates for CXs, and on the 32-qubit Hamiltonian it
+/// would: 663 CXs and 1598 gates in all, against 740 and 1568. Whether that
+/// pays depends on the device's error rates, which the pipeline does not
+/// know, so the network is kept only when it needs no more of either than
+/// the best of them.
+fn network_pays((out, _): &Candidate, candidates: &[Candidate]) -> bool {
+    let (two, all) = cost(out);
+    let best = candidates.iter().map(|(out, _)| cost(out)).min();
+    best.is_none_or(|(b_two, b_all)| two <= b_two && all <= b_all)
+}
+
+/// The circuit lowered to CX ([`lowered_for_network`]), synthesized again
+/// as a Pauli network (`pauli_network.rs`), then through the [`pipeline`];
+/// None when no trial gives a network.
+fn through_pauli_network(
+    lowered: &[Instruction],
+    native: &[String],
+    permute: bool,
+    last: bool,
 ) -> Option<(Vec<Instruction>, Vec<usize>)> {
-    let lowered = lowered_for_network(instructions, native)?;
     let trial = |seed: u64| -> Option<(Vec<Instruction>, Vec<usize>)> {
-        let (network, first) = crate::pauli_network::synthesize_seeded(&lowered, permute, seed)?;
+        let (network, first) = crate::pauli_network::synthesize_seeded(lowered, permute, seed)?;
         let (out, second) = pipeline(&network, native, permute, last).ok()?;
         let wires = first
             .iter()
@@ -919,11 +998,6 @@ fn lowered_for_network(
         lowered.extend(lowering.lower(inst).ok()?);
     }
     crate::pauli_network::promising(&lowered).then_some(lowered)
-}
-
-/// Whether [`best_pipeline`] would try a Pauli network on the circuit.
-pub(crate) fn network_promising(instructions: &[Instruction], native: &[String]) -> bool {
-    lowered_for_network(instructions, native).is_some()
 }
 
 /// `native` with CX as its two-qubit gate, if its two-qubit gates are
@@ -1299,6 +1373,76 @@ mod tests {
             assert_eq!((out, wires), again);
         }
         assert!(kept >= 6, "the network was kept {kept} times in 12");
+    }
+
+    /// The candidates of [`best_pipeline`] one after the other, as it chose
+    /// among them before they ran side by side.
+    fn best_pipeline_serially(
+        instructions: &[Instruction],
+        native: &[String],
+        new_pairs: bool,
+    ) -> (Vec<Instruction>, Vec<usize>) {
+        let mut candidates = vec![pipeline(instructions, native, true, false).unwrap()];
+        if let Some(via) = through_cx(native) {
+            let (middle, first) = pipeline(instructions, &via, true, false).unwrap();
+            let (out, second) = pipeline(&middle, native, true, false).unwrap();
+            let wires = first.iter().map(|&w| second[w]).collect();
+            candidates.push((out, wires));
+        }
+        if new_pairs {
+            let best = candidates.iter().map(|(out, _)| cost(out)).min().unwrap();
+            let network = lowered_for_network(instructions, native)
+                .and_then(|lowered| through_pauli_network(&lowered, native, true, false));
+            if let Some(network) = network {
+                let (two, all) = cost(&network.0);
+                if two <= best.0 && all <= best.1 {
+                    candidates.push(network);
+                }
+            }
+        }
+        candidates
+            .into_iter()
+            .min_by_key(|(out, _)| cost(out))
+            .unwrap()
+    }
+
+    #[test]
+    fn candidates_side_by_side_choose_as_one_after_the_other() {
+        let mut rng = Rng::new(31);
+        let mut networks = 0;
+        for native in [
+            natives(&["rz", "sx", "x", "cx"]),
+            natives(&["rz", "sx", "x", "cz"]),
+        ] {
+            for round in 0..8 {
+                // Pauli exponentials, where the network is tried and often
+                // wins, and random circuits, where it is not tried.
+                let circuit = if round % 2 == 0 {
+                    pauli_exponentials(&mut rng, 5, 6)
+                } else {
+                    random_circuit(&mut rng, 4, 30)
+                };
+                let without = best_pipeline_serially(&circuit, &native, false);
+                let with = best_pipeline_serially(&circuit, &native, true);
+                for (new_pairs, expected) in [(false, &without), (true, &with)] {
+                    let got = best_pipeline(&circuit, &native, Relabel::Always, new_pairs, false)
+                        .unwrap();
+                    assert_eq!(&got, expected);
+                }
+                // What device compilation routes: the first, and the second
+                // when new pairs change the choice.
+                let mut expected = vec![without.clone()];
+                if with.0 != without.0 {
+                    expected.push(with);
+                    networks += 1;
+                }
+                assert_eq!(
+                    with_and_without_network(&circuit, &native, false).unwrap(),
+                    expected
+                );
+            }
+        }
+        assert!(networks >= 4, "a network was chosen {networks} times");
     }
 
     #[test]

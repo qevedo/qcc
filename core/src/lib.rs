@@ -14,6 +14,7 @@ pub mod lower;
 pub mod multicore;
 pub mod numeric;
 pub mod one_qubit;
+pub mod parallel;
 pub mod passes;
 pub mod pauli_network;
 pub mod permutation;

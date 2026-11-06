@@ -31,6 +31,7 @@ cargo run --release --example multicore -- 100 10 # compare multi-core mappers
 | `decompose.rs` | decompose one gate or unitary and check it (used by the playground) |
 | `routing/` | routing on a chip whose qubits are not all coupled: coupling graphs, perfect layouts and SABRE (see `routing/mod.rs`) |
 | `multicore/` | mapping circuits onto multi-core architectures: HQA and baselines, then routing inside each core (see `multicore/mod.rs` and `../docs/MULTICORE.md`) |
+| `parallel.rs` | independent candidates side by side on all cores, with results in the order of the work (the same output whatever the threads do) |
 | `rng.rs` | a small seeded random generator |
 | `testing.rs` | helpers for the unit tests |
 
