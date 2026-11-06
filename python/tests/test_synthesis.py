@@ -1,4 +1,4 @@
-"""Gate synthesis, checked against the qvd simulator (qevedo-simulator)."""
+"""Gate synthesis, checked against the Qevedo simulator (qevedo-simulator)."""
 
 import math
 

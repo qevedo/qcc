@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The synthesis tests check results against the qvd simulator.
+# The synthesis tests check results against the Qevedo simulator.
 dev = ["pytest>=7.0", "qevedo-simulator>=0.1"]
 # The Qiskit transpiler plugin (qevedo.compiler.qiskit_plugin).
 qiskit = ["qiskit>=1.3"]
