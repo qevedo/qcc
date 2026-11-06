@@ -194,17 +194,17 @@ heavy-hex chip with QCC alone (`compile_circuit` with the chip's couplings:
 it optimizes, lays out, routes and optimizes again; see
 `docs/ARCHITECTURE.md`), with Qiskit at level 3, and with Qiskit using QCC as
 its optimization stage, and checks every output's state
-(`results/device.csv`; last run for 0.4.5, on a 4-vCPU Xeon VM). Geometric means over
+(`results/device.csv`; last run for 0.4.6, on a 4-vCPU Xeon VM). Geometric means over
 Qiskit's level 3:
 
 | gates | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|---|
-| {rz, sx, x, cx} | QCC | 0.935× | 0.825× | 38 ms |
-|  | Qiskit + QCC | 0.970× | 0.844× | 38 ms |
-| {rz, sx, x, cz} | QCC | 0.908× | 0.848× | 145 ms |
-|  | Qiskit + QCC | 0.936× | 0.837× | 149 ms |
+| {rz, sx, x, cx} | QCC | 0.935× | 0.825× | 41 ms |
+|  | Qiskit + QCC | 0.970× | 0.844× | 49 ms |
+| {rz, sx, x, cz} | QCC | 0.908× | 0.848× | 113 ms |
+|  | Qiskit + QCC | 0.936× | 0.837× | 117 ms |
 
-Qiskit's own median in the same run: 36 ms with CX, 40 ms with CZ.
+Qiskit's own median in the same run: 39 ms with CX, 38 ms with CZ.
 
 Two-qubit gates / all gates with CX:
 
@@ -289,6 +289,22 @@ Two-qubit gates / all gates with CX:
   compiled on one thread, as a thread costs as much as their compilation.
   QCC is still slower than Qiskit on the CZ chip's largest circuits (the
   16-qubit Hamiltonian 2.2 s against 0.15 s), where the rounds remain.
+- 0.4.6 makes each round cheaper, again with byte-identical outputs (the
+  same 112 compilations). All the pipelines of one compilation share
+  their two-qubit syntheses (`SynthesisCache` in `core/src/lower.rs`): on
+  the 16-qubit Hamiltonian on the chip with CZ, 17 374 of the 26 156
+  synthesis requests (66%) had been synthesized before by another
+  pipeline or round of the same compilation, 4 341 of 6 251 on
+  Clifford+T. And gathering blocks (`core/src/commuting_blocks.rs`) no
+  longer copies the whole region between two blocks for every cut it
+  tries, nor works out the same range's CX count again for each cut:
+  17–145 ms → 4–45 ms per pipeline there. Against 0.4.5 side by side
+  (best of two medians of five): on the chip with CZ 0.83× in geometric
+  mean (the 16-qubit Hamiltonian 2.14 s → 1.60 s, Clifford+T 16 0.72 s →
+  0.46 s), inside Qiskit with CZ 0.82× (the Hamiltonian 1.38 s →
+  0.97 s), all-to-all with CZ 0.94×; with CX 0.96×, 1.00× and 1.02× (noise,
+  0.8–1.4× on circuits of a few milliseconds). The 16-qubit Hamiltonian
+  with CZ still takes 1.6 s against Qiskit's 0.15 s.
 - QCC now uses more two-qubit gates than Qiskit on one circuit: Quantum
   Volume at 8 qubits (111 against 108, with CX or CZ).
 - On the Hamiltonian, a Pauli network can need more routing than it saves,

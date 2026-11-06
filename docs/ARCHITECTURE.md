@@ -31,7 +31,12 @@ the direct and through-CX compilations below, the Pauli networks beside
 them, SABRE's layout trials, and the routing of each logical candidate on a
 chip. The results come back in the order a loop would produce them, and the
 first of the cheapest is kept, so the output does not depend on the
-threads. For a device whose
+threads. All the pipelines of one compilation share their two-qubit
+syntheses (`SynthesisCache` in `core/src/lower.rs`): the rounds below see
+mostly the same blocks again, and on the 16-qubit Hamiltonian on the
+heavy-hex chip with CZ two thirds of the syntheses had been done before.
+A synthesis depends only on the unitary, its objective and the native
+gates, so sharing them changes no output. For a device whose
 two-qubit gate is CX-like but not CX (CZ, ECR, …), the Rust core also
 compiles for CX first and then for the device, and keeps the cheaper result:
 phase folding sees parities through CNOTs but not through the single-qubit

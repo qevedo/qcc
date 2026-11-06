@@ -4,6 +4,71 @@ One entry per change made by the daily improvement routine: what changed,
 why, what it measured, and what to try next. Numbers come from the scripts
 in `benchmarks/`.
 
+## 2026-11-06 (second change, asked for by the owner) — Shared syntheses and cheaper gathering, the same outputs
+
+**What.** Two exact speed-ups of the pipeline that the CZ rounds repeat:
+
+- `core/src/lower.rs`: `SynthesisCache`, the two-qubit syntheses of one
+  compilation, shared by all its lowerings (one map per set of native
+  gates, behind a mutex, on every thread). `Lowering::sharing` finds and
+  leaves syntheses there; `prefetch_two_qubit` synthesizes only what no
+  pipeline of the compilation has. `compile`, `compile_relabelling` and
+  `compile_for_device` create one per call, and `passes.rs` and
+  `device.rs` pass it down to every pipeline.
+- `core/src/commuting_blocks.rs`: `gather_at` reorders indices into the
+  circuit instead of copies of the region between the two blocks (it
+  copied the region, every qubit's gates, once per cut and split tried),
+  and remembers each range's CX count instead of working it out again for
+  each cut; `crosses` reads the gates it crosses by reference.
+  `pair_matrix` (`passes.rs`) is `Block::matrix` on borrowed gates, with
+  the same products in the same order.
+
+New test: `lower::tests::shared_syntheses_are_found_by_other_lowerings_
+and_change_nothing`; `candidates_side_by_side_choose_as_one_after_the_
+other` now runs every candidate through one cache shared with the earlier
+circuits, against a reference that gives each pipeline its own.
+
+**Why.** Picking up "Next" item 1 of the entry below (the CZ rounds' time).
+Instrumenting the 16-qubit Hamiltonian on the CZ chip showed eight rounds
+of 150–270 ms each, with the four cores already saturated, so only less
+work helps. Two thirds of the syntheses (17 374 of 26 156, keyed by
+unitary bits, objective and native gates) repeated one an earlier
+pipeline or round had done, as most blocks come back unchanged, and
+`gather_blocks` was the largest serial stage (17–145 ms per pipeline,
+more than block resynthesis). Both can be made cheaper without changing
+any choice. A one-pass CX → CZ translation would remove rounds, but it
+changes outputs, and the measurements show why it is hard: the
+through-CX candidate wins nearly every round on CZs while leaving 100–600
+more single-qubit gates than the direct one (round 7: 1292 / 4572 against
+1293 / 4451).
+
+**Measured** (4-vCPU Xeon VM). Outputs: the 112 benchmark compilations
+are byte-identical to 0.4.4's (and so to 0.4.5's); `check.py` passes;
+`device.py`, a complete run, records the same gate counts, every state
+checked. Time, 0.4.5 and 0.4.6 side by side, best of two medians of five,
+geometric mean: on the chip with CZ 0.83× (0.65–0.99×), inside Qiskit
+with CZ 0.82×, all-to-all with CZ 0.94×; with CX 0.96× on the chip, 1.00×
+inside Qiskit and 1.02× all-to-all, noise (0.8–1.4× on circuits of a few
+milliseconds). The 16-qubit Hamiltonian: on the CZ chip 2137 → 1601 ms,
+inside Qiskit with CZ 1376 → 972 ms; Clifford+T 16 on the CZ chip 716 →
+462 ms. `gather_blocks` there: 17–145 ms → 4–45 ms per pipeline.
+`device.py` medians: QCC 41 ms with CX and 113 ms with CZ, Qiskit 39 and
+38 ms in the same run.
+
+**Learned.** With every core busy, the critical path does not set the
+time: work removed anywhere counts. Sharing also lets later rounds skip
+the threads of `prefetch_two_qubit` when fewer than 32 syntheses remain.
+
+**Next.**
+1. The rounds still cost most of the CZ time (1.6 s against Qiskit's
+   0.15 s): the through-CX candidate's extra single-qubit gates (100–600
+   per round) are what the next round folds; a better translation back to
+   CZ, or a final direct pass kept only when cheaper, could end the rounds
+   sooner without a worse result.
+2. Quantum Volume all-to-all (142 ms against Qiskit's 61 at 32 qubits):
+   the serial passes, where instructions allocate four times per copy.
+3. Quantum Volume 8 on the chip: 111 two-qubit gates against Qiskit's 108.
+
 ## 2026-11-06 — Independent candidates side by side, the same outputs
 
 **What.** `core/src/parallel.rs` (new): `map_ordered` and `join` run

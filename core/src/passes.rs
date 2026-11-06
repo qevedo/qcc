@@ -7,7 +7,7 @@ use crate::commuting_blocks::gather_blocks;
 use crate::gates::{is_known_gate, matrix_1q, matrix_2q, signature};
 use crate::ir::{Instruction, NON_GATES, cost};
 use crate::linalg::{M2, M4, kron};
-use crate::lower::Lowering;
+use crate::lower::{Lowering, SynthesisCache};
 use crate::one_qubit::{Basis1q, count_1q, remainder, synthesize_1q};
 use crate::permutation::measured_out;
 use crate::phase_folding::phase_folding;
@@ -357,27 +357,36 @@ pub(crate) struct Block {
 impl Block {
     /// The block's unitary, with `pair[0]` as the most significant qubit.
     pub(crate) fn matrix(&self) -> Option<M4> {
-        let mut out = M4::IDENTITY;
-        for inst in &self.instructions {
-            let m = if inst.qubits.len() == 1 {
-                let g = matrix_1q(&inst.name, &inst.params)?;
-                if inst.qubits[0] == self.pair[0] {
-                    kron(&g, &M2::IDENTITY)
-                } else {
-                    kron(&M2::IDENTITY, &g)
-                }
-            } else {
-                let g = matrix_2q(&inst.name, &inst.params)?;
-                if inst.qubits[0] == self.pair[0] {
-                    g
-                } else {
-                    g.swapped()
-                }
-            };
-            out = m * out;
-        }
-        Some(out)
+        pair_matrix(self.pair, &self.instructions)
     }
+}
+
+/// The unitary of `instructions`, all on the qubits of `pair`, with
+/// `pair[0]` as the most significant qubit; None if one has no matrix.
+pub(crate) fn pair_matrix<'a>(
+    pair: [usize; 2],
+    instructions: impl IntoIterator<Item = &'a Instruction>,
+) -> Option<M4> {
+    let mut out = M4::IDENTITY;
+    for inst in instructions {
+        let m = if inst.qubits.len() == 1 {
+            let g = matrix_1q(&inst.name, &inst.params)?;
+            if inst.qubits[0] == pair[0] {
+                kron(&g, &M2::IDENTITY)
+            } else {
+                kron(&M2::IDENTITY, &g)
+            }
+        } else {
+            let g = matrix_2q(&inst.name, &inst.params)?;
+            if inst.qubits[0] == pair[0] {
+                g
+            } else {
+                g.swapped()
+            }
+        };
+        out = m * out;
+    }
+    Some(out)
 }
 
 enum Item {
@@ -723,7 +732,7 @@ pub fn compile(
     native: impl IntoIterator<Item = String>,
 ) -> Result<Vec<Instruction>, String> {
     let native: Vec<String> = native.into_iter().collect();
-    on_the_same_pairs(&instructions, &native)
+    on_the_same_pairs(&instructions, &native, &SynthesisCache::new())
 }
 
 /// [`compile`] on borrowed instructions, as device compilation runs it on the
@@ -731,9 +740,10 @@ pub fn compile(
 pub(crate) fn on_the_same_pairs(
     instructions: &[Instruction],
     native: &[String],
+    cache: &SynthesisCache,
 ) -> Result<Vec<Instruction>, String> {
-    let (out, _) = best_pipeline(instructions, native, Relabel::Never, false, true)?;
-    until_fixed_point(out, native)
+    let (out, _) = best_pipeline(instructions, native, Relabel::Never, false, true, cache)?;
+    until_fixed_point(out, native, cache)
 }
 
 /// How many times at most [`until_fixed_point`] runs the pipeline again.
@@ -759,12 +769,13 @@ const MAX_ROUNDS: usize = 8;
 fn until_fixed_point(
     mut out: Vec<Instruction>,
     native: &[String],
+    cache: &SynthesisCache,
 ) -> Result<Vec<Instruction>, String> {
     if through_cx(native).is_none() {
         return Ok(out);
     }
     for _ in 0..MAX_ROUNDS {
-        let (next, _) = best_pipeline(&out, native, Relabel::Never, false, true)?;
+        let (next, _) = best_pipeline(&out, native, Relabel::Never, false, true, cache)?;
         if cost(&next) >= cost(&out) {
             break;
         }
@@ -800,8 +811,9 @@ pub fn compile_relabelling(
     relabel: Relabel,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let native: Vec<String> = native.into_iter().collect();
-    let (out, wires) = best_pipeline(&instructions, &native, relabel, true, true)?;
-    Ok((until_fixed_point(out, &native)?, wires))
+    let cache = SynthesisCache::new();
+    let (out, wires) = best_pipeline(&instructions, &native, relabel, true, true, &cache)?;
+    Ok((until_fixed_point(out, &native, &cache)?, wires))
 }
 
 /// The cheapest of [`pipeline`], for CX-like devices [`pipeline`] through
@@ -816,12 +828,13 @@ pub(crate) fn best_pipeline(
     relabel: Relabel,
     new_pairs: bool,
     last: bool,
+    cache: &SynthesisCache,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let permute = relabel != Relabel::Never;
     let lowered = new_pairs
         .then(|| lowered_for_network(instructions, native))
         .flatten();
-    let (candidates, network) = beside_network(instructions, native, lowered, permute, last);
+    let (candidates, network) = beside_network(instructions, native, lowered, permute, last, cache);
     let mut candidates = candidates?;
     candidates.extend(network.filter(|network| network_pays(network, &candidates)));
     let allowed = |(out, wires): &(Vec<Instruction>, Vec<usize>)| {
@@ -835,7 +848,7 @@ pub(crate) fn best_pipeline(
         .min_by_key(|(out, _)| cost(out))
     {
         Some(best) => Ok(best),
-        None => best_pipeline(instructions, native, Relabel::Never, new_pairs, last),
+        None => best_pipeline(instructions, native, Relabel::Never, new_pairs, last, cache),
     }
 }
 
@@ -849,9 +862,10 @@ pub(crate) fn with_and_without_network(
     instructions: &[Instruction],
     native: &[String],
     last: bool,
+    cache: &SynthesisCache,
 ) -> Result<Vec<Candidate>, String> {
     let lowered = lowered_for_network(instructions, native);
-    let (candidates, network) = beside_network(instructions, native, lowered, true, last);
+    let (candidates, network) = beside_network(instructions, native, lowered, true, last, cache);
     let candidates = candidates?;
     let network = network.filter(|network| network_pays(network, &candidates));
     let best = candidates
@@ -881,14 +895,18 @@ fn beside_network(
     lowered: Option<Vec<Instruction>>,
     permute: bool,
     last: bool,
+    cache: &SynthesisCache,
 ) -> (Result<Vec<Candidate>, String>, Option<Candidate>) {
     match lowered {
         Some(lowered) => crate::parallel::join_if(
             instructions.len() >= SIDE_BY_SIDE_MIN,
-            || direct_candidates(instructions, native, permute, last),
-            || through_pauli_network(&lowered, native, permute, last),
+            || direct_candidates(instructions, native, permute, last, cache),
+            || through_pauli_network(&lowered, native, permute, last, cache),
         ),
-        None => (direct_candidates(instructions, native, permute, last), None),
+        None => (
+            direct_candidates(instructions, native, permute, last, cache),
+            None,
+        ),
     }
 }
 
@@ -900,17 +918,18 @@ fn direct_candidates(
     native: &[String],
     permute: bool,
     last: bool,
+    cache: &SynthesisCache,
 ) -> Result<Vec<Candidate>, String> {
     let Some(via) = through_cx(native) else {
-        return Ok(vec![pipeline(instructions, native, permute, last)?]);
+        return Ok(vec![pipeline(instructions, native, permute, last, cache)?]);
     };
     let (direct, through) = crate::parallel::join_if(
         instructions.len() >= SIDE_BY_SIDE_MIN,
-        || pipeline(instructions, native, permute, last),
+        || pipeline(instructions, native, permute, last, cache),
         || {
-            let (middle, first) = pipeline(instructions, &via, permute, false).ok()?;
+            let (middle, first) = pipeline(instructions, &via, permute, false, cache).ok()?;
             Some(
-                pipeline(&middle, native, permute, last).map(|(out, second)| {
+                pipeline(&middle, native, permute, last, cache).map(|(out, second)| {
                     let wires = first
                         .iter()
                         .map(|&w| second.get(w).copied().unwrap_or(w))
@@ -947,10 +966,11 @@ fn through_pauli_network(
     native: &[String],
     permute: bool,
     last: bool,
+    cache: &SynthesisCache,
 ) -> Option<(Vec<Instruction>, Vec<usize>)> {
     let trial = |seed: u64| -> Option<(Vec<Instruction>, Vec<usize>)> {
         let (network, first) = crate::pauli_network::synthesize_seeded(lowered, permute, seed)?;
-        let (out, second) = pipeline(&network, native, permute, last).ok()?;
+        let (out, second) = pipeline(&network, native, permute, last, cache).ok()?;
         let wires = first
             .iter()
             .map(|&w| second.get(w).copied().unwrap_or(w))
@@ -1025,8 +1045,9 @@ fn pipeline(
     native: &[String],
     permute: bool,
     last: bool,
+    cache: &SynthesisCache,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
-    let mut lowering = Lowering::new(native.iter().cloned());
+    let mut lowering = Lowering::sharing(native.iter().cloned(), cache);
     let mut current = Vec::with_capacity(instructions.len());
     for inst in instructions {
         current.extend(lowering.lower(inst)?);
@@ -1148,7 +1169,8 @@ mod tests {
             for _ in 0..30 {
                 let circuit = random_circuit(&mut rng, 4, 40);
                 let (once, _) =
-                    best_pipeline(&circuit, &native, Relabel::Never, false, true).unwrap();
+                    best_pipeline(&circuit, &native, Relabel::Never, false, true, &fresh())
+                        .unwrap();
                 let out = compile(circuit.clone(), native.clone()).unwrap();
                 assert!(dense_equal_up_to_phase(
                     &circuit_unitary(&out, 4),
@@ -1364,7 +1386,7 @@ mod tests {
                 1e-7
             ));
             // No more two-qubit gates, nor gates in all, than without it.
-            let (direct, _) = pipeline(&circuit, &native, true, true).unwrap();
+            let (direct, _) = pipeline(&circuit, &native, true, true, &fresh()).unwrap();
             let ((two, all), (direct_two, direct_all)) = (cost(&out), cost(&direct));
             assert!(two <= direct_two && all <= direct_all);
             kept += usize::from(two < direct_two);
@@ -1375,24 +1397,30 @@ mod tests {
         assert!(kept >= 6, "the network was kept {kept} times in 12");
     }
 
+    /// A cache of syntheses no other pipeline has filled.
+    fn fresh() -> SynthesisCache {
+        SynthesisCache::new()
+    }
+
     /// The candidates of [`best_pipeline`] one after the other, as it chose
-    /// among them before they ran side by side.
+    /// among them before they ran side by side, each pipeline with a cache
+    /// of its own (as before syntheses were shared).
     fn best_pipeline_serially(
         instructions: &[Instruction],
         native: &[String],
         new_pairs: bool,
     ) -> (Vec<Instruction>, Vec<usize>) {
-        let mut candidates = vec![pipeline(instructions, native, true, false).unwrap()];
+        let mut candidates = vec![pipeline(instructions, native, true, false, &fresh()).unwrap()];
         if let Some(via) = through_cx(native) {
-            let (middle, first) = pipeline(instructions, &via, true, false).unwrap();
-            let (out, second) = pipeline(&middle, native, true, false).unwrap();
+            let (middle, first) = pipeline(instructions, &via, true, false, &fresh()).unwrap();
+            let (out, second) = pipeline(&middle, native, true, false, &fresh()).unwrap();
             let wires = first.iter().map(|&w| second[w]).collect();
             candidates.push((out, wires));
         }
         if new_pairs {
             let best = candidates.iter().map(|(out, _)| cost(out)).min().unwrap();
             let network = lowered_for_network(instructions, native)
-                .and_then(|lowered| through_pauli_network(&lowered, native, true, false));
+                .and_then(|lowered| through_pauli_network(&lowered, native, true, false, &fresh()));
             if let Some(network) = network {
                 let (two, all) = cost(&network.0);
                 if two <= best.0 && all <= best.1 {
@@ -1410,6 +1438,9 @@ mod tests {
     fn candidates_side_by_side_choose_as_one_after_the_other() {
         let mut rng = Rng::new(31);
         let mut networks = 0;
+        // One cache for everything compiled here, as in a compilation: what
+        // earlier circuits left in it must change nothing.
+        let shared = SynthesisCache::new();
         for native in [
             natives(&["rz", "sx", "x", "cx"]),
             natives(&["rz", "sx", "x", "cz"]),
@@ -1425,8 +1456,15 @@ mod tests {
                 let without = best_pipeline_serially(&circuit, &native, false);
                 let with = best_pipeline_serially(&circuit, &native, true);
                 for (new_pairs, expected) in [(false, &without), (true, &with)] {
-                    let got = best_pipeline(&circuit, &native, Relabel::Always, new_pairs, false)
-                        .unwrap();
+                    let got = best_pipeline(
+                        &circuit,
+                        &native,
+                        Relabel::Always,
+                        new_pairs,
+                        false,
+                        &shared,
+                    )
+                    .unwrap();
                     assert_eq!(&got, expected);
                 }
                 // What device compilation routes: the first, and the second
@@ -1437,7 +1475,7 @@ mod tests {
                     networks += 1;
                 }
                 assert_eq!(
-                    with_and_without_network(&circuit, &native, false).unwrap(),
+                    with_and_without_network(&circuit, &native, false, &shared).unwrap(),
                     expected
                 );
             }

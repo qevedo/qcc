@@ -11,7 +11,7 @@
 use crate::gates::matrix_2q;
 use crate::ir::{Instruction, cost};
 use crate::linalg::{M2, equal_up_to_phase4, kron};
-use crate::lower::Lowering;
+use crate::lower::{Lowering, SynthesisCache};
 use crate::passes::{merge_single_qubit_runs, on_the_same_pairs, with_and_without_network};
 use crate::routing::{CouplingGraph, SabreOptions, layout_and_route};
 use crate::two_qubit::kak;
@@ -61,6 +61,9 @@ pub fn compile_for_device(
 ) -> Result<DeviceCircuit, String> {
     let native: Vec<String> = native.into_iter().collect();
     let graph = CouplingGraph::new(device.qubits, device.edges)?;
+    // One cache of two-qubit syntheses for every pipeline below: on logical
+    // qubits, then on each candidate's physical qubits, round after round.
+    let cache = SynthesisCache::new();
     let logical = instructions
         .iter()
         .flat_map(|i| i.qubits.iter().map(|&q| q + 1))
@@ -79,7 +82,7 @@ pub fn compile_for_device(
         .all(|i| coupled(i.qubits[0], i.qubits[1]));
     if routed_already {
         let identity: Vec<usize> = (0..logical).collect();
-        let out = on_physical_qubits(&instructions, &native, device)?;
+        let out = on_physical_qubits(&instructions, &native, device, &cache)?;
         return Ok(DeviceCircuit {
             instructions: out,
             initial_layout: identity.clone(),
@@ -89,7 +92,7 @@ pub fn compile_for_device(
     // On logical qubits, where relabelling is free (the final layout reports
     // it). A Pauli network can need far more routing than it saves, so a
     // result with one is routed next to one without, and the cheaper kept.
-    let logical_candidates = with_and_without_network(&instructions, &native, false)?;
+    let logical_candidates = with_and_without_network(&instructions, &native, false, &cache)?;
     // Each candidate is routed and optimized on the chip's qubits on its own
     // thread (the rounds of `until_fixed_point` make that most of the time
     // for CZ), and the cheapest kept: the first on ties, as in a loop.
@@ -99,7 +102,7 @@ pub fn compile_for_device(
         let final_layout: Vec<usize> = (0..logical)
             .map(|q| routed.final_layout[moved.get(q).copied().unwrap_or(q)])
             .collect();
-        let out = on_physical_qubits(&routed.instructions, &native, device)?;
+        let out = on_physical_qubits(&routed.instructions, &native, device, &cache)?;
         Ok::<_, String>(DeviceCircuit {
             instructions: out,
             initial_layout: routed.initial_layout,
@@ -126,8 +129,9 @@ fn on_physical_qubits(
     physical: &[Instruction],
     native: &[String],
     device: &Device,
+    cache: &SynthesisCache,
 ) -> Result<Vec<Instruction>, String> {
-    let mut out = on_the_same_pairs(physical, native)?;
+    let mut out = on_the_same_pairs(physical, native, cache)?;
     if device.directed {
         let allowed: HashSet<(usize, usize)> = device.edges.iter().copied().collect();
         out = turn_around(out, &allowed, native);

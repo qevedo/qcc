@@ -35,7 +35,7 @@
 use crate::gates::{is_known_gate, matrix_1q, matrix_2q};
 use crate::ir::Instruction;
 use crate::linalg::{C, M4};
-use crate::passes::Block;
+use crate::passes::pair_matrix;
 use crate::two_qubit::cx_count;
 
 /// How many blockers a pair of gates may have between them: more are rarely
@@ -150,16 +150,20 @@ fn gather_at(insts: &mut Vec<Instruction>, i: usize, permute: bool) -> Option<us
     let start = run_end(&mut (0..h).rev(), insts).unwrap_or(h);
     let end = run_end(&mut (i + 1..insts.len()), insts).unwrap_or(i);
     let is_member = |k: usize| touches(&insts[k], pair) && !blockers.contains(&k);
-    let members = |range: std::ops::Range<usize>| -> Vec<Instruction> {
-        range
-            .filter(|&k| is_member(k))
-            .map(|k| insts[k].clone())
-            .collect()
-    };
+    // Each cut's cost is that of three ranges, and the cuts share their
+    // outer ranges: each range's cost is worked out once (its unitary and
+    // CX count are the same every time, so remembering them changes no
+    // choice).
+    let costs = std::cell::RefCell::new(std::collections::HashMap::new());
     let cost = |range: std::ops::Range<usize>| -> Option<usize> {
-        let instructions = members(range);
-        let m = Block { pair, instructions }.matrix()?;
-        Some(cx_cost(&m, permute))
+        let key = (range.start, range.end);
+        if let Some(&known) = costs.borrow().get(&key) {
+            return known;
+        }
+        let members = range.filter(|&k| is_member(k)).map(|k| &insts[k]);
+        let known = pair_matrix(pair, members).map(|m| cx_cost(&m, permute));
+        costs.borrow_mut().insert(key, known);
+        known
     };
     // The blockers may stop anywhere in the two runs: the gathered block
     // starts before member `first` of the run that ends at h and ends after
@@ -167,19 +171,21 @@ fn gather_at(insts: &mut Vec<Instruction>, i: usize, permute: bool) -> Option<us
     // stays a block of its own. Blockers moved only across h and i have
     // the fewest gates to commute with; across the whole runs, the joined
     // block is largest. The region with the first `split` blockers moved
-    // left and the others right, for the first split that can move.
-    let region: Vec<(usize, Instruction)> =
-        (start..end + 1).map(|k| (k, insts[k].clone())).collect();
-    let moved = |first: usize, last: usize| -> Option<Vec<(usize, Instruction)>> {
+    // left and the others right, for the first split that can move. The
+    // region is the circuit's indices from start to end, reordered: moving
+    // gates changes only their order, so no instruction is copied until the
+    // chosen order replaces the region.
+    let region: Vec<usize> = (start..end + 1).collect();
+    let moved = |first: usize, last: usize| -> Option<Vec<usize>> {
         (0..=blockers.len()).rev().find_map(|split| {
             let mut work = region.clone();
             for &b in &blockers[..split] {
-                if !move_blocker(&mut work, b, first, pair, true) {
+                if !move_blocker(&mut work, insts, b, first, pair, true) {
                     return None;
                 }
             }
             for &b in blockers[split..].iter().rev() {
-                if !move_blocker(&mut work, b, last, pair, false) {
+                if !move_blocker(&mut work, insts, b, last, pair, false) {
                     return None;
                 }
             }
@@ -190,10 +196,7 @@ fn gather_at(insts: &mut Vec<Instruction>, i: usize, permute: bool) -> Option<us
     // Quantum Volume's generic blocks, never): stop before any synthesis or
     // copying. The gates they carry do not change what they cross.
     let crossing = |p: usize, range: std::ops::Range<usize>| {
-        let crossed = range
-            .filter(|&k| is_member(k))
-            .map(|k| insts[k].clone())
-            .collect();
+        let crossed = range.filter(|&k| is_member(k)).map(|k| &insts[k]).collect();
         crosses(&insts[p], crossed, pair)
     };
     (0..=blockers.len()).find(|&split| {
@@ -204,7 +207,7 @@ fn gather_at(insts: &mut Vec<Instruction>, i: usize, permute: bool) -> Option<us
     let firsts: Vec<usize> = (start..h + 1).filter(|&k| is_member(k)).collect();
     let lasts: Vec<usize> = (i..end + 1).filter(|&k| is_member(k)).collect();
     // The cheapest cut, the widest on ties.
-    let mut best: Option<(usize, Vec<(usize, Instruction)>)> = None;
+    let mut best: Option<(usize, Vec<usize>)> = None;
     for &first in firsts.iter().skip(firsts.len().saturating_sub(CUTS)) {
         for &last in lasts.iter().take(CUTS).rev() {
             let total = cost(start..first)? + cost(first..last + 1)? + cost(last + 1..end + 1)?;
@@ -217,36 +220,34 @@ fn gather_at(insts: &mut Vec<Instruction>, i: usize, permute: bool) -> Option<us
         }
     }
     let (_, work) = best?;
-    let g = start
-        + work
-            .iter()
-            .position(|(k, _)| *k == i)
-            .expect("the gate itself");
-    insts.splice(start..end + 1, work.into_iter().map(|(_, x)| x));
+    let g = start + work.iter().position(|&k| k == i).expect("the gate itself");
+    let gathered: Vec<Instruction> = work.iter().map(|&k| insts[k].clone()).collect();
+    insts.splice(start..end + 1, gathered);
     Some(g + 1)
 }
 
-/// Move the blocker with index `blocker` in `work` (instructions tagged with
-/// their index in the circuit) to just before the instruction tagged
-/// `anchor`, or just after it if not `leftward`. It must commute with the
-/// product of the gates on `pair` it crosses. The gates on its other qubit
-/// that it depends on (or that depend on it, moving right), and in turn on
-/// theirs, move with it: they share no qubit with the gates they cross, so
-/// only the order of the list changes for them, not the circuit.
+/// Move the blocker with index `blocker` in `work` (indices into `insts`,
+/// in their current order) to just before the instruction `anchor`, or
+/// just after it if not `leftward`. It must commute with the product of the
+/// gates on `pair` it crosses. The gates on its other qubit that it depends
+/// on (or that depend on it, moving right), and in turn on theirs, move with
+/// it: they share no qubit with the gates they cross, so only the order of
+/// the list changes for them, not the circuit.
 fn move_blocker(
-    work: &mut Vec<(usize, Instruction)>,
+    work: &mut Vec<usize>,
+    insts: &[Instruction],
     blocker: usize,
     anchor: usize,
     pair: [usize; 2],
     leftward: bool,
 ) -> bool {
-    let position = |work: &[(usize, Instruction)], tag: usize| {
+    let position = |work: &[usize], tag: usize| {
         work.iter()
-            .position(|(k, _)| *k == tag)
-            .expect("a tagged instruction")
+            .position(|&k| k == tag)
+            .expect("an index of the region")
     };
     let (p, a) = (position(work, blocker), position(work, anchor));
-    let gate = work[p].1.clone();
+    let gate = &insts[blocker];
     let mut reach: Vec<usize> = gate
         .qubits
         .iter()
@@ -261,12 +262,12 @@ fn move_blocker(
         (p + 1..a + 1).collect()
     };
     for k in range {
-        let x = &work[k].1;
+        let x = &insts[work[k]];
         if touches(x, pair) {
             if !on_pair(x, pair) {
                 return false;
             }
-            crossed.push(x.clone());
+            crossed.push(x);
         } else if x.qubits.iter().any(|q| reach.contains(q)) {
             if !x.is_gate() {
                 return false;
@@ -278,16 +279,16 @@ fn move_blocker(
     if leftward {
         crossed.reverse();
     }
-    if !crosses(&gate, crossed, pair) {
+    if !crosses(gate, crossed, pair) {
         return false;
     }
     carried.sort_unstable();
-    let group: Vec<(usize, Instruction)> = carried.iter().map(|&k| work[k].clone()).collect();
-    let mut rest: Vec<(usize, Instruction)> = work
+    let group: Vec<usize> = carried.iter().map(|&k| work[k]).collect();
+    let mut rest: Vec<usize> = work
         .iter()
         .enumerate()
         .filter(|(k, _)| !carried.contains(k))
-        .map(|(_, x)| x.clone())
+        .map(|(_, &x)| x)
         .collect();
     let at = position(&rest, anchor) + usize::from(!leftward);
     rest.splice(at..at, group);
@@ -309,7 +310,7 @@ fn cx_cost(m: &M4, permute: bool) -> usize {
 
 /// Whether `blocker`, which touches one qubit of `pair`, commutes with the
 /// product of `crossed`, gates on `pair` in time order.
-fn crosses(blocker: &Instruction, crossed: Vec<Instruction>, pair: [usize; 2]) -> bool {
+fn crosses(blocker: &Instruction, crossed: Vec<&Instruction>, pair: [usize; 2]) -> bool {
     let Some(shared) = blocker.qubits.iter().find(|q| pair.contains(q)).copied() else {
         return false;
     };
@@ -320,11 +321,7 @@ fn crosses(blocker: &Instruction, crossed: Vec<Instruction>, pair: [usize; 2]) -
     if !crossed.iter().any(|x| x.qubits.contains(&shared)) {
         return true;
     }
-    let Some(s) = (Block {
-        pair,
-        instructions: crossed,
-    })
-    .matrix() else {
+    let Some(s) = pair_matrix(pair, crossed) else {
         return false;
     };
     let unshared = if pair[0] == shared { pair[1] } else { pair[0] };

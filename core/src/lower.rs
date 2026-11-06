@@ -9,6 +9,7 @@ use crate::passes::merge_single_qubit_runs;
 use crate::two_qubit::{Objective, Step, TwoQubitBasis, TwoQubitSynth, bases_2q};
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// A gate of a definition: name, parameters and operand indices, in time order.
 type Body = Vec<(&'static str, Vec<f64>, Vec<usize>)>;
@@ -162,7 +163,45 @@ pub struct Lowering {
     bases_2q: Vec<TwoQubitBasis>,
     synth: TwoQubitSynth,
     memo: HashMap<(String, Vec<u64>, usize), Vec<Instruction>>,
-    memo_2q: HashMap<([u64; 32], Objective), Vec<Instruction>>,
+    memo_2q: Memo2q,
+    /// The syntheses of every lowering of the same compilation for the same
+    /// native gates, when it shares them ([`Lowering::sharing`]).
+    shared: Option<SharedMemo2q>,
+}
+
+/// Two-qubit syntheses by the bits of their unitary and their objective.
+type Memo2q = HashMap<([u64; 32], Objective), Vec<Instruction>>;
+
+/// A [`Memo2q`] that the threads of a compilation share.
+type SharedMemo2q = Arc<Mutex<Memo2q>>;
+
+/// The two-qubit syntheses of one compilation, shared by all its
+/// lowerings, on every thread, for each set of native gates.
+///
+/// A compilation runs the pipeline many times on circuits that differ
+/// little: for CZ devices the direct pipeline and the one through CX, round
+/// after round (`until_fixed_point` in `passes.rs`), on each logical
+/// candidate of a chip. Most blocks come back with the same unitary to the
+/// bit: on the 16-qubit Hamiltonian on the heavy-hex chip with CZ, 17 374
+/// of 26 156 synthesis requests (66%) had been synthesized before in the
+/// same compilation, each by a fresh lowering. A synthesis depends only on
+/// the unitary, the objective and the native gates (its own caches hold
+/// per-gate data), so remembering it across lowerings changes no output.
+#[derive(Clone, Default)]
+pub struct SynthesisCache(Arc<Mutex<HashMap<Vec<String>, SharedMemo2q>>>);
+
+impl SynthesisCache {
+    pub fn new() -> SynthesisCache {
+        SynthesisCache::default()
+    }
+
+    /// The syntheses for `native`, created empty the first time.
+    fn for_native(&self, native: &HashSet<String>) -> SharedMemo2q {
+        let mut key: Vec<String> = native.iter().cloned().collect();
+        key.sort();
+        let mut all = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        all.entry(key).or_default().clone()
+    }
 }
 
 impl Lowering {
@@ -175,6 +214,33 @@ impl Lowering {
             synth: TwoQubitSynth::new(),
             memo: HashMap::new(),
             memo_2q: HashMap::new(),
+            shared: None,
+        }
+    }
+
+    /// [`Lowering::new`], finding and leaving its two-qubit syntheses in
+    /// `cache`, with every other lowering of the compilation that shares it.
+    pub fn sharing(native: impl IntoIterator<Item = String>, cache: &SynthesisCache) -> Lowering {
+        let mut lowering = Lowering::new(native);
+        lowering.shared = Some(cache.for_native(&lowering.native));
+        lowering
+    }
+
+    /// The shared synthesis of `key`, if another lowering made it.
+    fn shared_2q(&self, key: &([u64; 32], Objective)) -> Option<Vec<Instruction>> {
+        let shared = self.shared.as_ref()?;
+        let memo = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        memo.get(key).cloned()
+    }
+
+    /// Leave `synthesized` in the shared cache, if there is one.
+    fn share_2q(
+        &self,
+        synthesized: impl IntoIterator<Item = (([u64; 32], Objective), Vec<Instruction>)>,
+    ) {
+        if let Some(shared) = &self.shared {
+            let mut memo = shared.lock().unwrap_or_else(PoisonError::into_inner);
+            memo.extend(synthesized);
         }
     }
 
@@ -284,7 +350,14 @@ impl Lowering {
     ) -> Result<Vec<Instruction>, String> {
         let key = (key_2q(m), objective);
         if !self.memo_2q.contains_key(&key) {
-            let lowered = self.two_qubit_new(m, objective)?;
+            let lowered = match self.shared_2q(&key) {
+                Some(lowered) => lowered,
+                None => {
+                    let lowered = self.two_qubit_new(m, objective)?;
+                    self.share_2q([(key, lowered.clone())]);
+                    lowered
+                }
+            };
             self.memo_2q.insert(key, lowered);
         }
         Ok(self.memo_2q[&key]
@@ -318,6 +391,18 @@ impl Lowering {
             .map(|(m, objective)| ((key_2q(m), *objective), *m))
             .filter(|(key, _)| !self.memo_2q.contains_key(key) && seen.insert(*key))
             .collect();
+        // What other lowerings of the compilation synthesized already.
+        let mut todo = todo;
+        if let Some(shared) = &self.shared {
+            let memo = shared.lock().unwrap_or_else(PoisonError::into_inner);
+            todo.retain(|(key, _)| match memo.get(key) {
+                Some(known) => {
+                    self.memo_2q.insert(*key, known.clone());
+                    false
+                }
+                None => true,
+            });
+        }
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
         if todo.len() < PARALLEL_MIN || threads < 2 || cfg!(target_arch = "wasm32") {
             return;
@@ -351,11 +436,13 @@ impl Lowering {
                 .map(|h| h.join().expect("a synthesis thread"))
                 .collect()
         });
-        for (key, out) in results.into_iter().flatten() {
-            if let Ok(out) = out {
-                self.memo_2q.insert(key, out);
-            }
-        }
+        let synthesized: Vec<_> = results
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, out)| Some((key, out.ok()?)))
+            .collect();
+        self.share_2q(synthesized.iter().cloned());
+        self.memo_2q.extend(synthesized);
     }
 }
 
@@ -427,4 +514,47 @@ fn bad_params(inst: &Instruction) -> String {
         inst.name,
         inst.params.len()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{RandomUnitary, Rng};
+
+    #[test]
+    fn shared_syntheses_are_found_by_other_lowerings_and_change_nothing() {
+        let mut rng = Rng::new(41);
+        let unitaries: Vec<M4> = (0..40).map(|_| rng.unitary4()).collect();
+        let requests: Vec<(M4, Objective)> = unitaries
+            .iter()
+            .flat_map(|m| [(*m, Objective::Alone), (*m, Objective::InCircuit)])
+            .collect();
+        for native in [["rz", "sx", "x", "cz"], ["rz", "sx", "x", "cx"]] {
+            let native = || native.iter().map(|g| g.to_string());
+            let cache = SynthesisCache::new();
+            // The first lowering synthesizes (on all cores), the second only
+            // finds; a third without the cache synthesizes everything again.
+            let mut first = Lowering::sharing(native(), &cache);
+            first.prefetch_two_qubit(&requests);
+            let mut second = Lowering::sharing(native(), &cache);
+            let mut alone = Lowering::new(native());
+            for (m, objective) in &requests {
+                let key = (key_2q(m), *objective);
+                assert!(second.shared_2q(&key).is_some());
+                let expected = alone.two_qubit(m, [1, 0], *objective).unwrap();
+                assert_eq!(first.two_qubit(m, [1, 0], *objective).unwrap(), expected);
+                assert_eq!(second.two_qubit(m, [1, 0], *objective).unwrap(), expected);
+            }
+        }
+        // Each set of native gates has its own syntheses.
+        let cache = SynthesisCache::new();
+        let mut cz = Lowering::sharing(["rz", "sx", "x", "cz"].map(String::from), &cache);
+        cz.two_qubit(&unitaries[0], [0, 1], Objective::Alone)
+            .unwrap();
+        let cx = Lowering::sharing(["rz", "sx", "x", "cx"].map(String::from), &cache);
+        assert!(
+            cx.shared_2q(&(key_2q(&unitaries[0]), Objective::Alone))
+                .is_none()
+        );
+    }
 }
