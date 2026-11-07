@@ -4,6 +4,10 @@ One entry per change made by the daily improvement routine: what changed,
 why, what it measured, and what to try next. Numbers come from the scripts
 in `benchmarks/`.
 
+See [experiments.md](experiments.md) for the short index: what worked, what
+didn't (and why), what was considered, and the current next steps. Read it
+before choosing a change, and update it in the same commit.
+
 ## 2026-11-07 — Pauli-network trials judged one by one, and four that charge more for local Cliffords
 
 **What.** `core/src/passes.rs`: the Pauli network's trials are no longer
