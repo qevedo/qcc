@@ -196,16 +196,20 @@ are, the Rust core also synthesizes the circuit again from scratch
 4. The greedy choice is blind between gates that do about as well, so eight
    syntheses run side by side (one thread each), seven of them breaking
    those ties with seeded noise, as pytket's GreedyPauliSimp does with
-   `trials`; the cheapest after the pipeline is kept, the same on any
-   machine.
+   `trials`. Four more charge ten times as much for each local Clifford a
+   candidate CX needs (a tenth of a weight instead of a hundredth), which
+   gives up a few CXs for fewer single-qubit gates. Each trial, after the
+   pipeline, is judged against the direct compilation on its own, and the
+   first of the cheapest that pays is kept, the same on any machine
+   (`network_trials` and `paying_network` in `core/src/passes.rs`).
 
 It runs only on circuits with three or more CXs per non-Clifford rotation
 (at most 400 rotations) and on all-to-all devices, and its result is kept
 only when it needs no more two-qubit gates and no more gates in all than
 the direct compilation. On one Trotter step of random Hamiltonians QCC then
-uses 44% fewer CXs than Qiskit's level 3 at 8 qubits and 20% at 16, and 38%
-and 19% fewer gates in all; at 32 qubits the network would save 10% of the
-CXs for 2% more gates, and is not kept.
+uses 47.1% fewer CXs than Qiskit's level 3 at 8 qubits, 20.4% at 16 and
+7.2% at 32, and 39.7%, 18.7% and 15.5% fewer gates in all (101 / 286, 313 / 790 and
+687 / 1511 CXs / gates).
 
 ### Multi-core mapping
 

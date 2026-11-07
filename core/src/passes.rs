@@ -834,9 +834,10 @@ pub(crate) fn best_pipeline(
     let lowered = new_pairs
         .then(|| lowered_for_network(instructions, native))
         .flatten();
-    let (candidates, network) = beside_network(instructions, native, lowered, permute, last, cache);
+    let (candidates, networks) =
+        beside_network(instructions, native, lowered, permute, last, cache);
     let mut candidates = candidates?;
-    candidates.extend(network.filter(|network| network_pays(network, &candidates)));
+    candidates.extend(paying_network(networks, &candidates));
     let allowed = |(out, wires): &(Vec<Instruction>, Vec<usize>)| {
         let moved = wires.iter().enumerate().any(|(q, &w)| q != w);
         !moved || relabel == Relabel::Always || measured_out(out, wires)
@@ -865,9 +866,9 @@ pub(crate) fn with_and_without_network(
     cache: &SynthesisCache,
 ) -> Result<Vec<Candidate>, String> {
     let lowered = lowered_for_network(instructions, native);
-    let (candidates, network) = beside_network(instructions, native, lowered, true, last, cache);
+    let (candidates, networks) = beside_network(instructions, native, lowered, true, last, cache);
     let candidates = candidates?;
-    let network = network.filter(|network| network_pays(network, &candidates));
+    let network = paying_network(networks, &candidates);
     let best = candidates
         .into_iter()
         .min_by_key(|(out, _)| cost(out))
@@ -896,7 +897,7 @@ fn beside_network(
     permute: bool,
     last: bool,
     cache: &SynthesisCache,
-) -> (Result<Vec<Candidate>, String>, Option<Candidate>) {
+) -> (Result<Vec<Candidate>, String>, Vec<Candidate>) {
     match lowered {
         Some(lowered) => crate::parallel::join_if(
             instructions.len() >= SIDE_BY_SIDE_MIN,
@@ -905,7 +906,7 @@ fn beside_network(
         ),
         None => (
             direct_candidates(instructions, native, permute, last, cache),
-            None,
+            Vec::new(),
         ),
     }
 }
@@ -947,29 +948,43 @@ fn direct_candidates(
 }
 
 /// Whether a Pauli network is worth keeping among `candidates`: it can
-/// trade single-qubit gates for CXs, and on the 32-qubit Hamiltonian it
-/// would: 663 CXs and 1598 gates in all, against 740 and 1568. Whether that
-/// pays depends on the device's error rates, which the pipeline does not
-/// know, so the network is kept only when it needs no more of either than
-/// the best of them.
+/// trade single-qubit gates for CXs, and on the 32-qubit Hamiltonian its
+/// trials with the usual local penalty would: 663 CXs and 1581 gates in
+/// all, against 740 and 1555. Whether that pays depends on the device's
+/// error rates, which the pipeline does not know, so a network is kept
+/// only when it needs no more of either than the best of them.
 fn network_pays((out, _): &Candidate, candidates: &[Candidate]) -> bool {
     let (two, all) = cost(out);
     let best = candidates.iter().map(|(out, _)| cost(out)).min();
     best.is_none_or(|(b_two, b_all)| two <= b_two && all <= b_all)
 }
 
+/// The first of the cheapest of `networks` that pay ([`network_pays`]).
+/// The trials are judged against the direct compilation one by one, not
+/// by their own cheapest: on the 32-qubit Hamiltonian the trial with the
+/// fewest CXs needs more gates in all than the direct compilation, and a
+/// trial with a few more CXs and fewer gates is the one that pays.
+fn paying_network(networks: Vec<Candidate>, candidates: &[Candidate]) -> Option<Candidate> {
+    networks
+        .into_iter()
+        .filter(|network| network_pays(network, candidates))
+        .min_by_key(|(out, _)| cost(out))
+}
+
 /// The circuit lowered to CX ([`lowered_for_network`]), synthesized again
-/// as a Pauli network (`pauli_network.rs`), then through the [`pipeline`];
-/// None when no trial gives a network.
+/// as a Pauli network (`pauli_network.rs`) once for each of
+/// [`network_trials`], each then through the [`pipeline`]: the results of
+/// the trials that give a network, in the order of the trials.
 fn through_pauli_network(
     lowered: &[Instruction],
     native: &[String],
     permute: bool,
     last: bool,
     cache: &SynthesisCache,
-) -> Option<(Vec<Instruction>, Vec<usize>)> {
-    let trial = |seed: u64| -> Option<(Vec<Instruction>, Vec<usize>)> {
-        let (network, first) = crate::pauli_network::synthesize_seeded(lowered, permute, seed)?;
+) -> Vec<Candidate> {
+    let trial = |(seed, local_penalty): (u64, f64)| -> Option<Candidate> {
+        let (network, first) =
+            crate::pauli_network::synthesize_seeded(lowered, permute, seed, local_penalty)?;
         let (out, second) = pipeline(&network, native, permute, last, cache).ok()?;
         let wires = first
             .iter()
@@ -977,30 +992,43 @@ fn through_pauli_network(
             .collect();
         Some((out, wires))
     };
-    let seeds = 0..NETWORK_TRIALS;
-    let results: Vec<Option<(Vec<Instruction>, Vec<usize>)>> = if cfg!(target_arch = "wasm32") {
-        seeds.map(trial).collect()
+    let results: Vec<Option<Candidate>> = if cfg!(target_arch = "wasm32") {
+        network_trials().map(trial).collect()
     } else {
         // Trials are independent: one thread each.
         std::thread::scope(|scope| {
-            let handles: Vec<_> = seeds.map(|seed| scope.spawn(move || trial(seed))).collect();
+            let handles: Vec<_> = network_trials()
+                .map(|t| scope.spawn(move || trial(t)))
+                .collect();
             handles
                 .into_iter()
                 .map(|h| h.join().expect("a Pauli-network thread"))
                 .collect()
         })
     };
-    // The first of the cheapest, so that the result does not depend on the
-    // threads.
-    results
-        .into_iter()
-        .flatten()
-        .min_by_key(|(out, _)| cost(out))
+    results.into_iter().flatten().collect()
 }
 
-/// How many Pauli networks [`through_pauli_network`] synthesizes, with seeds
-/// 0 (no randomness) to this minus one, side by side.
-const NETWORK_TRIALS: u64 = 8;
+/// The Pauli networks [`through_pauli_network`] synthesizes side by side,
+/// as (seed, local penalty): seeds 0 (no randomness) to 7 with the usual
+/// penalty for each single-qubit Clifford a candidate CX needs, which only
+/// breaks ties, and seeds 0 to 3 with a penalty ten times as large, which
+/// gives up some weight for fewer local Cliffords.
+///
+/// Neither penalty is better everywhere. On the 32-qubit Hamiltonian the
+/// usual one finds 663 CXs at best, and every trial needs more gates in all
+/// than the direct compilation (1581 at least, against 1555); the larger
+/// one finds 687 CXs and 1511 gates. On the 16-qubit one, the usual penalty
+/// finds 313 CXs, and eight trials with the larger 335 at best. Running both keeps whatever the usual
+/// trials found (the larger ones only add candidates), so no circuit can
+/// get worse; more trials with the larger penalty found little more (see
+/// `docs/improvement-log.md`, 2026-11-07).
+fn network_trials() -> impl Iterator<Item = (u64, f64)> {
+    use crate::pauli_network::{FRUGAL_LOCAL_PENALTY, LOCAL_PENALTY};
+    let usual = (0..8).map(|seed| (seed, LOCAL_PENALTY));
+    let frugal = (0..4).map(|seed| (seed, FRUGAL_LOCAL_PENALTY));
+    usual.chain(frugal)
+}
 
 /// The circuit lowered to CX, if the Pauli network is worth trying on it.
 fn lowered_for_network(
@@ -1397,6 +1425,43 @@ mod tests {
         assert!(kept >= 6, "the network was kept {kept} times in 12");
     }
 
+    #[test]
+    fn networks_are_judged_one_by_one() {
+        // A circuit of `two` CXs and `one` Z rotations.
+        let circuit = |two: usize, one: usize| -> Candidate {
+            let mut out = vec![Instruction::gate("cx", vec![0, 1], vec![]); two];
+            out.extend(vec![Instruction::gate("rz", vec![0], vec![0.1]); one]);
+            (out, vec![0, 1])
+        };
+        let direct = [circuit(740, 815)];
+        // The trial with the fewest CXs needs more gates in all than the
+        // direct compilation; the next pays, and the first of the cheapest
+        // that pay is kept.
+        let networks = vec![
+            circuit(663, 918),
+            circuit(706, 797),
+            circuit(687, 824),
+            circuit(687, 824),
+            circuit(741, 700),
+        ];
+        let chosen = paying_network(networks, &direct).expect("a network that pays");
+        assert_eq!(cost(&chosen.0), (687, 1511));
+        assert!(paying_network(vec![circuit(663, 918)], &direct).is_none());
+        assert!(paying_network(Vec::new(), &direct).is_none());
+    }
+
+    #[test]
+    fn both_penalties_are_tried_and_only_add_candidates() {
+        use crate::pauli_network::{FRUGAL_LOCAL_PENALTY, LOCAL_PENALTY};
+        let trials: Vec<(u64, f64)> = network_trials().collect();
+        // The usual trials first, all of them, so that the larger penalty
+        // can only add networks to choose from.
+        let usual: Vec<(u64, f64)> = (0..8).map(|s| (s, LOCAL_PENALTY)).collect();
+        assert_eq!(trials[..8], usual[..]);
+        assert!(trials[8..].iter().all(|&(_, p)| p == FRUGAL_LOCAL_PENALTY));
+        assert!(trials.len() > 8);
+    }
+
     /// A cache of syntheses no other pipeline has filled.
     fn fresh() -> SynthesisCache {
         SynthesisCache::new()
@@ -1417,16 +1482,26 @@ mod tests {
             let wires = first.iter().map(|&w| second[w]).collect();
             candidates.push((out, wires));
         }
-        if new_pairs {
+        if new_pairs && let Some(lowered) = lowered_for_network(instructions, native) {
+            // Each trial on its own, in order; the first of the cheapest of
+            // those that need no more of either count than the best so far.
             let best = candidates.iter().map(|(out, _)| cost(out)).min().unwrap();
-            let network = lowered_for_network(instructions, native)
-                .and_then(|lowered| through_pauli_network(&lowered, native, true, false, &fresh()));
-            if let Some(network) = network {
-                let (two, all) = cost(&network.0);
-                if two <= best.0 && all <= best.1 {
-                    candidates.push(network);
+            let mut chosen: Option<(Vec<Instruction>, Vec<usize>)> = None;
+            for (seed, penalty) in network_trials() {
+                let Some((network, first)) =
+                    crate::pauli_network::synthesize_seeded(&lowered, true, seed, penalty)
+                else {
+                    continue;
+                };
+                let (out, second) = pipeline(&network, native, true, false, &fresh()).unwrap();
+                let (two, all) = cost(&out);
+                let cheaper = chosen.as_ref().is_none_or(|(c, _)| (two, all) < cost(c));
+                if two <= best.0 && all <= best.1 && cheaper {
+                    let wires = first.iter().map(|&w| second.get(w).copied().unwrap_or(w));
+                    chosen = Some((out, wires.collect()));
                 }
             }
+            candidates.extend(chosen);
         }
         candidates
             .into_iter()

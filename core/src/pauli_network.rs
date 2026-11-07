@@ -428,7 +428,14 @@ const DISCOUNT: f64 = 0.3;
 const TABLEAU_WEIGHT: f64 = 0.1;
 /// What each single-qubit Clifford of a candidate gate costs, next to the
 /// weights it removes: enough to break ties.
-const LOCAL_PENALTY: f64 = 0.01;
+pub const LOCAL_PENALTY: f64 = 0.01;
+/// A penalty that does more than break ties: a gate needing one more local
+/// Clifford must remove a tenth of a weight more (a weight in the window's
+/// first layer, a third of one in the next) to be chosen. Each weight costs
+/// about a CX in the end, a local Clifford about a single-qubit gate, so
+/// this gives up a few CXs for fewer single-qubit gates; the pipeline runs
+/// trials with both penalties (`network_trials` in `passes.rs`).
+pub const FRUGAL_LOCAL_PENALTY: f64 = 0.1;
 /// Pairs of qubits tried as places for the next gate, at most.
 const MAX_PAIRS: usize = 64;
 /// With seed k, at most k times this much random noise is added to each
@@ -463,17 +470,20 @@ pub fn synthesize(
     instructions: &[Instruction],
     permute: bool,
 ) -> Option<(Vec<Instruction>, Vec<usize>)> {
-    synthesize_seeded(instructions, permute, 0)
+    synthesize_seeded(instructions, permute, 0, LOCAL_PENALTY)
 }
 
 /// [`synthesize`], breaking ties between candidate gates at random when
-/// `seed` is not 0. The greedy choice of each CX looks only a few layers
+/// `seed` is not 0, and charging `local_penalty` (in weights) for each
+/// single-qubit Clifford a candidate gate needs ([`LOCAL_PENALTY`] in
+/// [`synthesize`]). The greedy choice of each CX looks only a few layers
 /// ahead, and between gates that do equally well there it can lose a tenth of
 /// the CNOTs; a few seeds, run side by side, find the better ones.
 pub fn synthesize_seeded(
     instructions: &[Instruction],
     permute: bool,
     seed: u64,
+    local_penalty: f64,
 ) -> Option<(Vec<Instruction>, Vec<usize>)> {
     let n = instructions
         .iter()
@@ -489,6 +499,7 @@ pub fn synthesize_seeded(
         n,
         rng: (seed != 0).then(|| Rng::new(seed)),
         noise: NOISE * seed as f64,
+        local_penalty,
     };
     state.rotations();
     let wires = state.clifford(permute);
@@ -506,6 +517,8 @@ struct State {
     /// `noise` to each one's score.
     rng: Option<Rng>,
     noise: f64,
+    /// What each single-qubit Clifford of a candidate gate costs.
+    local_penalty: f64,
 }
 
 impl State {
@@ -683,7 +696,7 @@ impl State {
                     let change = State::change(&gates, &touching, a, b);
                     // Of gates that do as well, those with fewer local
                     // Cliffords before their CX.
-                    let mut score = change + LOCAL_PENALTY * (gates.len() - 1) as f64;
+                    let mut score = change + self.local_penalty * (gates.len() - 1) as f64;
                     if let Some(rng) = self.rng.as_mut() {
                         score += self.noise * rng.uniform();
                     }
@@ -901,9 +914,10 @@ mod tests {
             for k in 0..60 {
                 let circuit = random_circuit(&mut rng, n, 25);
                 for permute in [false, true] {
-                    // Seeded or not.
+                    // Seeded or not, with either penalty.
                     let seed = (k % 3) as u64;
-                    let (mut out, wires) = synthesize_seeded(&circuit, permute, seed)
+                    let penalty = [LOCAL_PENALTY, FRUGAL_LOCAL_PENALTY][k % 2];
+                    let (mut out, wires) = synthesize_seeded(&circuit, permute, seed, penalty)
                         .expect("Clifford gates and rotations");
                     assert!(
                         out.iter()

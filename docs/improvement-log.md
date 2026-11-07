@@ -4,6 +4,78 @@ One entry per change made by the daily improvement routine: what changed,
 why, what it measured, and what to try next. Numbers come from the scripts
 in `benchmarks/`.
 
+## 2026-11-07 — Pauli-network trials judged one by one, and four that charge more for local Cliffords
+
+**What.** `core/src/passes.rs`: the Pauli network's trials are no longer
+reduced to their own cheapest before being compared with the direct
+compilation. `through_pauli_network` returns every trial's result, in
+order, and `paying_network` keeps the first of the cheapest of those
+that need no more two-qubit gates and no more gates in all than the
+direct candidates (`network_pays`, unchanged). `network_trials` adds four
+trials (seeds 0–3) to the eight there were (seeds 0–7), synthesized with
+`FRUGAL_LOCAL_PENALTY` (`core/src/pauli_network.rs`, 0.1): what the
+greedy choice charges, in weights, for each single-qubit Clifford a
+candidate CX needs. The usual `LOCAL_PENALTY` (0.01) only breaks ties.
+`synthesize_seeded` takes the penalty as an argument.
+
+New tests: `networks_are_judged_one_by_one` (the trial with the fewest
+CXs that does not pay is passed over for one that does),
+`both_penalties_are_tried_and_only_add_candidates`; the serial reference
+of `candidates_side_by_side_choose_as_one_after_the_other` now runs every
+trial one after the other and applies the new rule, and
+`random_circuits_keep_their_unitary` checks both penalties.
+
+**Why.** The log's standing item: on the 32-qubit Hamiltonian the
+network saved 10% of the CXs but needed 26 gates too many to be kept.
+Printing every trial showed two things. The trial kept for comparison was
+the one with the fewest CXs (663 / 1581), so others that might pay were
+never looked at; and none of the eight did (the fewest gates in all was
+1581, against the direct 1555). A sweep of the local penalty (0.01, 0.05,
+0.1, 0.2, 0.3, 0.5) on that circuit gave the best trials 663 / 1581, 666
+/ 1563, 687 / 1511, 716 / 1500, 744 / 1472 and 823 / 1483: beyond 0.1
+the CXs climb back to the direct compilation's. Both are changes to the
+selection among candidates we already make, verifiable end to end today,
+and a superset of the old trials, so no circuit can get worse. pytket's
+GreedyPauliSimp has no such charge (its knobs are the discount rate,
+depth weight, lookahead and trials), so this is ours. Portfolios were
+compared on the benchmark's three Hamiltonians and 12 others (seeds
+3000+, 8–32 qubits), then checked on 15 held out (seeds 5000+, 6–24
+qubits): four trials at 0.01 and four at 0.1 (no more threads) gave 0.987×
+the CXs on the tuning set but was worse on one tuning circuit and five
+held-out ones; eight and eight was never worse, 0.979× on both sets, at
+1.6–2.2× the time; eight and four was never worse, at 1.2–1.3×.
+
+**Measured** (4-vCPU Xeon VM, complete runs of `run.py`, `device.py` and
+`plugin.py`). All-to-all, two-qubit / all gates: Hamiltonian 8 107 / 293 →
+101 / 286, 32 740 / 1555 → 687 / 1511 (Qiskit 740 / 1789, pytket 737 /
+1681); every other row identical. Geometric means over Qiskit 0.938× →
+0.933× the two-qubit gates, 0.877× → 0.875× all gates. On the chip, the
+8-qubit Hamiltonian with CX 349 / 713 → 345 / 648, with CZ 331 / 1333 →
+310 / 1119; no other row changed; QCC alone 0.935× / 0.825× → 0.934× /
+0.820× with CX, 0.908× / 0.848× → 0.904× / 0.839× with CZ. Inside Qiskit
+nothing changed (the plugin does not try networks). The 15 held-out
+Hamiltonians: 0.981× the CXs and 0.980× the gates of 0.4.6, worse on
+none. `check.py` passes. Time, 0.4.6 and 0.4.7 side by side, medians of
+five, two rounds: Hamiltonian 8 29–30 → 40–44 ms, 16 130–133 → 173–180
+ms, 32 325–335 → 402–451 ms (1.3–1.5×); other circuits try no network
+and run the same code.
+
+**Learned.** With the usual penalty, the Clifford left at the end of the
+32-qubit network costs 29–47 CXs and 235–299 gates before optimization,
+and the rotations 1472–1602 gates; the networks of the larger penalty
+have 1617–1735 gates before optimization, against 1716–1848. Seeded noise and the
+penalty find different networks: no portfolio of eight trials was
+better everywhere.
+
+**Next.**
+1. Quantum Volume all-to-all speed (243 ms against Qiskit's 49 at 32
+   qubits in this run): the serial passes after synthesis.
+2. The Hamiltonian's compile time (now 0.4 s at 32 qubits against
+   Qiskit's 15 ms): cheaper trials (stopping a trial's pipeline once it
+   cannot pay), or a cheaper greedy step.
+3. The few extra two-qubit gates against Qiskit on the chip (Quantum
+   Volume 8: 111 against 108).
+
 ## 2026-11-06 (second change, asked for by the owner) — Shared syntheses and cheaper gathering, the same outputs
 
 **What.** Two exact speed-ups of the pipeline that the CZ rounds repeat:

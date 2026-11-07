@@ -61,21 +61,21 @@ pytket 2.18.5, UCC 0.4.12):
 | Clifford+T | 8 | 73 / 278 | 77 / 308 | 73 / 280 | 77 / 871 |
 |  | 16 | 150 / 505 | 155 / 550 | 148 / 495 | 155 / 1743 |
 |  | 32 | 310 / 1034 | 316 / 1104 | 310 / 1039 | 316 / 3450 |
-| Hamiltonian | 8 | 107 / 293 | 191 / 474 | 178 / 403 | 191 / 1986 |
+| Hamiltonian | 8 | 101 / 286 | 191 / 474 | 178 / 403 | 191 / 1986 |
 |  | 16 | 313 / 790 | 393 / 972 | 390 / 887 | 393 / 4186 |
-|  | 32 | 740 / 1555 | 740 / 1789 | 737 / 1681 | 740 / 7739 |
+|  | 32 | 687 / 1511 | 740 / 1789 | 737 / 1681 | 740 / 7739 |
 
 Geometric means over the 21 circuits, relative to Qiskit, and median time:
 
 | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|
-| QCC | 0.938× | 0.877× | 7 ms |
-| Qiskit | 1.000× | 1.000× | 16 ms |
-| pytket | 0.998× | 1.093× | 1862 ms |
-| UCC | 1.015× | 2.400× | 42 ms |
+| QCC | 0.933× | 0.875× | 7 ms |
+| Qiskit | 1.000× | 1.000× | 11 ms |
+| pytket | 0.998× | 1.093× | 1803 ms |
+| UCC | 1.015× | 2.400× | 33 ms |
 
-- QCC uses the fewest gates of the four compilers: 6% fewer two-qubit gates
-  than Qiskit (0.938×) and 12% fewer gates in all, and no more two-qubit
+- QCC uses the fewest gates of the four compilers: 7% fewer two-qubit gates
+  than Qiskit (0.933×) and 12% fewer gates in all, and no more two-qubit
   gates than Qiskit on any circuit. Phase folding
   (`core/src/phase_folding.rs`) does most of it on the arithmetic: on the
   adder it removes 19% of the two-qubit gates (196 against Qiskit's 241 and
@@ -84,20 +84,36 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
 - On one Trotter step of a random Hamiltonian (`hamiltonian` in
   `circuits.py`: Pauli strings of weight 2–6, with Qiskit's CX ladders), the
   Pauli network (`core/src/pauli_network.rs`) builds the circuit again with
-  shared CNOTs: 107 against Qiskit's 191 at 8 qubits, and 313 against 393 at
-  16, with fewer gates in all too (293 against 474, and 790 against 972;
-  pytket leaves 887 at 16). Single-qubit gates used to be its weakness (1285
+  shared CNOTs: 101 against Qiskit's 191 at 8 qubits, 313 against 393 at
+  16 and 687 against 740 at 32, with fewer gates in all too (286 against
+  474, 790 against 972 and 1511 against 1789; pytket leaves 887 at 16 and
+  737 / 1681 at 32). Single-qubit gates used to be its weakness (1285
   in all at 16 qubits, more than Qiskit): the local Cliffords that set up
   each CX are no longer undone after it, each CX is placed whichever way
   round needs fewer of them, basis changes use √X rather than H, and eight
   syntheses with differently seeded tie-breaking (as pytket's
-  GreedyPauliSimp offers with `trials`) run side by side. On 15 other random
+  GreedyPauliSimp offers with `trials`) run side by side (twelve since
+  0.4.7, below). On 15 other random
   Hamiltonians of 6 to 24 qubits this left a geometric mean of 0.934× the
   CNOTs and 0.779× the gates of 0.4.0, and more of neither on any.
-- At 32 qubits the network finds fewer CNOTs than the direct compilation
-  (663 against 740, as measured for 0.4.1) but more gates in all. QCC keeps
-  a network only when it needs no more of either, so it keeps the direct
-  compilation there.
+- QCC keeps a network only when it needs no more two-qubit gates and no
+  more gates in all than the direct compilation, and judges each trial on
+  its own (0.4.7): at 32 qubits the trial with the fewest CNOTs (663) needs
+  1581 gates in all, more than the direct compilation's 1555, and before
+  0.4.7 that trial was the only one judged, so the direct compilation was
+  kept (740 / 1555). The greedy synthesis also charges each local Clifford
+  a candidate CX needs; with the usual charge, a hundredth of a weight, it
+  only breaks ties. Four more trials (seeds 0–3) charge a tenth of a
+  weight, giving up a few CNOTs for fewer single-qubit gates: at 32 qubits
+  one of them gives 687 / 1511, which is kept; at 8 qubits 101 / 286
+  (against 107 / 293); at 16 the usual trials stay best (the larger charge
+  finds 335 CNOTs there). The eight usual trials still run, so a circuit
+  can only get cheaper. On 15 random Hamiltonians of 6–24 qubits not used
+  for tuning (seeds other than the benchmark's), this left 0.981× the
+  CNOTs and 0.980× the gates of 0.4.6, and more of neither on any; it costs
+  1.3–1.5× the time on the Hamiltonians (32 qubits: 0.33 → 0.40–0.45 s,
+  medians of five, side by side), and nothing on the other circuits, where
+  no network is tried.
 - Qiskit, pytket and QCC all remove the QFT's final SWAPs by relabelling the
   output qubits (3 CX per SWAP: 12, 24 and 48); `run.py` asks QCC to with
   `relabel_outputs=True` and checks its outputs with the permutation it
@@ -133,14 +149,16 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
 - On the Heisenberg chain, moving single-qubit gates through its symmetric
   XX + YY + ZZ blocks (`core/src/symmetric_blocks.rs`) saves another 8–9%
   of the gates: 1173 at 32 qubits, against Qiskit's 1568.
-- QCC is faster than Qiskit on most circuits (20 of 24; a median of 7 ms,
-  against 16), but slower on the Hamiltonian (2.4–12×), where it also tries
-  the Pauli networks (eight of them, side by side), and on Quantum Volume at
-  32 qubits (3.2× in this run), where most of the work is resynthesizing
-  generic two-qubit blocks (on all cores, of which this machine has four).
-  Times are single compilations and vary between runs on this VM: the
-  32-qubit Quantum Volume circuit's 316 ms here was a median of 191 ms over
-  nine compilations, against Qiskit's 69 ms.
+- QCC is faster than Qiskit on most circuits (18 of 24; a median of 7 ms,
+  against 11), but slower on the Hamiltonian (3.8–27× in this run), where
+  it also tries the Pauli networks (twelve of them, side by side), on
+  Quantum Volume at 16 and 32 qubits (1.8× and 5.0×), where most of the
+  work is resynthesizing generic two-qubit blocks (on all cores, of which
+  this machine has four), and by a fraction of a millisecond on Clifford+T
+  at 32 (17.4 against 16.7 ms). Times are single compilations and vary
+  between runs on this VM: in an earlier run the 32-qubit Quantum Volume
+  circuit's 316 ms was a median of 191 ms over nine compilations, against
+  Qiskit's 69 ms.
 - 0.4.3 made every circuit faster without changing a gate (the outputs are
   identical): a median of 11 compilations of each circuit, 0.4.2 and 0.4.3
   side by side on this machine, gave 0.73× the time in geometric mean, and
@@ -194,17 +212,17 @@ heavy-hex chip with QCC alone (`compile_circuit` with the chip's couplings:
 it optimizes, lays out, routes and optimizes again; see
 `docs/ARCHITECTURE.md`), with Qiskit at level 3, and with Qiskit using QCC as
 its optimization stage, and checks every output's state
-(`results/device.csv`; last run for 0.4.6, on a 4-vCPU Xeon VM). Geometric means over
+(`results/device.csv`; last run for 0.4.7, on a 4-vCPU Xeon VM). Geometric means over
 Qiskit's level 3:
 
 | gates | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|---|
-| {rz, sx, x, cx} | QCC | 0.935× | 0.825× | 41 ms |
-|  | Qiskit + QCC | 0.970× | 0.844× | 49 ms |
-| {rz, sx, x, cz} | QCC | 0.908× | 0.848× | 113 ms |
-|  | Qiskit + QCC | 0.936× | 0.837× | 117 ms |
+| {rz, sx, x, cx} | QCC | 0.934× | 0.820× | 36 ms |
+|  | Qiskit + QCC | 0.970× | 0.844× | 44 ms |
+| {rz, sx, x, cz} | QCC | 0.904× | 0.839× | 104 ms |
+|  | Qiskit + QCC | 0.936× | 0.837× | 142 ms |
 
-Qiskit's own median in the same run: 39 ms with CX, 38 ms with CZ.
+Qiskit's own median in the same run: 38 ms with CX, 41 ms with CZ.
 
 Two-qubit gates / all gates with CX:
 
@@ -224,7 +242,7 @@ Two-qubit gates / all gates with CX:
 |  | 16 | 148 / 405 | 180 / 452 | 159 / 409 |
 | Clifford+T | 8 | 236 / 512 | 249 / 546 | 249 / 479 |
 |  | 16 | 752 / 1251 | 774 / 1394 | 772 / 1205 |
-| Hamiltonian | 8 | 349 / 713 | 425 / 867 | 425 / 686 |
+| Hamiltonian | 8 | 345 / 648 | 425 / 867 | 425 / 686 |
 |  | 16 | 1368 / 2106 | 1463 / 2348 | 1463 / 1985 |
 
 - QCC's own layout and routing do better than Qiskit's on the adder (148
@@ -247,7 +265,7 @@ Two-qubit gates / all gates with CX:
   616 against 148 / 586), the Hamiltonian at 8 (336 / 1378 against 337 /
   1339) and the QFT at 16 (353 / 1422 against 357 / 1408). Since the
   repeated rounds above, the Hamiltonian at 8 is better on both (331 /
-  1333); the adder (149 / 615) and the QFT (353 / 1421) still have more
+  1333, and 310 / 1119 since 0.4.7); the adder (149 / 615) and the QFT (353 / 1421) still have more
   gates in all than before gathering.
 - For CZ the pipeline is not a fixed point, as it nearly is for CX: it
   reads the circuit through CX (each CZ as H·CX·H) so that phase folding
@@ -309,5 +327,8 @@ Two-qubit gates / all gates with CX:
   Volume at 8 qubits (111 against 108, with CX or CZ).
 - On the Hamiltonian, a Pauli network can need more routing than it saves,
   so QCC routes its logical circuit with one and without, and keeps the
-  cheaper: 349 CNOTs against Qiskit's 425 at 8 qubits (713 gates in all,
-  against 867), and 1368 against 1463 at 16.
+  cheaper: 345 CNOTs against Qiskit's 425 at 8 qubits (648 gates in all,
+  against 867), and 1368 against 1463 at 16. The trials with the larger
+  local-Clifford charge (0.4.7, above) took the 8-qubit one from 349 / 713
+  to 345 / 648 with CX, and from 331 / 1333 to 310 / 1119 CZs / gates with
+  CZ (Qiskit 427 / 1720); no other circuit on the chip changed.
