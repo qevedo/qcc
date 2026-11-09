@@ -13,7 +13,7 @@ use crate::ir::{Instruction, cost};
 use crate::linalg::{M2, equal_up_to_phase4, kron};
 use crate::lower::{Lowering, SynthesisCache};
 use crate::passes::{merge_single_qubit_runs, on_the_same_pairs, with_and_without_network};
-use crate::routing::{CouplingGraph, SabreOptions, layout_and_route};
+use crate::routing::{CouplingGraph, SabreOptions, layout_and_route_and_first};
 use crate::two_qubit::kak;
 use std::collections::HashSet;
 
@@ -22,14 +22,28 @@ use std::collections::HashSet;
 /// that merge with the block before them counted for what they cost (see
 /// `routing/sabre.rs`). On the 19-qubit heavy-hex
 /// benchmark these took 8% of the two-qubit gates off.
+///
+/// Each layout is also routed 16 times with different tie-breaking rather
+/// than the default 4 ([`USUAL_SWAP_TRIALS`]): SABRE's choices vary a lot
+/// from one tie-breaking to the next (Qiskit's own level 3 leaves Quantum
+/// Volume at 16 qubits with 798 to 840 CNOTs on this chip, depending on its
+/// seed). Routing itself got 2–3× cheaper in the same change (see
+/// `routing/sabre.rs`), so the wider search costs about what four routings
+/// per layout used to.
 pub fn routing_options() -> SabreOptions {
     SabreOptions {
         trials: 32,
+        swap_trials: 16,
         merge_weight: 0.5,
         perfect_layout: true,
         ..SabreOptions::default()
     }
 }
+
+/// The routings per layout of SABRE's defaults, and of device compilation
+/// before it searched more widely: the routing those would have chosen is
+/// optimized too, next to the wider search's (see [`compile_for_device`]).
+pub const USUAL_SWAP_TRIALS: usize = 4;
 
 /// The device: its qubits and the pairs it couples.
 pub struct Device<'a> {
@@ -93,19 +107,44 @@ pub fn compile_for_device(
     // it). A Pauli network can need far more routing than it saves, so a
     // result with one is routed next to one without, and the cheaper kept.
     let logical_candidates = with_and_without_network(&instructions, &native, false, &cache)?;
-    // Each candidate is routed and optimized on the chip's qubits on its own
-    // thread (the rounds of `until_fixed_point` make that most of the time
-    // for CZ), and the cheapest kept: the first on ties, as in a loop.
-    let routed = crate::parallel::map_ordered(logical_candidates.len(), |i| {
-        let (optimized, moved) = &logical_candidates[i];
-        let routed = layout_and_route(optimized, logical, &graph, options)?;
+    // Each candidate is laid out and routed on its own thread. The CNOTs a
+    // routing's SWAPs cost are only an estimate of what the optimized circuit
+    // will need (the single-qubit gates, a CZ device's rounds and a Pauli
+    // network's local Cliffords all move it), so the cheapest routing of the
+    // wide search can come out worse than the one the usual four routings
+    // per layout would have kept: both are optimized, and the cheaper kept.
+    // On 40 held-out circuits on the benchmark chip, the wide search alone
+    // left 3 with more two-qubit gates than before; with both, none.
+    let routings: Vec<(usize, crate::routing::Routed)> =
+        crate::parallel::map_ordered(logical_candidates.len(), |i| {
+            layout_and_route_and_first(
+                &logical_candidates[i].0,
+                logical,
+                &graph,
+                options,
+                USUAL_SWAP_TRIALS,
+            )
+        })
+        .into_iter()
+        .enumerate()
+        .map(|(i, routed)| routed.map(|r| r.into_iter().map(move |r| (i, r))))
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    // Each routing is then optimized on the chip's qubits on its own thread
+    // (the rounds of `until_fixed_point` make that most of the time for CZ),
+    // and the cheapest kept: the first on ties, as in a loop.
+    let routed = crate::parallel::map_ordered(routings.len(), |j| {
+        let (i, routed) = &routings[j];
+        let (_, moved) = &logical_candidates[*i];
         let final_layout: Vec<usize> = (0..logical)
             .map(|q| routed.final_layout[moved.get(q).copied().unwrap_or(q)])
             .collect();
         let out = on_physical_qubits(&routed.instructions, &native, device, &cache)?;
         Ok::<_, String>(DeviceCircuit {
             instructions: out,
-            initial_layout: routed.initial_layout,
+            initial_layout: routed.initial_layout.clone(),
             final_layout,
         })
     });
@@ -238,6 +277,10 @@ mod tests {
     }
 
     fn check(directed: bool, native: &[&str]) {
+        check_with(directed, native, &SabreOptions::default());
+    }
+
+    fn check_with(directed: bool, native: &[&str], options: &SabreOptions) {
         let n = 5;
         let edges: Vec<(usize, usize)> = (0..n - 1).map(|i| (i, i + 1)).collect();
         let device = Device {
@@ -249,13 +292,8 @@ mod tests {
         let mut rng = Rng::new(31);
         for _ in 0..20 {
             let circuit = random_circuit(&mut rng, n, 30);
-            let out = compile_for_device(
-                circuit.clone(),
-                native.clone(),
-                &device,
-                &SabreOptions::default(),
-            )
-            .unwrap();
+            let out =
+                compile_for_device(circuit.clone(), native.clone(), &device, options).unwrap();
             for inst in out.instructions.iter().filter(|i| i.qubits.len() == 2) {
                 let pair = (inst.qubits[0], inst.qubits[1]);
                 assert!(
@@ -286,6 +324,62 @@ mod tests {
     fn routed_circuits_agree_up_to_their_layouts() {
         check(false, &["rz", "sx", "x", "cx"]);
         check(false, &["rz", "sx", "x", "cz"]);
+        // With the device options: the wide search, and the usual routing
+        // optimized beside it.
+        let options = SabreOptions {
+            trials: 4,
+            ..routing_options()
+        };
+        check_with(false, &["rz", "sx", "x", "cx"], &options);
+        check_with(true, &["rz", "sx", "x", "cz"], &options);
+    }
+
+    #[test]
+    fn the_wide_search_is_never_worse_than_the_usual_one() {
+        // The routing the usual swap trials would have kept is optimized as
+        // well, so searching more widely can only make a circuit cheaper.
+        let edges = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (1, 6),
+            (6, 7),
+            (7, 8),
+            (3, 8),
+        ];
+        let device = Device {
+            qubits: 9,
+            edges: &edges,
+            directed: false,
+        };
+        let mut rng = Rng::new(35);
+        let (mut cheaper, mut dearer) = (0, 0);
+        for native in [["rz", "sx", "x", "cx"], ["rz", "sx", "x", "cz"]] {
+            let native: Vec<String> = native.iter().map(|g| g.to_string()).collect();
+            for seed in 0..6 {
+                let circuit = random_circuit(&mut rng, 9, 150);
+                let wide = SabreOptions {
+                    trials: 4,
+                    seed,
+                    ..routing_options()
+                };
+                let usual = SabreOptions {
+                    swap_trials: USUAL_SWAP_TRIALS,
+                    ..wide
+                };
+                let compile = |options: &SabreOptions| {
+                    let out = compile_for_device(circuit.clone(), native.clone(), &device, options);
+                    cost(&out.unwrap().instructions)
+                };
+                let (w, u) = (compile(&wide), compile(&usual));
+                assert!(w <= u, "{w:?} > {u:?}");
+                cheaper += usize::from(w < u);
+                dearer += usize::from(w > u);
+            }
+        }
+        assert!(cheaper > 0 && dearer == 0, "{cheaper} {dearer}");
     }
 
     #[test]

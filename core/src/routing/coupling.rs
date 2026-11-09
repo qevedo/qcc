@@ -9,8 +9,9 @@ pub struct CouplingGraph {
     n: usize,
     edges: Vec<(usize, usize)>,
     neighbours: Vec<Vec<usize>>,
-    /// `distance[a][b]`: edges on a shortest path from `a` to `b`.
-    distance: Vec<Vec<u32>>,
+    /// `distance[a * n + b]`: edges on a shortest path from `a` to `b`, in
+    /// one array, as routing reads it for every candidate SWAP.
+    distance: Vec<u32>,
 }
 
 impl CouplingGraph {
@@ -38,8 +39,8 @@ impl CouplingGraph {
         for list in &mut neighbours {
             list.sort();
         }
-        let mut distance = vec![vec![u32::MAX; n]; n];
-        for (start, row) in distance.iter_mut().enumerate() {
+        let mut distance = vec![u32::MAX; n * n];
+        for (start, row) in distance.chunks_mut(n).enumerate() {
             row[start] = 0;
             let mut queue = VecDeque::from([start]);
             while let Some(p) = queue.pop_front() {
@@ -118,11 +119,11 @@ impl CouplingGraph {
     }
 
     pub fn distance(&self, a: usize, b: usize) -> u32 {
-        self.distance[a][b]
+        self.distance[a * self.n + b]
     }
 
     pub fn coupled(&self, a: usize, b: usize) -> bool {
-        self.distance[a][b] == 1
+        self.distance(a, b) == 1
     }
 
     /// A shortest path from `a` to `b`, both included.
@@ -132,7 +133,7 @@ impl CouplingGraph {
         while p != b {
             p = *self.neighbours[p]
                 .iter()
-                .find(|&&q| self.distance[q][b] + 1 == self.distance[p][b])
+                .find(|&&q| self.distance(q, b) + 1 == self.distance(p, b))
                 .expect("connected");
             path.push(p);
         }

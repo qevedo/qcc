@@ -8,6 +8,92 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-09 — Faster SABRE, and a wider routing search on devices (0.4.8)
+
+**What.** `core/src/routing/sabre.rs` makes the same routing choices at
+2.1–2.9× fewer instructions:
+- `Dag`: the dependency graph (as flat successor lists), each node's kind
+  and each gate's matrix (and its operands-reversed form) are worked out
+  once per circuit and shared by every routing of it: a device search
+  routes the same circuit hundreds of times.
+- The extended set reuses scratch arrays with generation stamps instead of
+  copying the predecessor counts and allocating a `seen` array as long as
+  the circuit at every SWAP (15% of the time was `memcpy`).
+- A routing is a `Trace` of node indices and SWAPs; only the routing kept
+  becomes `Instruction`s (before, every routing cloned every name and
+  parameter list: malloc/free were a quarter of the time).
+- `Savings`: the CNOTs a SWAP saves after a block (two KAK CNOT counts)
+  memoized by the block's unitary, bit for bit, across the routings of
+  one start; a single-qubit gate is folded into a block with the two
+  nonzero terms of `(g ⊗ I)·m` in the full product's order (`left_1q`),
+  and a gate the other way round by permuting entries (`reversed`), so
+  the numbers are the same as the full products'.
+- SWAP scores read the front's and extended set's physical pairs once per
+  SWAP, sum distances as integers (exact, so the same floats), and
+  `CouplingGraph` keeps distances in one flat array.
+
+`core/src/device.rs`: `routing_options` now has 16 swap trials per layout
+(was the default 4, `USUAL_SWAP_TRIALS`); `layout_and_route_and_first`
+also returns the routing the first 4 swap trials of each layout would have
+given, when it differs, and `compile_for_device` optimizes both and keeps
+the cheaper. Tests: `a_single_qubit_gate_after_a_block_is_the_full_product`,
+`a_gate_the_other_way_round_is_conjugated_by_swaps`,
+`the_savings_memo_changes_nothing`,
+`the_first_swap_trials_choose_as_a_narrower_search`,
+`the_wide_search_is_never_worse_than_the_usual_one` (it also requires some
+circuit to get strictly cheaper), and the device equivalence check with the
+device options on undirected CX and directed CZ chips.
+
+**Why.** The ledger listed QV-8 on the chip (111 CNOTs against Qiskit's 108)
+as QCC's only row worse than Qiskit. Investigating it showed that row is
+seed luck (Qiskit gives 108 or 111 depending on its seed; QCC's SWAP-cost
+estimate is exact there and no search width found 108), but also that
+SABRE's results vary widely between tie-breakings (Qiskit: 798–840 on
+QV-16) and that routing was most of a chip compilation's time with CX
+(QV-16: ~160 of ~210 ms). LightSABRE (Zou et al., arXiv:2409.08368) makes
+the same point: cheap routing lets you exploit SABRE's randomness with
+more trials. A faster router with byte-identical outputs is verifiable
+end to end, and spending the time saved on more trials gives gates on
+every family that routes.
+
+**Measured** (4-vCPU Xeon VM). With the old options, all 112 benchmark
+compilations (all-to-all, chip and inside Qiskit, CX and CZ) are byte
+for byte what 0.4.7 gives, and the multicore example's counts are
+unchanged. Callgrind on one device search (32 starts, 4 swap trials) of
+the 16-qubit circuits: Quantum Volume 4.01 → 1.58 G instructions,
+Hamiltonian 3.90 → 1.54, Clifford+T 2.80 → 1.33, QFT 1.94 → 0.66; with 16
+swap trials 4.04, 3.47, 3.14 and 1.42 G, about what 4 used to cost.
+`device.py` in full: QCC alone 0.934× → 0.928× Qiskit's two-qubit gates
+and 0.820× → 0.818× all gates with CX, 0.904× → 0.899× and 0.839× →
+0.834× with CZ; seven rows cheaper, none dearer (QV-16 822 → 783 with CX
+and CZ, Clifford+T-16 752 / 1251 → 733 / 1209 CX and 708 / 2790 → 692 /
+2677 CZ, Hamiltonian-16 1368 / 2106 → 1336 / 2100 CX and 1292 / 4572 →
+1256 / 4454 CZ, QAOA-16 CX 180 / 409 → 179 / 403); every output passes
+its state check; Qiskit's and Qiskit + QCC's rows are unchanged (Qiskit
+routes there). 40 held-out circuits (QV 10–16 qubits seeds 101/202,
+Clifford+T, Hamiltonians and QAOA of 10 and 14 qubits seeds 7/8, CX and
+CZ): 19 213 → 18 936 two-qubit gates and 66 134 → 64 817 gates; fewer
+two-qubit gates on 19, more on none; three have a few more single-qubit
+gates for fewer two-qubit ones. Time against 0.4.7 side by side (best of
+two medians of five, interleaved): 0.86× with CX and 0.97× with CZ in
+geometric mean; slower where both routings go through the CZ rounds:
+Hamiltonian-16 CZ 1.70 → 2.33 s, QV-16 CZ 1.22×. All-to-all compilation
+does not route, so `run.py`'s results and `check.py` are unchanged.
+
+**Learned.** Wider search alone was not monotone in the final count (16
+swap trials alone: 3 held-out circuits worse; 8 or 32: benchmark rows
+worse), because the SWAP-cost estimate ignores single-qubit gates, CZ
+rounds and network Cliffords; optimizing the old choice beside the new
+makes it monotone. A block-aware lookahead, more layout trials and top-k
+routings were tried and dropped (experiments.md). An experiment switch
+left in `routing_options` made a later edit miss silently; the
+never-worse test caught it because it also demands a strict improvement.
+
+**Next.** All-to-all Quantum Volume speed with the same recipe (record,
+write out once); CZ device time (the rounds now run twice on some
+circuits); routing quality from LightSABRE's relative scoring and block
+routing.
+
 ## 2026-11-07 — Pauli-network trials judged one by one, and four that charge more for local Cliffords
 
 **What.** `core/src/passes.rs`: the Pauli network's trials are no longer

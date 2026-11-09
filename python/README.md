@@ -123,8 +123,8 @@ print(circuit.initial_layout, circuit.output_permutation)  # where each qubit st
 
 The result is on the device's physical qubits (a register `q`), and
 `qcc compile --device profile.yaml` prints both layouts. On a 19-qubit
-heavy-hex chip, QCC alone uses 6% fewer two-qubit gates than Qiskit's
-`optimization_level=3` and 12–17% fewer gates in all
+heavy-hex chip, QCC alone uses 7–10% fewer two-qubit gates than Qiskit's
+`optimization_level=3` and 17–18% fewer gates in all
 ([benchmarks/compilation](https://github.com/qevedo/qcc/tree/master/benchmarks/compilation)).
 
 ## Inside Qiskit

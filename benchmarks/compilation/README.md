@@ -212,17 +212,17 @@ heavy-hex chip with QCC alone (`compile_circuit` with the chip's couplings:
 it optimizes, lays out, routes and optimizes again; see
 `docs/ARCHITECTURE.md`), with Qiskit at level 3, and with Qiskit using QCC as
 its optimization stage, and checks every output's state
-(`results/device.csv`; last run for 0.4.7, on a 4-vCPU Xeon VM). Geometric means over
+(`results/device.csv`; last run for 0.4.8, on a 4-vCPU Xeon VM). Geometric means over
 Qiskit's level 3:
 
 | gates | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|---|
-| {rz, sx, x, cx} | QCC | 0.934× | 0.820× | 36 ms |
-|  | Qiskit + QCC | 0.970× | 0.844× | 44 ms |
-| {rz, sx, x, cz} | QCC | 0.904× | 0.839× | 104 ms |
+| {rz, sx, x, cx} | QCC | 0.928× | 0.818× | 32 ms |
+|  | Qiskit + QCC | 0.970× | 0.844× | 43 ms |
+| {rz, sx, x, cz} | QCC | 0.899× | 0.834× | 111 ms |
 |  | Qiskit + QCC | 0.936× | 0.837× | 142 ms |
 
-Qiskit's own median in the same run: 38 ms with CX, 41 ms with CZ.
+Qiskit's own median in the same run: 34 ms with CX, 36 ms with CZ.
 
 Two-qubit gates / all gates with CX:
 
@@ -231,9 +231,9 @@ Two-qubit gates / all gates with CX:
 | QFT | 8 | 80 / 132 | 102 / 188 | 92 / 144 |
 |  | 16 | 353 / 520 | 356 / 1324 | 348 / 516 |
 | QAOA | 8 | 94 / 207 | 97 / 232 | 95 / 207 |
-|  | 16 | 180 / 409 | 187 / 445 | 183 / 405 |
+|  | 16 | 179 / 403 | 187 / 445 | 183 / 405 |
 | Quantum Volume | 8 | 111 / 515 | 108 / 575 | 108 / 560 |
-|  | 16 | 822 / 2787 | 828 / 3182 | 828 / 3203 |
+|  | 16 | 783 / 2781 | 828 / 3182 | 828 / 3203 |
 | GHZ | 8 | 7 / 10 | 7 / 10 | 7 / 10 |
 |  | 16 | 15 / 18 | 15 / 18 | 15 / 18 |
 | Heisenberg | 8 | 84 / 271 | 84 / 356 | 84 / 300 |
@@ -241,9 +241,9 @@ Two-qubit gates / all gates with CX:
 | Adder | 8 | 57 / 151 | 72 / 184 | 59 / 161 |
 |  | 16 | 148 / 405 | 180 / 452 | 159 / 409 |
 | Clifford+T | 8 | 236 / 512 | 249 / 546 | 249 / 479 |
-|  | 16 | 752 / 1251 | 774 / 1394 | 772 / 1205 |
+|  | 16 | 733 / 1209 | 774 / 1394 | 772 / 1205 |
 | Hamiltonian | 8 | 345 / 648 | 425 / 867 | 425 / 686 |
-|  | 16 | 1368 / 2106 | 1463 / 2348 | 1463 / 1985 |
+|  | 16 | 1336 / 2100 | 1463 / 2348 | 1463 / 1985 |
 
 - QCC's own layout and routing do better than Qiskit's on the adder (148
   CNOTs against 180) and Clifford+T, and as well on the rest, give or take a
@@ -324,7 +324,34 @@ Two-qubit gates / all gates with CX:
   0.8–1.4× on circuits of a few milliseconds). The 16-qubit Hamiltonian
   with CZ still takes 1.6 s against Qiskit's 0.15 s.
 - QCC now uses more two-qubit gates than Qiskit on one circuit: Quantum
-  Volume at 8 qubits (111 against 108, with CX or CZ).
+  Volume at 8 qubits (111 against 108, with CX or CZ). That row is SABRE's
+  luck of the draw more than a gap: Qiskit's level 3 leaves 108 or 111
+  there depending on its seed (seeds 1–10: four 108s, six 111s), and QCC's
+  estimate of what its SWAPs cost is exact on it (72 CNOTs before routing,
+  39 for the SWAPs), but no wider search tried (128 layouts, or 32
+  routings each) found a routing for less.
+- 0.4.8 routes each layout 16 times with different tie-breaking instead of
+  4, and also optimizes the routing that the first 4 would have given,
+  keeping the cheaper: the SWAPs' CNOTs are only an estimate of the
+  optimized circuit, and on 40 held-out circuits (Quantum Volume, Clifford+T,
+  Hamiltonians and QAOA of 10–16 qubits, other seeds than these) the wider
+  search alone left 3 with more two-qubit gates. With both, 19 of the 40
+  got fewer two-qubit gates and none more (19 213 → 18 936 in all, and
+  66 134 → 64 817 gates); three trade a few single-qubit gates for fewer
+  two-qubit ones, as QCC's cost ordering does everywhere. On the benchmark,
+  seven rows got cheaper and none dearer: Quantum Volume at 16 qubits 822
+  → 783 two-qubit gates with CX or CZ (Qiskit 828; Qiskit's own seeds give
+  798–840 there), Clifford+T 752 / 1251 → 733 / 1209 with CX and 708 /
+  2790 → 692 / 2677 with CZ, the Hamiltonian 1368 / 2106 → 1336 / 2100
+  with CX and 1292 / 4572 → 1256 / 4454 with CZ, QAOA 180 / 409 → 179 /
+  403 with CX. SABRE itself got cheaper in the same change, making the
+  same choices (`core/src/routing/sabre.rs`; 2.1–2.9× fewer instructions
+  for a search on four 16-qubit circuits), so the wider search costs
+  little: against 0.4.7 side by side (best of two medians of five), 0.86×
+  the time with CX and 0.97× with CZ in geometric mean. Where both
+  routings go through the CZ rounds it costs more: the 16-qubit
+  Hamiltonian with CZ 1.70 s → 2.33 s (1.37×), Quantum Volume at 16 with
+  CZ 1.22×.
 - On the Hamiltonian, a Pauli network can need more routing than it saves,
   so QCC routes its logical circuit with one and without, and keeps the
   cheaper: 345 CNOTs against Qiskit's 425 at 8 qubits (648 gates in all,

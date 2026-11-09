@@ -21,4 +21,6 @@ pub mod perfect;
 pub mod sabre;
 
 pub use coupling::CouplingGraph;
-pub use sabre::{Routed, SabreOptions, layout_and_route, route, route_ahead};
+pub use sabre::{
+    Routed, SabreOptions, layout_and_route, layout_and_route_and_first, route, route_ahead,
+};

@@ -234,17 +234,24 @@ qubits (`core/src/device.rs`):
 3. Routing with SABRE, where a SWAP right after a block on the same pair
    counts for what it costs once merged into the block, as in NASSC (Liu,
    Li and Zhou, HPCA 2022): after a CX one CNOT, after a generic block none.
+   Each layout is routed 16 times with different tie-breaking, and the
+   routing with the cheapest SWAPs kept; so is the one the first 4 of each
+   layout would have given (SABRE's default, and QCC's before 0.4.8).
 4. The default pipeline again, on the physical qubits, keeping every
    two-qubit gate on its pair; on a device whose couplings have a direction,
    gates the other way round are turned around with single-qubit gates
-   found from their KAK decompositions.
+   found from their KAK decompositions. When step 3 kept two routings, both
+   are optimized and the cheaper kept: the SWAPs' CNOTs are an estimate of
+   what the optimized circuit needs, so the wider search alone could make
+   a circuit worse.
 
 The result is a circuit on a register `q` of the device's qubits;
 `Circuit.initial_layout` and `Circuit.output_permutation` say on which
 physical qubit each logical qubit starts and ends. A circuit whose two-qubit
 gates already act on coupled pairs keeps its layout. On a 19-qubit
-heavy-hex chip (`benchmarks/compilation/device.py`) this uses 7–8% fewer
-two-qubit gates than Qiskit's level 3, and 13–18% fewer gates in all.
+heavy-hex chip (`benchmarks/compilation/device.py`) this uses 7–10% fewer
+two-qubit gates than Qiskit's level 3 (0.928× with CX, 0.899× with CZ), and
+17–18% fewer gates in all.
 
 Still to come: technology-specific constraints from `DeviceSpec.gate_rules`,
 and error rates in the layout.

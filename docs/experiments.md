@@ -22,18 +22,22 @@ In priority order. Replace this list at the end of each run.
    instruction owns a `String` and three `Vec`s, so each copy or relabel
    allocates four times, and malloc/free are about a fifth of the
    instructions. The Python wrapper is 17–31 ms of it (profiles 2026-11-01
-   and 2026-11-03).
-2. **Hamiltonian compile time.** 0.40–0.45 s at 32 qubits against Qiskit's
-   15 ms, after 0.4.7 added four trials. Ideas: stop a trial's pipeline once
-   it can no longer beat the direct compilation; cache the templates' KAK
-   per Weyl point.
-3. **CZ rounds.** The fixed-point rounds (0.4.4) still cost most of the CZ
-   time: the 16-qubit Hamiltonian on the chip takes 1.6 s against Qiskit's
-   0.15 s. Each round's through-CX candidate leaves 100–600 more single-qubit
-   gates for the next round to fold. The untried fix is a one-pass CX→CZ
-   translation that's good enough to end the rounds sooner. See per-CZ H-side
-   orientation under **Didn't work**: it's the closest lead.
-4. **Extra two-qubit gates on the chip.** QV-8 uses 111 against Qiskit's 108.
+   and 2026-11-03). The router's fix (record steps, write instructions
+   once, 0.4.8) is the pattern to follow.
+2. **CZ device time.** Since 0.4.8 two routings can go through the CZ
+   rounds: the 16-qubit Hamiltonian on the chip takes 2.3 s (was 1.7 s,
+   Qiskit 0.15 s). Ideas: a one-pass CX→CZ translation good enough to end
+   the rounds sooner (see per-CZ H-side orientation under **Didn't work**);
+   skip the second routing's rounds once its first round is clearly worse.
+3. **Hamiltonian compile time.** 0.40–0.45 s at 32 qubits against Qiskit's
+   15 ms. Ideas: stop a trial's pipeline once it can no longer beat the
+   direct compilation; cache the templates' KAK per Weyl point.
+4. **Routing quality beyond more trials.** QV-8 on the chip still uses 111
+   CNOTs (Qiskit 108 at seed 1, but 108 or 111 depending on its seed);
+   no search width tried here (up to 128 layouts or 32 routings each)
+   reached 108. Untried from LightSABRE (Zou et al., arXiv:2409.08368):
+   its release valve and relative scoring; routing whole two-qubit blocks
+   as one node (tried as a lookahead change only, see **Didn't work**).
 5. **The adder's gathered CNOTs** (37/85/181 at 8/16/32 qubits, against
    40/92/196 kept). They cost 108/252/540 gates against 105/245/525, so the
    keep rule declines them. Win them back by choosing the outer gates of the
@@ -49,6 +53,7 @@ Newest first. Details are in `improvement-log.md` under the same date.
 
 | Date | Version | Change | Effect |
 |---|---|---|---|
+| 2026-11-09 | 0.4.8 | Faster SABRE with the same choices (`routing/sabre.rs`: shared `Dag`, scratch-space extended set, `Trace` written out only if kept, `Savings` memo, flat distances); device routing 16 swap trials per layout instead of 4, and the 4-trial routing optimized beside it (`layout_and_route_and_first`, `device.rs`) | Routing 2.1–2.9× fewer instructions, same routings (112/112 outputs byte-identical with old options). Chip: QV-16 822 → 783 CX/CZ, Clifford+T-16 752 → 733 CX, 708 → 692 CZ, Hamiltonian-16 1368 → 1336 CX, 1292 → 1256 CZ, QAOA-16 CX 180 → 179; no row worse. Held-out 40: fewer 2q gates on 19, more on none. Time 0.86× CX, 0.97× CZ (CZ Hamiltonian-16 1.37×) |
 | 2026-11-07 | 0.4.7 | Pauli-network trials judged one by one against the direct compilation; four extra trials at local-Clifford penalty 0.1 (`FRUGAL_LOCAL_PENALTY`) beside the eight at 0.01 | Hamiltonian-32 740/1555 → 687/1511; Hamiltonian-8 107/293 → 101/286; chip CZ Hamiltonian-8 331/1333 → 310/1119; geometric mean vs Qiskit 0.938× → 0.933× two-qubit gates; 15 held-out Hamiltonians 0.981× CNOTs, worse on none; Hamiltonians compile 1.3–1.5× slower |
 | 2026-11-06 | 0.4.6 | Compile-wide cache of two-qubit syntheses per native set (`SynthesisCache`, 66% of requests repeat); `gather_blocks` reorders indices instead of copying | Same outputs. Chip CZ 0.83× the time; chip CZ Hamiltonian-16 2137 → 1601 ms |
 | 2026-11-06 | 0.4.5 | Independent candidates side by side (`parallel.rs`): SABRE's 32 layout trials, direct and through-CX pipelines, Pauli networks, device candidates; 64-instruction threshold before spawning | 112/112 outputs byte-identical. Chip 0.51× the time with CX, 0.62× with CZ |
@@ -97,6 +102,14 @@ what new fact would justify another attempt.
   - Left out as mixed. Retry if implemented in Rust and combined with the rounds, choosing the side with the whole run in view; it was never tried that way.
 - **CX repeated rounds** (2026-11-03). Rerunning `compile` on CX output still shaves 1–4 gates (Clifford+T-16 500 → 496), never two-qubit gates. Not worth the time, so the rounds skip CX.
 
+**Routing (`routing/sabre.rs`, `device.rs`)**
+- **More layout trials** (2026-11-09, 64 or 128 instead of 32, 4 swap trials). QV-8 stayed 111; 128 helped QV-16 (813) and the adder (144) but at 3× the routing time, and 64 made the CZ Hamiltonian-8 worse (332 vs 310). More swap trials per layout did more per unit of time.
+- **Swap trials 8 or 32 alone** (2026-11-09). 8: CX Hamiltonian-16 1368 → 1382, Clifford+T-16 752 → 756. 32: CZ Hamiltonian-16 4572 → 4913 gates. 16 alone was never worse on the 32 chip rows but was on 3 of 40 held-out circuits (Clifford+T-10 CX 342 → 350, Hamiltonian-14 CX 1068 → 1082, Hamiltonian-10 CZ 465 → 483): the SWAPs' CNOT estimate is not the optimized count. Shipped: 16, with the 4-trial routing optimized too.
+- **Top-k routings by estimate, each optimized** (2026-11-09, 4 swap trials, k = 4 or 8). Small wins (QFT-8 CX 80 → 77, adder-16 148 → 146, CZ QAOA-8 93 → 89), QV-8 unchanged, CZ time up to 3.5× (Hamiltonian-16 1.9 → 6.6 s at k = 8). Retry if the physical pipeline gets much cheaper.
+- **Block-aware extended set** (2026-11-09: a two-qubit gate continuing a block on the same pair not counted again in the lookahead, as if routing blocks). QV-16 822 → 807, Hamiltonian-16 1368 → 1348, QAOA-16 180 → 173, but QFT-16 353 → 438 and Clifford+T-16 752 → 762. Retry as part of a real block-level router with its own tuned weights.
+- **merge_weight 0 or 1** (2026-11-09). 0 (plain SABRE): QFT-16 353 → 376, adder-16 148 → 170. 1: same as 0.5 on the rows tried. Kept 0.5.
+- **Ruled out while debugging QV-8's 111**: the SWAP-cost estimate is exact there (72 logical CX + 39 = 111 for every routing printed), so the gap is the search, not the optimization after it; and Qiskit itself gives 108 or 111 with seeds 1–10.
+
 **Speed (`lower.rs`, `parallel.rs`)**
 - **A thread for every compilation** (2026-11-06). 8-qubit GHZ with CZ got 1.2× slower (1.5 → 1.7 ms): a thread costs a few tenths of a millisecond. There's now a 64-instruction threshold, and no thread without a second candidate.
 - **Reading a profile as "no single hotspot"** (2026-10-30). The QV-32 profile looked spread out (resynthesis 44%). A callgrind look on 2026-11-01 found the serial passes were the bottleneck and the block syntheses on 4 cores were not. Profile the main thread, not totals, and note that under valgrind threads run one at a time.
@@ -105,7 +118,8 @@ what new fact would justify another attempt.
 
 - **Python wrapper on Quantum Volume** (2026-11-01, 2026-11-03, 2026-11-06). About 17–31 ms of QV-32's time: `PassManager.run` copies the circuit and `NativePipeline` builds about 9,000 dataclasses (73,330 `__init__` calls over 5 runs). Deferred each time as a small share against the Rust core's 95–105 ms. It's still a candidate, behind **Next** item 1.
 - **A new synthesis method instead of exact speed-ups** (2026-11-01). Speed-ups were chosen because they can be verified byte for byte.
-- **LightSABRE (arXiv:2409.08368) and CZ-native single-qubit reduction** (2026-11-06). Searched; no decision recorded.
+- **LightSABRE (Zou, Treinish, Hartman, Ivrii and Lishman, arXiv:2409.08368)** (2026-11-06, 2026-11-09). Read for 0.4.8: QCC already has its release valve and uses SABRE's nondeterminism (trials); 0.4.8 took its lesson that more trials pay once routing is cheap. Its relative scoring would change float ties, so the outputs could not be checked byte for byte; left for a run that aims at routing quality (Next item 4).
+- **CZ-native single-qubit reduction** (2026-11-06). Searched; no decision recorded.
 - **pytket `ThreeQubitSquash`** (2026-10-30). See **Next** item 6.
 
 ## Method lessons
@@ -116,4 +130,7 @@ what new fact would justify another attempt.
   - With every core busy, any removed work counts, not just the critical path.
 - **Tests at tolerance edges.** A count test exactly at the tolerance (θ − π/2 = 1e-10) can go either way under rounding in both methods. The 2026-11-01 run changed the test's nudges to either side of the edge. Never weaken a test to pass; if an edge is genuinely ambiguous, say so in the log.
 - **Outputs.** For exact speed-ups, compare all 112 benchmark compilations byte for byte before and after.
+- **Profiling a Rust pass without Python** (2026-11-09). Dump the pass's input from the device path (a throwaway env var) and time it in a throwaway `core/examples/` binary under `valgrind --tool=callgrind`; instruction counts are stable where wall time on this VM varied ±20%. With `CARGO_PROFILE_RELEASE_DEBUG=true`, `callgrind_annotate --auto=yes` gives line-level counts.
+- **Python string edits that silently miss** (2026-11-09). A `str.replace` on code that an earlier experiment had changed did nothing, and the default stayed at 4 swap trials until a test caught it. Assert that the old text is there before replacing.
+- **Tests that must not be vacuous.** A "never worse" test should also assert that the two sides differed somewhere (`the_wide_search_is_never_worse_than_the_usual_one` counts strictly cheaper cases); that is how the missed edit above showed up.
 - **CI.** CI may run a newer Rust and clippy than the run's machine (a 1.99 clippy lint stopped a simulator release built with 1.97), so update to the latest stable before releasing. While master's version equals the one on PyPI, CI's `pip install --find-links dist` can pick the published wheel instead of the local build.
