@@ -8,6 +8,85 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-11 — Instructions without heap memory, a faster hasher, and no GC storms (0.4.9)
+
+**What.**
+- `core/src/ir.rs`: an `Instruction`'s name is a `Name` (a
+  `Cow<'static, str>` borrowed from a list of the 50 gate names the
+  compiler knows, owned only for opaque gates), and its qubits and
+  parameters are `Inline<T, 3>`: up to three items stored inline, a `Vec`
+  beyond. Both read, compare, hash and print as the `str` and slice they
+  hold, so almost every pass compiled unchanged; `Instruction::gate` takes
+  anything that converts (arrays, slices, `Vec`s), and its callers now pass
+  arrays. `one_qubit::Op` and the two-qubit synthesizer's gate keys use the
+  same types.
+- `core/src/hashing.rs`: `FastMap`, a `HashMap` with FxHash (rustc's
+  multiply-and-rotate hash), for the internal maps of phase folding,
+  two-qubit synthesis, the passes, lowering's memos and SABRE's `Savings`.
+- `python/qevedo/compiler/passes/native.py`: `paused_gc()` disables
+  Python's cyclic collector while instructions cross to and from the core
+  (also around the Qiskit plugin's crossing), and restores it after.
+
+**Why.** Quantum Volume at 32 qubits took 243 ms in the last full run
+against Qiskit's 49 ms; Next item 1 named allocation as the main serial
+cost. A callgrind profile of the core alone (1.09 billion instructions)
+confirmed it: malloc, free and friends were 27% of the instructions, and
+two thirds of the allocations came from copying, relabelling and building
+instructions (`Instruction::clone` 150 000 times, `relabel` 130 000,
+`one_qubit::rot` 107 000). SipHash was another 3.5%. Timing the Python
+side piece by piece found that building the tuples and `Instruction`s
+cost only about 5 ms each way, but the native pass took 95–103 ms against
+75 ms for the bare core call: with the collector disabled it took 75–80.
+CPython starts a collection every 700 new objects, and the crossing makes
+about 45 000, so some of those collections walk the whole heap (Qiskit's
+modules included). Qiskit's own Rust core stores standard gates as an
+enum and parameters inline for the same reason. These are exact speed-ups
+whose outputs can be compared byte for byte, of the biggest measured
+weakness against Qiskit; the quality candidates (three-qubit
+resynthesis, routing search) promised less certain gains.
+
+**Measured** (4-vCPU Xeon VM).
+- Outputs: 160 compilations (24 circuits all-to-all with CX and CZ, 16
+  on the heavy-hex chip with CX and CZ, each also through the Qiskit
+  plugin) identical byte for byte to 0.4.8's, including output
+  permutations; `run.py`, `device.py` and `plugin.py` rerun in full, every
+  gate count unchanged, every output verified; `check.py` passes.
+- Core alone, QV-32: 1.09 → 0.91 billion instructions (callgrind);
+  allocation 27% → 10% of them; 93 → 59 ms (median of 11, Rust binary).
+- End to end against 0.4.8 side by side (best of two medians of 11,
+  all-to-all, CX): 0.85× in geometric mean over 24 circuits; QV 8/16/32
+  6.9 → 5.6, 30.0 → 22.7, 149 → 92 ms; Clifford+T 32 16.6 → 12.9 ms;
+  Heisenberg 32 13.3 → 10.4 ms; Hamiltonian 32 358 → 326 ms; GHZ (0.3–0.6 ms)
+  0.96–1.04×, noise.
+- Chip (best of two medians of five): 0.93× with CX, 0.83× with CZ; CZ
+  Hamiltonian-16 1.79 → 1.42 s, CZ QV-16 424 → 335 ms.
+- Full benchmark run: QCC's median 6 ms against Qiskit's 10; faster than
+  Qiskit on 20 of 24 circuits (was 18); QV-16 20 against 22 ms, QV-32 89
+  against 50 ms (was 243 against 49). Chip medians 24 ms with CX (Qiskit
+  31) and 77 ms with CZ (Qiskit 32).
+
+**Learned.**
+- The Python wrapper's cost was the garbage collector, not the
+  dataclasses: earlier runs (2026-11-01, -03, -06) blamed the 9,000
+  `Instruction`s, which cost about 5 ms. Time Python glue with `gc`
+  disabled as well as enabled before optimizing it.
+- Changing a core type behind `Deref` to the old type's slice or `str`
+  kept the diff small: 14 compile errors in the library after the type
+  change, all mechanical.
+- The callgrind numbers include the worker threads' synthesis; the wall
+  time gain on QV-32 (0.62×) was larger than the instruction count's
+  (0.83×) because the main thread's serial passes were the allocating
+  ones.
+
+**Next.**
+1. QV-32 is still 1.8× Qiskit. The crossing itself: the core call takes
+   70–75 ms from Python against 59 ms in a Rust binary (pyo3 builds a
+   list, a tuple and a string per instruction; interned names or a flat
+   array would cut it). Then the synthesis: `dress`, `Shape::of`, 4×4
+   products, `hypot` and `sincos` are the top of the profile now.
+2. CZ device time (Hamiltonian-16 1.42 s against Qiskit's 0.15 s).
+3. Hamiltonian compile time (0.33 s at 32 qubits against 17 ms).
+
 ## 2026-11-09 — Faster SABRE, and a wider routing search on devices (0.4.8)
 
 **What.** `core/src/routing/sabre.rs` makes the same routing choices at

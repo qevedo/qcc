@@ -257,12 +257,10 @@ impl Builder<'_> {
         let pb = b * k + ports.slot(self.arch, b, a);
         self.walk(q, pa);
         self.walk(r, pb);
-        let barrier = Instruction::gate("barrier", vec![pa], vec![]);
+        let barrier = Instruction::gate("barrier", [pa], []);
         self.out.push(barrier.clone());
-        self.out
-            .push(Instruction::gate("teleport", vec![pa, pb], vec![]));
-        self.out
-            .push(Instruction::gate("teleport", vec![pb, pa], vec![]));
+        self.out.push(Instruction::gate("teleport", [pa, pb], []));
+        self.out.push(Instruction::gate("teleport", [pb, pa], []));
         self.out.push(barrier);
         self.occupant[pa] = Some(r);
         self.occupant[pb] = Some(q);
@@ -300,8 +298,7 @@ impl Builder<'_> {
                 self.swap(b * k + w[0], b * k + w[1]);
             }
         }
-        self.out
-            .push(Instruction::gate("teleport", vec![from, to], vec![]));
+        self.out.push(Instruction::gate("teleport", [from, to], []));
         self.occupant[from] = None;
         self.occupant[to] = Some(q);
         self.slot_of[q] = to;
@@ -310,7 +307,7 @@ impl Builder<'_> {
 
     /// A SWAP inside a core (one of the qubits may be empty).
     fn swap(&mut self, x: usize, y: usize) {
-        self.out.push(Instruction::gate("swap", vec![x, y], vec![]));
+        self.out.push(Instruction::gate("swap", [x, y], []));
         let (qx, qy) = (self.occupant[x], self.occupant[y]);
         self.occupant[x] = qy;
         self.occupant[y] = qx;
@@ -370,7 +367,7 @@ mod tests {
                 .map(|_| {
                     let a = rng.below(qubits);
                     let b = (a + 1 + rng.below(qubits - 1)) % qubits;
-                    Instruction::gate("cx", vec![a, b], vec![])
+                    Instruction::gate("cx", [a, b], [])
                 })
                 .collect();
             let options = PhysicalOptions {

@@ -116,3 +116,42 @@ def test_negligible_two_qubit_interactions_are_dropped(pipeline):
     assert cx_count("pi/16384") == 2
     assert cx_count("pi/32768") == 0
     assert cx_count("pi/1048576") == 0
+
+
+def test_the_collector_is_paused_only_while_instructions_cross():
+    import gc
+
+    assert gc.isenabled()
+    with native.paused_gc():
+        assert not gc.isenabled()
+    assert gc.isenabled()
+    # It is restored after an error too, and left off if it was off.
+    with pytest.raises(RuntimeError):
+        with native.paused_gc():
+            raise RuntimeError
+    assert gc.isenabled()
+    gc.disable()
+    try:
+        with native.paused_gc():
+            pass
+        assert not gc.isenabled()
+    finally:
+        gc.enable()
+
+
+def test_wide_barriers_and_measurements_cross_unchanged():
+    # A barrier on more qubits than an instruction stores inline (three),
+    # and measurements with their classical bits, come back as they went.
+    out = native._core.run_passes(
+        [
+            ("h", [0], [], []),
+            ("barrier", [0, 1, 2, 3, 4], [], []),
+            ("u3", [4], [0.1, 0.2, 0.3], []),
+            ("measure", [4], [], [2]),
+        ],
+        ["cx", "rz", "sx", "x"],
+        [],
+    )
+    assert out[1] == ("barrier", [0, 1, 2, 3, 4], [], [])
+    assert out[2] == ("u3", [4], [0.1, 0.2, 0.3], [])
+    assert out[3] == ("measure", [4], [], [2])

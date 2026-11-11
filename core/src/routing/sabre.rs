@@ -47,12 +47,12 @@
 
 use super::coupling::CouplingGraph;
 use crate::gates::{matrix_1q, matrix_2q};
+use crate::hashing::FastMap;
 use crate::ir::Instruction;
 use crate::linalg::{M2, M4};
 use crate::rng::Rng;
 use crate::two_qubit::cx_count;
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 /// Tuning of SABRE; the defaults follow the paper and Qiskit.
 #[derive(Clone, Copy, Debug)]
@@ -464,7 +464,7 @@ impl Trace {
                     });
                 }
                 Step::Swap(a, b) => {
-                    instructions.push(Instruction::gate("swap", vec![a, b], vec![]));
+                    instructions.push(Instruction::gate("swap", [a, b], []));
                     let (qa, qb) = (at[a], at[b]);
                     at[a] = qb;
                     at[b] = qa;
@@ -492,7 +492,7 @@ impl Trace {
 /// bit: the routings of one layout keep meeting the same blocks, and two
 /// CNOT counts (two KAK decompositions) per block were a third of the
 /// routing's time. A unitary equal in value but not in bits is only a miss.
-type Savings = RefCell<HashMap<[u64; 32], usize>>;
+type Savings = RefCell<FastMap<[u64; 32], usize>>;
 
 fn bits(m: &M4) -> [u64; 32] {
     let mut out = [0; 32];
@@ -962,14 +962,14 @@ mod tests {
         (0..gates)
             .map(|_| {
                 if rng.below(3) == 0 {
-                    return Instruction::gate("rz", vec![rng.below(n)], vec![rng.range(-3.0, 3.0)]);
+                    return Instruction::gate("rz", [rng.below(n)], [rng.range(-3.0, 3.0)]);
                 }
                 let a = rng.below(n);
                 let b = (a + 1 + rng.below(n - 1)) % n;
                 match rng.below(3) {
-                    0 => Instruction::gate("cx", vec![a, b], vec![]),
-                    1 => Instruction::gate("cz", vec![a, b], vec![]),
-                    _ => Instruction::gate("rzz", vec![a, b], vec![0.7]),
+                    0 => Instruction::gate("cx", [a, b], []),
+                    1 => Instruction::gate("cz", [a, b], []),
+                    _ => Instruction::gate("rzz", [a, b], [0.7]),
                 }
             })
             .collect()
@@ -1292,7 +1292,7 @@ mod tests {
     #[test]
     fn errors() {
         let graph = CouplingGraph::line(3);
-        let wide = vec![Instruction::gate("ccx", vec![0, 1, 2], vec![])];
+        let wide = vec![Instruction::gate("ccx", [0, 1, 2], [])];
         assert!(
             layout_and_route(&wide, 3, &graph, &SabreOptions::default())
                 .unwrap_err()

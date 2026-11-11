@@ -52,14 +52,14 @@ mod tests {
     use crate::testing::{Rng, circuit_unitary, dense_equal_up_to_phase};
 
     fn g(name: &str, qubits: Vec<usize>) -> Instruction {
-        Instruction::gate(name, qubits, vec![])
+        Instruction::gate(name, qubits, [])
     }
 
     fn measure(q: usize) -> Instruction {
         Instruction {
             name: "measure".into(),
-            qubits: vec![q],
-            params: vec![],
+            qubits: [q].into(),
+            params: [].into(),
             clbits: vec![q],
         }
     }

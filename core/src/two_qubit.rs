@@ -8,10 +8,11 @@
 //! KAK decompositions. Matches `qevedo/compiler/synthesis/two_qubit.py`.
 
 use crate::gates::{cx, matrix_2q, pauli, rotation, rx, ry, rz, sx};
+use crate::hashing::FastMap;
+use crate::ir::{Inline, Name};
 use crate::linalg::{C, I, M2, M4, ONE, ZERO, equal_up_to_phase4, kron, symmetric_eigenvectors};
 use crate::numeric;
 use crate::one_qubit::{euler_zyz, remainder};
-use std::collections::HashMap;
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_4, PI, TAU};
 use std::sync::LazyLock;
 
@@ -626,7 +627,7 @@ fn merge_locals(steps: Vec<Step>) -> Vec<Step> {
 }
 
 /// Key of a gate for the caches: name, parameter bits and orientation.
-type GateKey = (String, Vec<u64>, [usize; 2]);
+type GateKey = (Name, Inline<u64, 3>, [usize; 2]);
 
 /// Pauli products `[P, Q]` (0..4 = I, X, Y, Z) a gate maps to Pauli products, with their images.
 type PauliImages = Vec<([usize; 2], [usize; 2])>;
@@ -634,14 +635,14 @@ type PauliImages = Vec<([usize; 2], [usize; 2])>;
 /// Two-qubit synthesis with caches of per-gate commutation data.
 #[derive(Default)]
 pub struct TwoQubitSynth {
-    commuting: HashMap<GateKey, [Vec<usize>; 2]>,
-    images: HashMap<GateKey, PauliImages>,
-    paired: HashMap<GateKey, Vec<usize>>,
+    commuting: FastMap<GateKey, [Vec<usize>; 2]>,
+    images: FastMap<GateKey, PauliImages>,
+    paired: FastMap<GateKey, Vec<usize>>,
 }
 
 fn key(name: &str, params: &[f64], operands: [usize; 2]) -> GateKey {
     (
-        name.to_string(),
+        Name::from(name),
         params.iter().map(|p| p.to_bits()).collect(),
         operands,
     )

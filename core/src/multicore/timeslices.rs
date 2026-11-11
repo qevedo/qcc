@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn instructions_skip_single_qubit_gates_and_reject_wide_ones() {
-        let g = |name: &str, q: &[usize]| Instruction::gate(name, q.to_vec(), vec![]);
+        let g = |name: &str, q: &[usize]| Instruction::gate(name, q.to_vec(), []);
         let s = Timeslices::from_instructions(
             3,
             &[

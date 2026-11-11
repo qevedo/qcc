@@ -10,9 +10,9 @@ fn from_raw(instructions: Vec<Raw>) -> Vec<qcc::Instruction> {
     instructions
         .into_iter()
         .map(|(name, qubits, params, clbits)| qcc::Instruction {
-            name: name.to_lowercase(),
-            qubits,
-            params,
+            name: name.to_lowercase().into(),
+            qubits: qubits.into(),
+            params: params.into(),
             clbits,
         })
         .collect()
@@ -42,7 +42,7 @@ fn timing(raw: Option<RawTiming>) -> qcc::multicore::Timing {
 fn to_raw(instructions: Vec<qcc::Instruction>) -> Vec<Raw> {
     instructions
         .into_iter()
-        .map(|i| (i.name, i.qubits, i.params, i.clbits))
+        .map(|i| (i.name.into(), i.qubits.into(), i.params.into(), i.clbits))
         .collect()
 }
 
@@ -116,7 +116,11 @@ fn compile_for_device(
             compile_for_device(instructions, native, &device, &options)
         })
         .map_err(PyValueError::new_err)?;
-    Ok((to_raw(out.instructions), out.initial_layout, out.final_layout))
+    Ok((
+        to_raw(out.instructions),
+        out.initial_layout,
+        out.final_layout,
+    ))
 }
 
 /// Run the named passes of the core in order ("decompose", "merge_1q",

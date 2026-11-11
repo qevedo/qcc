@@ -36,7 +36,7 @@ pub fn decompose_gate(
         ));
     }
     let target = gate_dense(&name, params).ok_or_else(|| format!("no matrix for '{name}'"))?;
-    let gate = Instruction::gate(&name, (0..qubits).collect(), params.to_vec());
+    let gate = Instruction::gate(&name, (0..qubits).collect::<Vec<_>>(), params);
     let instructions = compile(vec![gate], native.iter().cloned())?;
     let error = distance(&unitary(&instructions, qubits), &target);
     Ok(Decomposition {

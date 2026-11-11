@@ -6,6 +6,7 @@
 //! `qevedo/compiler/synthesis/one_qubit.py`.
 
 use crate::gates::h;
+use crate::ir::{Inline, Name};
 use crate::linalg::{C, M2};
 use std::collections::HashSet;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
@@ -15,15 +16,15 @@ pub const TOL: f64 = 1e-10;
 /// One gate of a synthesized sequence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Op {
-    pub name: String,
-    pub params: Vec<f64>,
+    pub name: Name,
+    pub params: Inline<f64, 3>,
 }
 
 impl Op {
-    fn new(name: &str, params: Vec<f64>) -> Op {
+    fn new(name: &str, params: impl Into<Inline<f64, 3>>) -> Op {
         Op {
-            name: name.to_string(),
-            params,
+            name: Name::from(name),
+            params: params.into(),
         }
     }
 }
@@ -71,7 +72,7 @@ pub enum Basis1q {
 
 fn rot(name: &str, angle: f64, out: &mut Vec<Op>) {
     if !is_zero(angle) {
-        out.push(Op::new(name, vec![wrap(angle)]));
+        out.push(Op::new(name, [wrap(angle)]));
     }
 }
 
@@ -87,7 +88,7 @@ impl Basis1q {
             Basis1q::U3(name) => {
                 let (theta, phi, lam) = euler_zyz(u);
                 if !(is_zero(theta) && is_zero(phi + lam)) {
-                    out.push(Op::new(name, vec![wrap(theta), wrap(phi), wrap(lam)]));
+                    out.push(Op::new(name, [wrap(theta), wrap(phi), wrap(lam)]));
                 }
             }
             Basis1q::Zsx { z, x } => {
@@ -97,18 +98,18 @@ impl Basis1q {
                 } else if (theta - FRAC_PI_2).abs() < TOL {
                     // U3(π/2, φ, λ) ≅ Rz(φ + π/2) SX Rz(λ - π/2)
                     rot(z, lam - FRAC_PI_2, &mut out);
-                    out.push(Op::new("sx", vec![]));
+                    out.push(Op::new("sx", []));
                     rot(z, phi + FRAC_PI_2, &mut out);
                 } else if *x && (theta - PI).abs() < TOL {
                     // U3(π, φ, λ) ≅ Rz(φ + π) X Rz(λ) = Rz(φ - λ + π) X
-                    out.push(Op::new("x", vec![]));
+                    out.push(Op::new("x", []));
                     rot(z, phi - lam + PI, &mut out);
                 } else {
                     // U3(θ, φ, λ) ≅ Rz(φ + π) SX Rz(θ + π) SX Rz(λ)
                     rot(z, lam, &mut out);
-                    out.push(Op::new("sx", vec![]));
+                    out.push(Op::new("sx", []));
                     rot(z, theta + PI, &mut out);
-                    out.push(Op::new("sx", vec![]));
+                    out.push(Op::new("sx", []));
                     rot(z, phi + PI, &mut out);
                 }
             }
@@ -119,7 +120,7 @@ impl Basis1q {
                     rot(z, phi + lam, &mut out);
                 } else {
                     rot(z, lam - FRAC_PI_2, &mut out);
-                    out.push(Op::new("rx", vec![wrap(theta)]));
+                    out.push(Op::new("rx", [wrap(theta)]));
                     rot(z, phi + FRAC_PI_2, &mut out);
                 }
             }
@@ -129,7 +130,7 @@ impl Basis1q {
                     rot(z, phi + lam, &mut out);
                 } else {
                     rot(z, lam, &mut out);
-                    out.push(Op::new("ry", vec![wrap(theta)]));
+                    out.push(Op::new("ry", [wrap(theta)]));
                     rot(z, phi, &mut out);
                 }
             }
@@ -140,7 +141,7 @@ impl Basis1q {
                     rot("rx", phi + lam, &mut out);
                 } else {
                     rot("rx", lam, &mut out);
-                    out.push(Op::new("ry", vec![wrap(-theta)]));
+                    out.push(Op::new("ry", [wrap(-theta)]));
                     rot("rx", phi, &mut out);
                 }
             }

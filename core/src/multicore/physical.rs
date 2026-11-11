@@ -554,8 +554,7 @@ impl<'a> Builder<'a> {
                 .position(|&(_, _, to)| self.occupant[to].is_none())
                 .unwrap_or(0);
             let (q, from, to) = moves.remove(i);
-            self.out
-                .push(Instruction::gate("teleport", vec![from, to], vec![]));
+            self.out.push(Instruction::gate("teleport", [from, to], []));
             self.teleportations += self.arch.hops(from / k, to / k);
             if self.occupant[from] == Some(q) {
                 self.occupant[from] = None;
@@ -711,9 +710,9 @@ mod tests {
             let a = rng.below(n);
             let b = (a + 1 + rng.below(n - 1)) % n;
             out.push(match rng.below(3) {
-                0 => Instruction::gate("cx", vec![a, b], vec![]),
-                1 => Instruction::gate("cz", vec![a, b], vec![]),
-                _ => Instruction::gate("rzz", vec![a, b], vec![0.7]),
+                0 => Instruction::gate("cx", [a, b], []),
+                1 => Instruction::gate("cz", [a, b], []),
+                _ => Instruction::gate("rzz", [a, b], [0.7]),
             });
         }
         out
@@ -903,17 +902,17 @@ mod tests {
         let arch = Architecture::new(2, 2).unwrap();
         let chip = CouplingGraph::line(2);
         let circuit = vec![
-            Instruction::gate("h", vec![0], vec![]),
-            Instruction::gate("barrier", vec![0, 1, 2], vec![]),
-            Instruction::gate("x", vec![2], vec![]),
+            Instruction::gate("h", [0], []),
+            Instruction::gate("barrier", [0, 1, 2], []),
+            Instruction::gate("x", [2], []),
         ];
         check(&circuit, 3, &arch, &chip, Method::Hqa, &quick());
         let measured = vec![
-            Instruction::gate("cx", vec![0, 1], vec![]),
+            Instruction::gate("cx", [0, 1], []),
             Instruction {
                 name: "measure".into(),
-                qubits: vec![1],
-                params: vec![],
+                qubits: [1].into(),
+                params: [].into(),
                 clbits: vec![0],
             },
         ];
@@ -935,7 +934,7 @@ mod tests {
     fn errors() {
         let arch = Architecture::new(2, 3).unwrap();
         let options = PhysicalOptions::default();
-        let wide = vec![Instruction::gate("ccx", vec![0, 1, 2], vec![])];
+        let wide = vec![Instruction::gate("ccx", [0, 1, 2], [])];
         assert!(
             map_and_route(
                 &wide,

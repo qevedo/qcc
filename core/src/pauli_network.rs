@@ -196,11 +196,11 @@ impl Gate {
 
     fn instruction(&self) -> Instruction {
         match *self {
-            Gate::H(q) => Instruction::gate("h", vec![q], vec![]),
-            Gate::S(q) => Instruction::gate("s", vec![q], vec![]),
-            Gate::Sdg(q) => Instruction::gate("sdg", vec![q], vec![]),
-            Gate::Sx(q) => Instruction::gate("sx", vec![q], vec![]),
-            Gate::Cx(c, t) => Instruction::gate("cx", vec![c, t], vec![]),
+            Gate::H(q) => Instruction::gate("h", [q], []),
+            Gate::S(q) => Instruction::gate("s", [q], []),
+            Gate::Sdg(q) => Instruction::gate("sdg", [q], []),
+            Gate::Sx(q) => Instruction::gate("sx", [q], []),
+            Gate::Cx(c, t) => Instruction::gate("cx", [c, t], []),
         }
     }
 }
@@ -361,7 +361,7 @@ pub fn merge_rotations(instructions: Vec<Instruction>) -> Vec<Instruction> {
         .enumerate()
         .filter(|(i, _)| !removed[*i])
         .map(|(i, inst)| match new_angle[i] {
-            Some(theta) => Instruction::gate("rz", inst.qubits, vec![theta]),
+            Some(theta) => Instruction::gate("rz", inst.qubits, [theta]),
             None => inst,
         })
         .collect()
@@ -570,7 +570,7 @@ impl State {
                     self.turn_to_z(p.letter(q), q);
                     let (p, _) = self.pending[i];
                     let angle = p.sign() * theta;
-                    self.out.push(Instruction::gate("rz", vec![q], vec![angle]));
+                    self.out.push(Instruction::gate("rz", [q], [angle]));
                 }
                 self.pending.remove(i);
                 stuck = 0;
@@ -881,9 +881,9 @@ mod tests {
                 let a = rng.below(n);
                 let b = (a + 1 + rng.below(n - 1)) % n;
                 match name {
-                    "cx" | "cz" | "swap" => Instruction::gate(name, vec![a, b], vec![]),
-                    "rz" => Instruction::gate(name, vec![a], vec![rng.range(-3.0, 3.0)]),
-                    _ => Instruction::gate(name, vec![a], vec![]),
+                    "cx" | "cz" | "swap" => Instruction::gate(name, [a, b], []),
+                    "rz" => Instruction::gate(name, [a], [rng.range(-3.0, 3.0)]),
+                    _ => Instruction::gate(name, [a], []),
                 }
             })
             .collect()
@@ -929,7 +929,7 @@ mod tests {
                     for q in 0..n {
                         let w = at[q];
                         if w != q {
-                            out.push(Instruction::gate("swap", vec![w, q], vec![]));
+                            out.push(Instruction::gate("swap", [w, q], []));
                             let p = at.iter().position(|&x| x == q).expect("a permutation");
                             at[p] = w;
                             at[q] = q;
@@ -979,7 +979,7 @@ mod tests {
     fn rotations_merge_through_hadamards() {
         // T, then H CX H on the other qubit (which commutes with Z on the
         // first), then T again: one rotation of π/2, a Clifford, remains.
-        let g = |name: &str, q: Vec<usize>| Instruction::gate(name, q, vec![]);
+        let g = |name: &str, q: Vec<usize>| Instruction::gate(name, q, []);
         let circuit = vec![
             g("t", vec![0]),
             g("h", vec![1]),

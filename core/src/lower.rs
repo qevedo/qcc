@@ -2,12 +2,13 @@
 //! Matches `qevedo/compiler/passes/decompose.py`.
 
 use crate::gates::{is_known_gate, matrix_1q, matrix_2q};
-use crate::ir::{Instruction, NON_GATES, cost};
+use crate::hashing::FastMap;
+use crate::ir::{Inline, Instruction, NON_GATES, cost};
 use crate::linalg::{M2, M4};
 use crate::one_qubit::{Basis1q, bases_for, count_1q, synthesize_1q};
 use crate::passes::merge_single_qubit_runs;
 use crate::two_qubit::{Objective, Step, TwoQubitBasis, TwoQubitSynth, bases_2q};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -162,7 +163,7 @@ pub struct Lowering {
     pub bases_1q: Vec<Basis1q>,
     bases_2q: Vec<TwoQubitBasis>,
     synth: TwoQubitSynth,
-    memo: HashMap<(String, Vec<u64>, usize), Vec<Instruction>>,
+    memo: FastMap<(String, Vec<u64>, usize), Vec<Instruction>>,
     memo_2q: Memo2q,
     /// The syntheses of every lowering of the same compilation for the same
     /// native gates, when it shares them ([`Lowering::sharing`]).
@@ -170,7 +171,7 @@ pub struct Lowering {
 }
 
 /// Two-qubit syntheses by the bits of their unitary and their objective.
-type Memo2q = HashMap<([u64; 32], Objective), Vec<Instruction>>;
+type Memo2q = FastMap<([u64; 32], Objective), Vec<Instruction>>;
 
 /// A [`Memo2q`] that the threads of a compilation share.
 type SharedMemo2q = Arc<Mutex<Memo2q>>;
@@ -188,7 +189,7 @@ type SharedMemo2q = Arc<Mutex<Memo2q>>;
 /// the unitary, the objective and the native gates (its own caches hold
 /// per-gate data), so remembering it across lowerings changes no output.
 #[derive(Clone, Default)]
-pub struct SynthesisCache(Arc<Mutex<HashMap<Vec<String>, SharedMemo2q>>>);
+pub struct SynthesisCache(Arc<Mutex<FastMap<Vec<String>, SharedMemo2q>>>);
 
 impl SynthesisCache {
     pub fn new() -> SynthesisCache {
@@ -212,8 +213,8 @@ impl Lowering {
             bases_2q: bases_2q(&native),
             native,
             synth: TwoQubitSynth::new(),
-            memo: HashMap::new(),
-            memo_2q: HashMap::new(),
+            memo: FastMap::default(),
+            memo_2q: FastMap::default(),
             shared: None,
         }
     }
@@ -268,8 +269,11 @@ impl Lowering {
             inst.qubits.len(),
         );
         if !self.memo.contains_key(&key) {
-            let placeholder =
-                Instruction::gate(&name, (0..inst.qubits.len()).collect(), inst.params.clone());
+            let placeholder = Instruction::gate(
+                &name,
+                (0..inst.qubits.len()).collect::<Inline<usize, 3>>(),
+                inst.params.clone(),
+            );
             let lowered = self.lower_new(&placeholder)?;
             self.memo.insert(key.clone(), lowered);
         }
@@ -285,7 +289,7 @@ impl Lowering {
         if let Some(body) = definition(name, &inst.params) {
             let mut out = Vec::new();
             for (sub, params, operands) in body {
-                let qubits = operands.iter().map(|&i| inst.qubits[i]).collect();
+                let qubits: Inline<usize, 3> = operands.iter().map(|&i| inst.qubits[i]).collect();
                 out.extend(self.lower(&Instruction::gate(sub, qubits, params))?);
             }
             candidates.push(merge_single_qubit_runs(out, &self.native, &self.bases_1q));
@@ -336,7 +340,7 @@ impl Lowering {
         }
         Ok(synthesize_1q(m, &self.bases_1q)
             .into_iter()
-            .map(|op| Instruction::gate(&op.name, vec![qubit], op.params))
+            .map(|op| Instruction::gate(&op.name, [qubit], op.params))
             .collect())
     }
 
@@ -494,11 +498,9 @@ fn synthesize_2q(
                 Step::U(q, u) => out.extend(
                     synthesize_1q(&u, bases_1q)
                         .into_iter()
-                        .map(|op| Instruction::gate(&op.name, vec![q], op.params)),
+                        .map(|op| Instruction::gate(&op.name, [q], op.params)),
                 ),
-                Step::Gate(name, params, q) => {
-                    out.push(Instruction::gate(&name, q.to_vec(), params))
-                }
+                Step::Gate(name, params, q) => out.push(Instruction::gate(&name, q, params)),
             }
         }
         if best.as_ref().is_none_or(|b| cost(&out) < cost(b)) {

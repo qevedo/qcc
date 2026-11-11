@@ -408,7 +408,7 @@ mod tests {
     use crate::testing::{Rng, circuit_unitary, dense_equal_up_to_phase};
 
     fn gate(name: &str, qubits: &[usize], params: &[f64]) -> Instruction {
-        Instruction::gate(name, qubits.to_vec(), params.to_vec())
+        Instruction::gate(name, qubits, params)
     }
 
     #[test]

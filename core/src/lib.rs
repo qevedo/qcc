@@ -8,6 +8,7 @@ pub mod commuting_blocks;
 pub mod decompose;
 pub mod device;
 pub mod gates;
+pub mod hashing;
 pub mod ir;
 pub mod linalg;
 pub mod lower;

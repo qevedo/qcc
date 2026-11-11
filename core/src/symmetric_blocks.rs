@@ -101,7 +101,7 @@ pub fn shift_through_blocks(
 fn emit(qubit: usize, m: &M2, bases: &[Basis1q]) -> Vec<Instruction> {
     synthesize_1q(m, bases)
         .into_iter()
-        .map(|op| Instruction::gate(&op.name, vec![qubit], op.params))
+        .map(|op| Instruction::gate(&op.name, [qubit], op.params))
         .collect()
 }
 
@@ -443,13 +443,13 @@ mod tests {
                 for q in (parity..n - 1).step_by(2) {
                     let t = rng.range(0.05, 0.5);
                     for name in ["rxx", "ryy", "rzz"] {
-                        out.push(Instruction::gate(name, vec![q, q + 1], vec![t]));
+                        out.push(Instruction::gate(name, [q, q + 1], [t]));
                     }
                 }
             }
             // Fields between the steps, so that the runs are not trivial.
             for q in 0..n {
-                out.push(Instruction::gate("rx", vec![q], vec![rng.range(-1.0, 1.0)]));
+                out.push(Instruction::gate("rx", [q], [rng.range(-1.0, 1.0)]));
             }
         }
         out
@@ -483,7 +483,7 @@ mod tests {
                 .filter(|i| i.qubits.len() == 1)
                 .count()
         };
-        let g = |name: &str, q: Vec<usize>, p: f64| Instruction::gate(name, q, vec![p]);
+        let g = |name: &str, q: Vec<usize>, p: f64| Instruction::gate(name, q, [p]);
         let mut circuit = Vec::new();
         for q in [0, 1] {
             circuit.push(g("rz", vec![q], 0.7));
@@ -511,7 +511,7 @@ mod tests {
         // two_qubit.rs tries the symmetric ones. Qiskit's level 3 uses 20.
         let circuit: Vec<Instruction> = ["rxx", "ryy", "rzz"]
             .iter()
-            .map(|name| Instruction::gate(name, vec![0, 1], vec![0.2]))
+            .map(|name| Instruction::gate(name, [0, 1], [0.2]))
             .collect();
         let native: Vec<String> = ["rz", "sx", "x", "cz"].map(String::from).to_vec();
         let out = compile(circuit.clone(), native).unwrap();

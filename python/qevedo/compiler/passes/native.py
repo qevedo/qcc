@@ -12,7 +12,9 @@ and elide the SWAP, when that is cheaper. The Python passes do not do this.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import gc
 
 from qevedo.compiler.device import DeviceSpec, default_device
 from qevedo.compiler.ir import Circuit, Clbit, Instruction, Qubit
@@ -24,12 +26,35 @@ try:
 except ImportError:  # pragma: no cover - only without the compiled extension
     _core = None
 
-__all__ = ["NativePipeline", "available"]
+__all__ = ["NativePipeline", "available", "paused_gc"]
 
 
 def available() -> bool:
     """Whether the compiled Rust core is installed."""
     return _core is not None
+
+
+@contextlib.contextmanager
+def paused_gc():
+    """Pause Python's cyclic garbage collector while instructions cross to and
+    from the Rust core.
+
+    The crossing makes tens of thousands of small objects (a tuple, two
+    lists and a string per instruction, then an ``Instruction`` each), none
+    of them in a cycle. Every 700 new objects (CPython's default threshold)
+    start a collection, and every hundredth of those walks every object the
+    process holds, Qiskit's modules included: on the 32-qubit Quantum Volume
+    circuit, about a sixth of the compilation's time. Reference counting
+    still frees everything as usual, and the collector resumes at the end if
+    it was running.
+    """
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
 
 
 class NativePipeline(Pass):
@@ -51,6 +76,10 @@ class NativePipeline(Pass):
     def run(self, circuit: Circuit, device: DeviceSpec | None = None) -> Circuit:
         if _core is None:
             raise RuntimeError("the qevedo.compiler._core extension is not installed")
+        with paused_gc():
+            return self._run(circuit, device)
+
+    def _run(self, circuit: Circuit, device: DeviceSpec | None) -> Circuit:
         qubits = _Numbering(circuit.qreg_sizes, Qubit)
         clbits = _Numbering(circuit.creg_sizes, Clbit)
         qubit, clbit = qubits.index, clbits.index

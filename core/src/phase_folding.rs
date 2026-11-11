@@ -22,8 +22,8 @@
 //! separated by rotations next to each other, for commutative cancellation.
 //! Qiskit's optimizations only merge rotations that are next to each other.
 
+use crate::hashing::FastMap;
 use crate::ir::Instruction;
-use std::collections::HashMap;
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
 /// The XOR of some variables, as their indices in increasing order, plus a
@@ -132,7 +132,7 @@ pub fn phase_folding(instructions: Vec<Instruction>) -> Vec<Instruction> {
         next_variable += 1;
     };
     // Terms grouped by parity, in the order the parities first appear.
-    let mut groups: HashMap<Vec<usize>, Vec<Term>> = HashMap::new();
+    let mut groups: FastMap<Vec<usize>, Vec<Term>> = FastMap::default();
     let mut order: Vec<Vec<usize>> = Vec::new();
     let mut add = |parity: &Parity, index: usize, theta: f64, adjustable: bool| {
         let key = parity.key();
@@ -177,7 +177,7 @@ pub fn phase_folding(instructions: Vec<Instruction>) -> Vec<Instruction> {
 
     // What to do with each instruction: keep, drop, or set its angle.
     let mut dropped = vec![false; instructions.len()];
-    let mut angle: HashMap<usize, f64> = HashMap::new();
+    let mut angle: FastMap<usize, f64> = FastMap::default();
     for key in &order {
         let terms = &groups[key];
         let total: f64 = terms.iter().map(|t| t.coefficient).sum();

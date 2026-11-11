@@ -17,20 +17,22 @@ stated) and only comparable within that run.
 
 In priority order. Replace this list at the end of each run.
 
-1. **Quantum Volume speed, all-to-all.** QV-32 takes 243 ms against Qiskit's
-   49 ms (2026-11-07). Serial passes after synthesis dominate: every
-   instruction owns a `String` and three `Vec`s, so each copy or relabel
-   allocates four times, and malloc/free are about a fifth of the
-   instructions. The Python wrapper is 17–31 ms of it (profiles 2026-11-01
-   and 2026-11-03). The router's fix (record steps, write instructions
-   once, 0.4.8) is the pattern to follow.
-2. **CZ device time.** Since 0.4.8 two routings can go through the CZ
-   rounds: the 16-qubit Hamiltonian on the chip takes 2.3 s (was 1.7 s,
-   Qiskit 0.15 s). Ideas: a one-pass CX→CZ translation good enough to end
+1. **Quantum Volume speed, all-to-all, continued.** QV-32 is 89 ms against
+   Qiskit's 50 ms (2026-11-11, was 243). Two parts left:
+   - The pyo3 crossing: the core call takes 70–75 ms from Python against
+     59 ms in a Rust binary. pyo3 builds a list, a tuple and a string per
+     instruction each way; interned name strings or flat arrays would cut
+     it.
+   - Synthesis: `TwoQubitSynth::dress`, `Shape::of`, `M4` products, `hypot`
+     and `sincos` top the core's profile now. Allocation is down to 10% of
+     the core's instructions (`phase_folding` groups, `dress`,
+     `candidate_angles` remain).
+2. **CZ device time.** The 16-qubit Hamiltonian on the chip takes 1.42 s
+   (Qiskit 0.15 s). Ideas: a one-pass CX→CZ translation good enough to end
    the rounds sooner (see per-CZ H-side orientation under **Didn't work**);
    skip the second routing's rounds once its first round is clearly worse.
-3. **Hamiltonian compile time.** 0.40–0.45 s at 32 qubits against Qiskit's
-   15 ms. Ideas: stop a trial's pipeline once it can no longer beat the
+3. **Hamiltonian compile time.** 0.33 s at 32 qubits against Qiskit's
+   17 ms. Ideas: stop a trial's pipeline once it can no longer beat the
    direct compilation; cache the templates' KAK per Weyl point.
 4. **Routing quality beyond more trials.** QV-8 on the chip still uses 111
    CNOTs (Qiskit 108 at seed 1, but 108 or 111 depending on its seed);
@@ -53,6 +55,7 @@ Newest first. Details are in `improvement-log.md` under the same date.
 
 | Date | Version | Change | Effect |
 |---|---|---|---|
+| 2026-11-11 | 0.4.9 | Instructions own no heap memory (`ir.rs`: `Name` borrows known gate names, `Inline<T, 3>` qubits and parameters); FxHash for internal maps (`hashing.rs`); Python's cyclic GC paused while instructions cross to and from the core (`paused_gc`, `native.py`, also the Qiskit plugin) | 160/160 outputs byte-identical. All-to-all 0.85× the time (geometric mean, side by side); QV-32 149 → 92 ms (core alone 93 → 59 ms, 1.09 → 0.91 G instructions, allocation 27% → 10%); chip 0.93× CX, 0.83× CZ (CZ Hamiltonian-16 1.79 → 1.42 s). Faster than Qiskit on 20 of 24 circuits (was 18) |
 | 2026-11-09 | 0.4.8 | Faster SABRE with the same choices (`routing/sabre.rs`: shared `Dag`, scratch-space extended set, `Trace` written out only if kept, `Savings` memo, flat distances); device routing 16 swap trials per layout instead of 4, and the 4-trial routing optimized beside it (`layout_and_route_and_first`, `device.rs`) | Routing 2.1–2.9× fewer instructions, same routings (112/112 outputs byte-identical with old options). Chip: QV-16 822 → 783 CX/CZ, Clifford+T-16 752 → 733 CX, 708 → 692 CZ, Hamiltonian-16 1368 → 1336 CX, 1292 → 1256 CZ, QAOA-16 CX 180 → 179; no row worse. Held-out 40: fewer 2q gates on 19, more on none. Time 0.86× CX, 0.97× CZ (CZ Hamiltonian-16 1.37×) |
 | 2026-11-07 | 0.4.7 | Pauli-network trials judged one by one against the direct compilation; four extra trials at local-Clifford penalty 0.1 (`FRUGAL_LOCAL_PENALTY`) beside the eight at 0.01 | Hamiltonian-32 740/1555 → 687/1511; Hamiltonian-8 107/293 → 101/286; chip CZ Hamiltonian-8 331/1333 → 310/1119; geometric mean vs Qiskit 0.938× → 0.933× two-qubit gates; 15 held-out Hamiltonians 0.981× CNOTs, worse on none; Hamiltonians compile 1.3–1.5× slower |
 | 2026-11-06 | 0.4.6 | Compile-wide cache of two-qubit syntheses per native set (`SynthesisCache`, 66% of requests repeat); `gather_blocks` reorders indices instead of copying | Same outputs. Chip CZ 0.83× the time; chip CZ Hamiltonian-16 2137 → 1601 ms |
@@ -110,13 +113,16 @@ what new fact would justify another attempt.
 - **merge_weight 0 or 1** (2026-11-09). 0 (plain SABRE): QFT-16 353 → 376, adder-16 148 → 170. 1: same as 0.5 on the rows tried. Kept 0.5.
 - **Ruled out while debugging QV-8's 111**: the SWAP-cost estimate is exact there (72 logical CX + 39 = 111 for every routing printed), so the gap is the search, not the optimization after it; and Qiskit itself gives 108 or 111 with seeds 1–10.
 
-**Speed (`lower.rs`, `parallel.rs`)**
+**Speed (`lower.rs`, `parallel.rs`, `ir.rs`, Python wrapper)**
+- **Ruled out while profiling the wrapper** (2026-11-11). Building the raw tuples (5.5 ms) and the output `Instruction` dataclasses (5 ms) on QV-32 are not the wrapper's cost; the garbage collector was (15–20 ms, see **Worked** 0.4.9). The 2026-11-01/03/06 entries that blamed the dataclasses were misread.
 - **A thread for every compilation** (2026-11-06). 8-qubit GHZ with CZ got 1.2× slower (1.5 → 1.7 ms): a thread costs a few tenths of a millisecond. There's now a 64-instruction threshold, and no thread without a second candidate.
 - **Reading a profile as "no single hotspot"** (2026-10-30). The QV-32 profile looked spread out (resynthesis 44%). A callgrind look on 2026-11-01 found the serial passes were the bottleneck and the block syntheses on 4 cores were not. Profile the main thread, not totals, and note that under valgrind threads run one at a time.
 
 ## Considered, not tried
 
-- **Python wrapper on Quantum Volume** (2026-11-01, 2026-11-03, 2026-11-06). About 17–31 ms of QV-32's time: `PassManager.run` copies the circuit and `NativePipeline` builds about 9,000 dataclasses (73,330 `__init__` calls over 5 runs). Deferred each time as a small share against the Rust core's 95–105 ms. It's still a candidate, behind **Next** item 1.
+- **Python wrapper on Quantum Volume** (2026-11-01, 2026-11-03, 2026-11-06). Done on 2026-11-11 in another way: most of it was the garbage collector, now paused (`paused_gc`). Left: `PassManager.run`'s circuit copy (3.8 ms on QV-32), building the tuples and dataclasses (about 5 ms each way), and pyo3's own conversion (**Next** item 1).
+- **A global allocator (mimalloc, jemalloc) in the Python extension** (2026-11-11). Would cut the remaining 10% allocation cost without code changes, but adds a C dependency to every wheel target of the Release workflow and cannot serve the WebAssembly build; removing the allocations was exact and portable. Retry if allocation is again a large share after the remaining sources (phase folding's groups, `dress`, `candidate_angles`) are gone.
+- **`smallvec` / `rustc-hash` crates** (2026-11-11). The core has a single dependency (`num-complex`); the two small types it needed (`Inline`, `FxHasher`) are about 250 lines with tests in `ir.rs` and `hashing.rs`.
 - **A new synthesis method instead of exact speed-ups** (2026-11-01). Speed-ups were chosen because they can be verified byte for byte.
 - **LightSABRE (Zou, Treinish, Hartman, Ivrii and Lishman, arXiv:2409.08368)** (2026-11-06, 2026-11-09). Read for 0.4.8: QCC already has its release valve and uses SABRE's nondeterminism (trials); 0.4.8 took its lesson that more trials pay once routing is cheap. Its relative scoring would change float ties, so the outputs could not be checked byte for byte; left for a run that aims at routing quality (Next item 4).
 - **CZ-native single-qubit reduction** (2026-11-06). Searched; no decision recorded.
@@ -130,6 +136,9 @@ what new fact would justify another attempt.
   - With every core busy, any removed work counts, not just the critical path.
 - **Tests at tolerance edges.** A count test exactly at the tolerance (θ − π/2 = 1e-10) can go either way under rounding in both methods. The 2026-11-01 run changed the test's nudges to either side of the edge. Never weaken a test to pass; if an edge is genuinely ambiguous, say so in the log.
 - **Outputs.** For exact speed-ups, compare all 112 benchmark compilations byte for byte before and after.
+- **Python tests need `qevedo-simulator`** (2026-11-11). Without it (`pip install ".[dev]"` brings it), `test_native.py` and `test_synthesis.py` skip as whole modules and pytest reports 86 passed, 2 skipped instead of 219 passed.
+- **Timing Python glue** (2026-11-11). Time it with `gc.disable()` as well as without: bulk object creation sets off collections that walk the whole heap (Qiskit included), and that, not the objects themselves, was most of the wrapper's cost. cProfile hides it inside whichever function happened to allocate.
+- **Byte-for-byte outputs, quickly** (2026-11-11). A throwaway script compiling all 24 circuits all-to-all and 16 on the chip, with CX and CZ, QCC alone and through the plugin (160 outputs, about 25 s), written to one file before and after and compared with `cmp`; two runs of the old build gave the same file, so the outputs are deterministic. A second venv with the old wheel (`maturin build` from a `git archive` copy) gives paired end-to-end timings.
 - **Profiling a Rust pass without Python** (2026-11-09). Dump the pass's input from the device path (a throwaway env var) and time it in a throwaway `core/examples/` binary under `valgrind --tool=callgrind`; instruction counts are stable where wall time on this VM varied ±20%. With `CARGO_PROFILE_RELEASE_DEBUG=true`, `callgrind_annotate --auto=yes` gives line-level counts.
 - **Python string edits that silently miss** (2026-11-09). A `str.replace` on code that an earlier experiment had changed did nothing, and the default stayed at 4 swap trials until a test caught it. Assert that the old text is there before replacing.
 - **Tests that must not be vacuous.** A "never worse" test should also assert that the two sides differed somewhere (`the_wide_search_is_never_worse_than_the_usual_one` counts strictly cheaper cases); that is how the missed edit above showed up.

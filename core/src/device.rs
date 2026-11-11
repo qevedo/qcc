@@ -204,11 +204,7 @@ fn turn_around(
                 for (q, m) in [(a, before_a), (b, before_b)] {
                     out.extend(lowering.one_qubit(&m, q).unwrap_or_default());
                 }
-                out.push(Instruction::gate(
-                    &inst.name,
-                    vec![a, b],
-                    inst.params.clone(),
-                ));
+                out.push(Instruction::gate(&inst.name, [a, b], inst.params.clone()));
                 for (q, m) in [(a, after_a), (b, after_b)] {
                     out.extend(lowering.one_qubit(&m, q).unwrap_or_default());
                 }
@@ -252,10 +248,10 @@ mod tests {
                 let a = rng.below(n);
                 let b = (a + 1 + rng.below(n - 1)) % n;
                 match name {
-                    "cx" | "cz" | "swap" => Instruction::gate(name, vec![a, b], vec![]),
-                    "rzz" => Instruction::gate(name, vec![a, b], vec![rng.range(-3.0, 3.0)]),
-                    "rz" => Instruction::gate(name, vec![a], vec![rng.range(-3.0, 3.0)]),
-                    _ => Instruction::gate(name, vec![a], vec![]),
+                    "cx" | "cz" | "swap" => Instruction::gate(name, [a, b], []),
+                    "rzz" => Instruction::gate(name, [a, b], [rng.range(-3.0, 3.0)]),
+                    "rz" => Instruction::gate(name, [a], [rng.range(-3.0, 3.0)]),
+                    _ => Instruction::gate(name, [a], []),
                 }
             })
             .collect()
@@ -267,7 +263,7 @@ mod tests {
         for x in 0..at.len() {
             let w = at[x];
             if w != x {
-                circuit.push(Instruction::gate("swap", vec![w, x], vec![]));
+                circuit.push(Instruction::gate("swap", [w, x], []));
                 let y = at.iter().position(|&v| v == x).expect("a permutation");
                 at[y] = w;
                 at[x] = x;
@@ -300,7 +296,7 @@ mod tests {
                     edges.contains(&pair) || (!directed && edges.contains(&(pair.1, pair.0))),
                     "{inst:?} is not on an allowed pair"
                 );
-                assert!(native.contains(&inst.name));
+                assert!(native.iter().any(|g| inst.name == *g));
             }
             // The input placed by the initial layout equals the output with
             // every state moved back from the final layout to the initial one.
@@ -397,8 +393,8 @@ mod tests {
             directed: false,
         };
         let circuit = vec![
-            Instruction::gate("cx", vec![0, 1], vec![]),
-            Instruction::gate("cx", vec![2, 1], vec![]),
+            Instruction::gate("cx", [0, 1], []),
+            Instruction::gate("cx", [2, 1], []),
         ];
         let native = ["rz", "sx", "x", "cx"].map(String::from);
         let out = compile_for_device(circuit, native, &device, &SabreOptions::default()).unwrap();

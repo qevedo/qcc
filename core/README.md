@@ -14,7 +14,7 @@ cargo run --release --example multicore -- 100 10 # compare multi-core mappers
 
 | module | what it does |
 |---|---|
-| `ir.rs` | the instruction list every pass works on |
+| `ir.rs` | the instruction list every pass works on; an instruction owns no heap memory in the usual case (known names are `&'static str`, up to three qubits and parameters inline) |
 | `device.rs` | compiling for a device whose qubits are not all coupled: optimize, lay out, route, optimize again |
 | `passes.rs` | the default pipeline: lowering, phase folding, single-qubit merging, commutative cancellation, two-qubit block resynthesis |
 | `commuting_blocks.rs` | gathering two-qubit blocks on the same pair through gates that commute out of the way (before block resynthesis) |
@@ -33,6 +33,7 @@ cargo run --release --example multicore -- 100 10 # compare multi-core mappers
 | `multicore/` | mapping circuits onto multi-core architectures: HQA and baselines, then routing inside each core (see `multicore/mod.rs` and `../docs/MULTICORE.md`) |
 | `parallel.rs` | independent candidates side by side on all cores, with results in the order of the work (the same output whatever the threads do) |
 | `rng.rs` | a small seeded random generator |
+| `hashing.rs` | a fast deterministic hasher (FxHash) for the passes' internal maps |
 | `testing.rs` | helpers for the unit tests |
 
 The Python passes in `../python/qevedo/compiler/passes/` are a readable

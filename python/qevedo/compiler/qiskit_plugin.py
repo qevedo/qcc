@@ -50,10 +50,16 @@ class QCCOptimization(TransformationPass):
         self.target = target
 
     def run(self, dag: DAGCircuit) -> DAGCircuit:
-        from qevedo.compiler import _core
+        from qevedo.compiler.passes.native import paused_gc
 
         if not self.basis_gates:
             return dag
+        with paused_gc():
+            return self._run(dag)
+
+    def _run(self, dag: DAGCircuit) -> DAGCircuit:
+        from qevedo.compiler import _core
+
         qubit = {q: i for i, q in enumerate(dag.qubits)}
         clbit = {c: i for i, c in enumerate(dag.clbits)}
         raw = []

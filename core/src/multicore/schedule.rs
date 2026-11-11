@@ -280,7 +280,7 @@ mod tests {
     use super::*;
 
     fn teleport(from: usize, to: usize) -> Instruction {
-        Instruction::gate("teleport", vec![from, to], vec![])
+        Instruction::gate("teleport", [from, to], [])
     }
 
     #[test]
@@ -288,10 +288,10 @@ mod tests {
         let arch = Architecture::new(2, 2).unwrap();
         let timing = Timing::default();
         let circuit = vec![
-            Instruction::gate("h", vec![0], vec![]),
-            Instruction::gate("cx", vec![2, 3], vec![]),
-            Instruction::gate("cx", vec![0, 1], vec![]),
-            Instruction::gate("swap", vec![0, 1], vec![]),
+            Instruction::gate("h", [0], []),
+            Instruction::gate("cx", [2, 3], []),
+            Instruction::gate("cx", [0, 1], []),
+            Instruction::gate("swap", [0, 1], []),
         ];
         let s = schedule(&circuit, &arch, &timing).unwrap();
         assert_eq!(s.start, vec![0.0, 0.0, 0.1, 1.1]);
@@ -345,9 +345,9 @@ mod tests {
         // The first teleportation waits for its qubit until 10; the second,
         // listed later but ready at 5, does not wait behind it.
         let circuit = vec![
-            Instruction::gate("h", vec![0], vec![]),
+            Instruction::gate("h", [0], []),
             teleport(0, 4),
-            Instruction::gate("measure", vec![1], vec![]),
+            Instruction::gate("measure", [1], []),
             teleport(1, 5),
         ];
         let timing = Timing {
@@ -382,10 +382,10 @@ mod tests {
         };
         // Full cores exchange a qubit, then a gate on the arrival.
         let circuit = vec![
-            Instruction::gate("x", vec![2], vec![]),
+            Instruction::gate("x", [2], []),
             teleport(0, 2),
             teleport(2, 0),
-            Instruction::gate("cx", vec![2, 3], vec![]),
+            Instruction::gate("cx", [2, 3], []),
         ];
         let s = schedule(&circuit, &arch, &timing).unwrap();
         assert_eq!(s.start, vec![0.0, 0.1, 0.1, 5.1]);

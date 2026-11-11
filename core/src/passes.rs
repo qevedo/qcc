@@ -5,6 +5,7 @@
 
 use crate::commuting_blocks::gather_blocks;
 use crate::gates::{is_known_gate, matrix_1q, matrix_2q, signature};
+use crate::hashing::FastMap;
 use crate::ir::{Instruction, NON_GATES, cost};
 use crate::linalg::{M2, M4, kron};
 use crate::lower::{Lowering, SynthesisCache};
@@ -13,7 +14,7 @@ use crate::permutation::measured_out;
 use crate::phase_folding::phase_folding;
 use crate::symmetric_blocks::{shift_through_blocks, shift_through_symmetric_blocks};
 use crate::two_qubit::{Objective, cx_count};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::f64::consts::TAU;
 
 // -- single-qubit runs ---------------------------------------------------------------
@@ -29,9 +30,9 @@ pub fn merge_single_qubit_runs(
 ) -> Vec<Instruction> {
     let mut result = Vec::with_capacity(instructions.len());
     // Open runs by qubit, with the order they were opened in (for the final flush).
-    let mut runs: HashMap<usize, (usize, Vec<Instruction>)> = HashMap::new();
+    let mut runs: FastMap<usize, (usize, Vec<Instruction>)> = FastMap::default();
     let mut opened = 0usize;
-    let flush = |runs: &mut HashMap<usize, (usize, Vec<Instruction>)>,
+    let flush = |runs: &mut FastMap<usize, (usize, Vec<Instruction>)>,
                  q: usize,
                  result: &mut Vec<Instruction>| {
         if let Some((_, run)) = runs.remove(&q) {
@@ -75,7 +76,7 @@ fn merged_cost(
     let mut total = 0;
     // Open runs by qubit: their unitary (None once a gate has no matrix),
     // length, and whether they are all native.
-    let mut runs: HashMap<usize, (Option<M2>, usize, bool)> = HashMap::new();
+    let mut runs: FastMap<usize, (Option<M2>, usize, bool)> = FastMap::default();
     let close = |run: (Option<M2>, usize, bool)| -> usize {
         match run {
             (Some(m), len, all_native) if !bases.is_empty() => {
@@ -98,7 +99,7 @@ fn merged_cost(
                 _ => None,
             };
             run.1 += 1;
-            run.2 &= native.contains(&inst.name);
+            run.2 &= native.contains(inst.name.as_str());
             continue;
         }
         for q in &inst.qubits {
@@ -131,12 +132,12 @@ fn resynthesize_run(
         }
     }
     let ops = synthesize_1q(&m, bases);
-    if run.iter().all(|i| native.contains(&i.name)) && ops.len() >= run.len() {
+    if run.iter().all(|i| native.contains(i.name.as_str())) && ops.len() >= run.len() {
         return run;
     }
     let q = run[0].qubits[0];
     ops.into_iter()
-        .map(|op| Instruction::gate(&op.name, vec![q], op.params))
+        .map(|op| Instruction::gate(&op.name, [q], op.params))
         .collect()
 }
 
@@ -261,11 +262,7 @@ fn combine(left: &Instruction, right: &Instruction) -> Combined {
     if remainder(angle, period).abs() < 1e-12 {
         return Combined::Cancel;
     }
-    Combined::Merged(Instruction::gate(
-        &left.name,
-        left.qubits.clone(),
-        vec![angle],
-    ))
+    Combined::Merged(Instruction::gate(&left.name, left.qubits.clone(), [angle]))
 }
 
 /// Cancel inverse pairs and merge rotations across gates they commute with:
@@ -274,7 +271,7 @@ pub fn commutative_cancellation(instructions: Vec<Instruction>) -> Vec<Instructi
     /// How far back along a qubit to look for a partner.
     const WINDOW: usize = 32;
     let mut kept: Vec<Option<Instruction>> = Vec::with_capacity(instructions.len());
-    let mut timelines: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut timelines: FastMap<usize, Vec<usize>> = FastMap::default();
     for inst in instructions {
         if let Some(partner) = find_partner(&inst, &kept, &timelines, WINDOW) {
             let previous = kept[partner].as_ref().unwrap();
@@ -307,7 +304,7 @@ pub fn commutative_cancellation(instructions: Vec<Instruction>) -> Vec<Instructi
 fn find_partner(
     inst: &Instruction,
     kept: &[Option<Instruction>],
-    timelines: &HashMap<usize, Vec<usize>>,
+    timelines: &FastMap<usize, Vec<usize>>,
     window: usize,
 ) -> Option<usize> {
     if inst.qubits.is_empty() || !inst.is_gate() {
@@ -336,7 +333,7 @@ fn reachable(
     inst: &Instruction,
     index: usize,
     kept: &[Option<Instruction>],
-    timelines: &HashMap<usize, Vec<usize>>,
+    timelines: &FastMap<usize, Vec<usize>>,
 ) -> bool {
     inst.qubits[1..].iter().all(|q| {
         timelines[q]
@@ -481,17 +478,17 @@ fn collect_blocks(instructions: Vec<Instruction>) -> (Vec<Item>, Vec<Block>) {
     // qubits commute with the rest of the block.
     let mut result: Vec<Item> = Vec::new();
     let mut blocks: Vec<Block> = Vec::new();
-    let mut open: HashMap<usize, usize> = HashMap::new();
+    let mut open: FastMap<usize, usize> = FastMap::default();
     // Single-qubit gates on qubits in no block yet, with the order they started
     // in; a block that starts on the qubit absorbs them.
-    let mut pending: HashMap<usize, (usize, Vec<Instruction>)> = HashMap::new();
+    let mut pending: FastMap<usize, (usize, Vec<Instruction>)> = FastMap::default();
     let mut started = 0usize;
 
     fn close(
         q: usize,
-        open: &mut HashMap<usize, usize>,
+        open: &mut FastMap<usize, usize>,
         blocks: &[Block],
-        pending: &mut HashMap<usize, (usize, Vec<Instruction>)>,
+        pending: &mut FastMap<usize, (usize, Vec<Instruction>)>,
         result: &mut Vec<Item>,
     ) {
         if let Some(b) = open.remove(&q) {
@@ -1143,7 +1140,7 @@ mod tests {
                 Instruction::gate(
                     name,
                     qubits,
-                    (0..count).map(|_| rng.range(-3.0, 3.0)).collect(),
+                    (0..count).map(|_| rng.range(-3.0, 3.0)).collect::<Vec<_>>(),
                 )
             })
             .collect()
@@ -1235,9 +1232,9 @@ mod tests {
     #[test]
     fn three_qubit_definitions_compile() {
         let circuit = vec![
-            Instruction::gate("h", vec![0], vec![]),
-            Instruction::gate("ccx", vec![0, 1, 2], vec![]),
-            Instruction::gate("cswap", vec![2, 0, 1], vec![]),
+            Instruction::gate("h", [0], []),
+            Instruction::gate("ccx", [0, 1, 2], []),
+            Instruction::gate("cswap", [2, 0, 1], []),
         ];
         let out = compile(circuit, natives(&["rz", "sx", "x", "cx"])).unwrap();
         assert!(out.iter().filter(|i| i.name == "cx").count() <= 14);
@@ -1279,13 +1276,13 @@ mod tests {
 
     #[test]
     fn errors() {
-        let unknown = vec![Instruction::gate("mystery", vec![0], vec![])];
+        let unknown = vec![Instruction::gate("mystery", [0], [])];
         assert!(
             compile(unknown, natives(&["rz", "sx", "cx"]))
                 .unwrap_err()
                 .contains("cannot lower gate 'mystery'")
         );
-        let no_2q = vec![Instruction::gate("cx", vec![0, 1], vec![])];
+        let no_2q = vec![Instruction::gate("cx", [0, 1], [])];
         assert!(
             compile(no_2q, natives(&["rz", "sx", "swap"]))
                 .unwrap_err()
@@ -1322,7 +1319,7 @@ mod tests {
         for q in 0..wires.len() {
             let w = wires[q];
             if w != q {
-                circuit.push(Instruction::gate("swap", vec![w, q], vec![]));
+                circuit.push(Instruction::gate("swap", [w, q], []));
                 let p = wires.iter().position(|&x| x == q).expect("a permutation");
                 wires[p] = w;
                 wires[q] = q;
@@ -1333,7 +1330,7 @@ mod tests {
 
     #[test]
     fn a_cx_each_way_becomes_one_cx_and_a_relabelling() {
-        let g = |name: &str, q: &[usize]| Instruction::gate(name, q.to_vec(), vec![]);
+        let g = |name: &str, q: &[usize]| Instruction::gate(name, q.to_vec(), []);
         let circuit = vec![
             g("h", &[0]),
             g("cx", &[0, 1]),
@@ -1429,8 +1426,8 @@ mod tests {
     fn networks_are_judged_one_by_one() {
         // A circuit of `two` CXs and `one` Z rotations.
         let circuit = |two: usize, one: usize| -> Candidate {
-            let mut out = vec![Instruction::gate("cx", vec![0, 1], vec![]); two];
-            out.extend(vec![Instruction::gate("rz", vec![0], vec![0.1]); one]);
+            let mut out = vec![Instruction::gate("cx", [0, 1], []); two];
+            out.extend(vec![Instruction::gate("rz", [0], [0.1]); one]);
             (out, vec![0, 1])
         };
         let direct = [circuit(740, 815)];
