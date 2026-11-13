@@ -69,10 +69,10 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
 
 | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|
-| QCC | 0.933× | 0.875× | 6 ms |
-| Qiskit | 1.000× | 1.000× | 10 ms |
-| pytket | 0.998× | 1.093× | 1559 ms |
-| UCC | 1.015× | 2.400× | 31 ms |
+| QCC | 0.933× | 0.875× | 5 ms |
+| Qiskit | 1.000× | 1.000× | 12 ms |
+| pytket | 0.998× | 1.093× | 1634 ms |
+| UCC | 1.015× | 2.400× | 33 ms |
 
 - QCC uses the fewest gates of the four compilers: 7% fewer two-qubit gates
   than Qiskit (0.933×) and 12% fewer gates in all, and no more two-qubit
@@ -149,13 +149,14 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
 - On the Heisenberg chain, moving single-qubit gates through its symmetric
   XX + YY + ZZ blocks (`core/src/symmetric_blocks.rs`) saves another 8–9%
   of the gates: 1173 at 32 qubits, against Qiskit's 1568.
-- QCC is faster than Qiskit on most circuits (20 of 24; a median of 6 ms,
-  against 10), but slower on the Hamiltonian (1.1–20× in this run), where
-  it also tries the Pauli networks (twelve of them, side by side), and on
-  Quantum Volume at 32 qubits (89 against 50 ms), where most of the work is
-  resynthesizing generic two-qubit blocks (on all cores, of which this
-  machine has four). Times are single compilations and vary between runs
-  on this VM by up to a fifth on circuits of a few milliseconds.
+- QCC is faster than Qiskit on most circuits (20 of 24; a median of 5 ms,
+  against 12), but slower on the Hamiltonian (1.1–5.7× in this run: 131
+  against 23 ms at 32 qubits), where it also tries the Pauli networks
+  (twelve of them, side by side) and runs the whole pipeline on each, and
+  on Quantum Volume at 32 qubits (110 against 60 ms), where most of the
+  work is resynthesizing generic two-qubit blocks (on all cores, of which
+  this machine has four). Times are single compilations and vary between
+  runs on this VM by up to a fifth on circuits of a few milliseconds.
 - 0.4.3 made every circuit faster without changing a gate (the outputs are
   identical): a median of 11 compilations of each circuit, 0.4.2 and 0.4.3
   side by side on this machine, gave 0.73× the time in geometric mean, and
@@ -191,6 +192,31 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
   16.6 → 12.9 ms; GHZ, under half a millisecond, unchanged. On the chip
   (best of two medians of five) 0.93× with CX and 0.83× with CZ; the
   16-qubit Hamiltonian with CZ 1.79 → 1.42 s.
+- 0.4.10 makes the Hamiltonians 2–3× faster to compile, again with the
+  same outputs (142 compilations compared byte for byte: every circuit
+  all-to-all, on the chip and inside Qiskit, with CX and CZ, and 15 random
+  Hamiltonians of 6–24 qubits not in the benchmark). The Pauli network's
+  greedy synthesis scores nine candidate gates on up to 64 pairs of qubits
+  for every gate it places, and applied each candidate's gates to the 16
+  pairs of letters it could meet every time: what a candidate does to the
+  letters of its two qubits does not depend on which two they are, so it
+  is now a table worked out once (`candidate_tables` in
+  `core/src/pauli_network.rs`), and the nine scores are summed in one pass
+  over the rotations ahead, each in the same order as before, so each
+  score is the same number. √X is conjugated in one step instead of as
+  H·S·H. Moving gates through blocks (`core/src/symmetric_blocks.rs`) keeps
+  each pass's KAK decompositions by the block's matrix (on the 32-qubit
+  Hamiltonian, 1 108 decompositions instead of 15 003: most blocks are a
+  lone CX), and skips a CX's side whose runs cost nothing already.
+  Instructions in the Rust core alone, on the 32-qubit Hamiltonian
+  (callgrind): 14.4 → 3.4 billion, of which the network synthesis 12.0 →
+  1.4 billion. Against 0.4.9 side by side (best of two medians of 11), the
+  Hamiltonian took 0.59× / 0.37× / 0.32× the time at 8 / 16 / 32 qubits
+  with CX (32 qubits: 340 → 110 ms) and 0.71× / 0.52× / 0.42× with CZ;
+  0.94× over the other circuits (noise: a few that read up to 1.16× were
+  0.9–1.0× in 101-run medians). On the chip, where the routing and the
+  repeated CZ rounds dominate, 0.96× with CX and with CZ in geometric mean
+  (the 16-qubit Hamiltonian 438 → 376 ms with CX, 1.45 → 1.37 s with CZ).
 - Like Qiskit's default, QCC drops two-qubit interactions whose removal
   costs less than 10⁻⁹ in average gate infidelity (the QFT's tiniest
   controlled phases); see `core/src/two_qubit.rs`.
@@ -230,17 +256,19 @@ heavy-hex chip with QCC alone (`compile_circuit` with the chip's couplings:
 it optimizes, lays out, routes and optimizes again; see
 `docs/ARCHITECTURE.md`), with Qiskit at level 3, and with Qiskit using QCC as
 its optimization stage, and checks every output's state
-(`results/device.csv`; last run for 0.4.9, on a 4-vCPU Xeon VM). Geometric means over
+(`results/device.csv`; last run for 0.4.10, on a 4-vCPU Xeon VM). Geometric means over
 Qiskit's level 3:
 
 | gates | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|---|
-| {rz, sx, x, cx} | QCC | 0.928× | 0.818× | 24 ms |
-|  | Qiskit + QCC | 0.970× | 0.844× | 35 ms |
-| {rz, sx, x, cz} | QCC | 0.899× | 0.834× | 77 ms |
-|  | Qiskit + QCC | 0.936× | 0.837× | 119 ms |
+| {rz, sx, x, cx} | QCC | 0.928× | 0.818× | 25 ms |
+|  | Qiskit + QCC | 0.970× | 0.844× | 32 ms |
+| {rz, sx, x, cz} | QCC | 0.899× | 0.834× | 78 ms |
+|  | Qiskit + QCC | 0.936× | 0.837× | 103 ms |
 
-Qiskit's own median in the same run: 31 ms with CX, 32 ms with CZ.
+Qiskit's own median in the same run: 45 ms with CX, 41 ms with CZ (31 and
+32 ms in the 0.4.9 run: medians of single compilations move this much
+between runs on this VM).
 
 Two-qubit gates / all gates with CX:
 

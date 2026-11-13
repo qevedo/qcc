@@ -173,9 +173,13 @@ impl Gate {
                 p.z ^= x << q;
             }
             Gate::Sx(q) => {
-                for g in [Gate::H(q), Gate::S(q), Gate::H(q)] {
-                    g.conjugate(p);
-                }
+                // H, S, H in one step: X stays, Z becomes i³ X Z (= −Y)
+                // and X Z becomes i³ Z (so Y = i X Z becomes Z): the X bit
+                // takes the Z bit, and the phase gains three Z bits. `sx_is_h_s_h` checks it against
+                // the three gates.
+                let z = (p.z >> q) & 1;
+                p.phase = (p.phase + 3 * z as u8) % 4;
+                p.x ^= z << q;
             }
             Gate::Cx(c, t) => {
                 p.x ^= ((p.x >> c) & 1) << t;
@@ -500,6 +504,8 @@ pub fn synthesize_seeded(
         rng: (seed != 0).then(|| Rng::new(seed)),
         noise: NOISE * seed as f64,
         local_penalty,
+        tables: candidate_tables(),
+        scored_buffer: Vec::new(),
     };
     state.rotations();
     let wires = state.clifford(permute);
@@ -519,6 +525,60 @@ struct State {
     noise: f64,
     /// What each single-qubit Clifford of a candidate gate costs.
     local_penalty: f64,
+    /// What each candidate gate, σ controlling τ, does to letters
+    /// ([`candidate_tables`]), by `[σ − 1][τ − 1]`.
+    tables: [[Candidate; 3]; 3],
+    /// Reused by [`State::best_gate`] for [`State::scored`]'s Paulis.
+    scored_buffer: Vec<Scored>,
+}
+
+/// A Pauli [`State::best_gate`] scores candidates on: how much it counts,
+/// its weight and its letters.
+struct Scored {
+    count: f64,
+    weight: u32,
+    x: u128,
+    z: u128,
+}
+
+/// What a candidate controlled-Pauli gate ([`State::controlled_pauli`])
+/// does, wherever it is placed: the weight on its two qubits that each of
+/// the 16 pairs of letters there (`letter(a) | letter(b) << 2`) has after
+/// it, and how many local Cliffords it needs before its CX.
+#[derive(Clone, Copy, Debug)]
+struct Candidate {
+    letters_after: [u32; 16],
+    locals: usize,
+}
+
+/// The [`Candidate`] of every σ controlling τ, by `[σ − 1][τ − 1]`. A gate
+/// acts on the letters of its own two qubits only, and as on any other two,
+/// so these are worked out once on qubits 0 and 1 instead of for every pair
+/// and every step: the synthesis scores nine candidates on up to
+/// [`MAX_PAIRS`] pairs for each gate it places, and applying their gates to
+/// the 16 pairs of letters each time was nearly half of its work.
+fn candidate_tables() -> [[Candidate; 3]; 3] {
+    let mut tables = [[Candidate {
+        letters_after: [0; 16],
+        locals: 0,
+    }; 3]; 3];
+    for sigma in 1..=3u8 {
+        for tau in 1..=3u8 {
+            let gates = State::controlled_pauli(sigma, tau, 0, 1);
+            let table = &mut tables[usize::from(sigma - 1)][usize::from(tau - 1)];
+            table.locals = gates.len() - 1;
+            for (pair, after) in table.letters_after.iter_mut().enumerate() {
+                let mut p = Pauli {
+                    x: (pair & 1 | (pair >> 2 & 1) << 1) as u128,
+                    z: (pair >> 1 & 1 | (pair >> 3 & 1) << 1) as u128,
+                    phase: 0,
+                };
+                gates.iter().for_each(|g| g.conjugate(&mut p));
+                *after = p.weight();
+            }
+        }
+    }
+    tables
 }
 
 impl State {
@@ -593,56 +653,50 @@ impl State {
         }
     }
 
-    /// The Paulis whose weights a gate on qubits `a` and `b` can change: the
-    /// rotations in the window, discounted by layer, and the Clifford's
-    /// images, weighted by [`TABLEAU_WEIGHT`]. Each as (how much it counts,
-    /// its weight, its letters on `a` and `b`).
-    fn touching(&self, layers: &[usize], a: usize, b: usize) -> Vec<(f64, u32, usize)> {
-        let mask = (1u128 << a) | (1u128 << b);
-        let entry = |count: f64, p: &Pauli| {
-            (
-                count,
-                p.weight(),
-                (p.letter(a) | (p.letter(b) << 2)) as usize,
-            )
-        };
+    /// The Paulis whose weights a gate can change: the rotations in the
+    /// window, discounted by layer, and the Clifford's images, weighted by
+    /// [`TABLEAU_WEIGHT`]. Each as how much it counts, its weight and its
+    /// letters, worked out once for every pair [`State::best_gate`] tries.
+    fn scored(&self, layers: &[usize], out: &mut Vec<Scored>) {
         let rotations = layers
             .iter()
             .enumerate()
             .map(|(i, &layer)| (DISCOUNT.powi(layer as i32), &self.pending[i].0));
         let images = self.rows.iter().map(|p| (TABLEAU_WEIGHT, p));
-        rotations
-            .chain(images)
-            .filter(|(_, p)| p.support() & mask != 0)
-            .map(|(count, p)| entry(count, p))
-            .collect()
+        out.clear();
+        out.extend(rotations.chain(images).map(|(count, p)| Scored {
+            count,
+            weight: p.weight(),
+            x: p.x,
+            z: p.z,
+        }));
     }
 
-    /// How much `gates`, on qubits `a` and `b`, change the cost of the
-    /// rotations in the window and of the Clifford left: the weights beyond
-    /// one of the Paulis [`State::touching`] gives. Only their letters on
-    /// `a` and `b` change, and only as those letters say, so the gates are
-    /// applied once to each of the 16 pairs of letters rather than to every
-    /// Pauli.
-    fn change(gates: &[Gate], touching: &[(f64, u32, usize)], a: usize, b: usize) -> f64 {
-        let mut letters_after = [0u32; 16];
-        for (pair, after) in letters_after.iter_mut().enumerate() {
-            let mut p = Pauli::IDENTITY;
-            for (q, letter) in [(a, pair & 3), (b, pair >> 2)] {
-                p.x |= ((letter & 1) as u128) << q;
-                p.z |= ((letter >> 1) as u128) << q;
-            }
-            gates.iter().for_each(|g| g.conjugate(&mut p));
-            *after = p.weight();
-        }
+    /// How much each candidate gate on qubits `a` and `b` (σ controlling τ,
+    /// at `3(σ − 1) + τ − 1`) changes the cost of the rotations in the
+    /// window and of the Clifford left: the weights beyond one of the
+    /// [`State::scored`] Paulis that act on `a` or `b`. Only their letters
+    /// on `a` and `b` change, and only as those letters say, so each
+    /// candidate's table says what becomes of each of the 16 pairs of
+    /// letters ([`candidate_tables`]) rather than its gates being applied to
+    /// every Pauli. The nine sums are taken in one pass over the Paulis,
+    /// each in their order (from −0.0, as `Iterator::sum` does), so each is
+    /// the same number as nine passes would give.
+    fn changes(tables: &[[Candidate; 3]; 3], scored: &[Scored], a: usize, b: usize) -> [f64; 9] {
+        let mask = (1u128 << a) | (1u128 << b);
+        let letter = |p: &Scored, q: usize| (((p.x >> q) & 1) | (((p.z >> q) & 1) << 1)) as usize;
         let letters_before = |pair: usize| u32::from(pair & 3 != 0) + u32::from(pair >> 2 != 0);
-        touching
-            .iter()
-            .map(|&(count, weight, pair)| {
-                let after = weight - letters_before(pair) + letters_after[pair];
-                count * (f64::from(after.max(1)) - f64::from(weight.max(1)))
-            })
-            .sum()
+        let mut sums = [-0.0; 9];
+        for p in scored.iter().filter(|p| (p.x | p.z) & mask != 0) {
+            let pair = letter(p, a) | (letter(p, b) << 2);
+            let unchanged = p.weight - letters_before(pair);
+            let before = f64::from(p.weight.max(1));
+            for (sum, table) in sums.iter_mut().zip(tables.iter().flatten()) {
+                let after = unchanged + table.letters_after[pair];
+                *sum += p.count * (f64::from(after.max(1)) - before);
+            }
+        }
+        sums
     }
 
     /// The controlled-Pauli gate, σ on `a` controlling τ on `b`, as local
@@ -686,28 +740,34 @@ impl State {
                 break;
             }
         }
-        // (score, change in cost, gates) of the best so far.
-        let mut best: Option<(f64, f64, Vec<Gate>)> = None;
+        // (score, change in cost, where) of the best so far, `where` being
+        // (σ, τ, a, b). Only the winner's gates are built.
+        type Where = (u8, u8, usize, usize);
+        let mut best: Option<(f64, f64, Where)> = None;
+        let mut scored = std::mem::take(&mut self.scored_buffer);
+        self.scored(layers, &mut scored);
         for &(a, b) in &pairs {
-            let touching = self.touching(layers, a, b);
+            let changes = State::changes(&self.tables, &scored, a, b);
             for sigma in 1..=3 {
                 for tau in 1..=3 {
-                    let gates = State::controlled_pauli(sigma, tau, a, b);
-                    let change = State::change(&gates, &touching, a, b);
+                    let index = 3 * usize::from(sigma - 1) + usize::from(tau - 1);
+                    let table = &self.tables[usize::from(sigma - 1)][usize::from(tau - 1)];
+                    let change = changes[index];
                     // Of gates that do as well, those with fewer local
                     // Cliffords before their CX.
-                    let mut score = change + self.local_penalty * (gates.len() - 1) as f64;
+                    let mut score = change + self.local_penalty * table.locals as f64;
                     if let Some(rng) = self.rng.as_mut() {
                         score += self.noise * rng.uniform();
                     }
                     if best.as_ref().is_none_or(|(s, _, _)| score < *s - 1e-9) {
-                        best = Some((score, change, gates));
+                        best = Some((score, change, (sigma, tau, a, b)));
                     }
                 }
             }
         }
+        self.scored_buffer = scored;
         best.filter(|(_, change, _)| *change < -1e-9)
-            .map(|(_, _, g)| g)
+            .map(|(_, _, (sigma, tau, a, b))| State::controlled_pauli(sigma, tau, a, b))
     }
 
     /// Lower the weight of rotation `i` by one, whatever it does to the others.
@@ -905,6 +965,50 @@ mod tests {
         let mut p = x;
         Gate::Cx(0, 1).conjugate(&mut p);
         assert_eq!((p.x, p.z), (0b11, 0));
+    }
+
+    #[test]
+    fn sx_is_h_s_h() {
+        // Every letter on qubit 1 of two, with every phase and a letter on
+        // the other qubit that must not change.
+        for x in 0..4u128 {
+            for z in 0..4u128 {
+                for phase in 0..4 {
+                    let p = Pauli { x, z, phase };
+                    let (mut one, mut three) = (p, p);
+                    Gate::Sx(1).conjugate(&mut one);
+                    for g in [Gate::H(1), Gate::S(1), Gate::H(1)] {
+                        g.conjugate(&mut three);
+                    }
+                    assert_eq!(one, three, "{p:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_tables_match_the_gates() {
+        // The tables `best_gate` scores with, against the gates themselves
+        // on two qubits that are not 0 and 1, among others.
+        let tables = candidate_tables();
+        let (a, b) = (5, 2);
+        for sigma in 1..=3u8 {
+            for tau in 1..=3u8 {
+                let gates = State::controlled_pauli(sigma, tau, a, b);
+                let table = &tables[usize::from(sigma - 1)][usize::from(tau - 1)];
+                assert_eq!(table.locals, gates.len() - 1);
+                for pair in 0..16usize {
+                    let mut p = Pauli::IDENTITY;
+                    for (q, letter) in [(a, pair & 3), (b, pair >> 2)] {
+                        p.x |= ((letter & 1) as u128) << q;
+                        p.z |= ((letter >> 1) as u128) << q;
+                    }
+                    p.x |= 1 << 7;
+                    gates.iter().for_each(|g| g.conjugate(&mut p));
+                    assert_eq!(table.letters_after[pair] + 1, p.weight());
+                }
+            }
+        }
     }
 
     #[test]

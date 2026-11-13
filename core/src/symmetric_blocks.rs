@@ -15,8 +15,10 @@
 //! QCC's output a fifth longer than Qiskit's.
 
 use crate::gates::{matrix_1q, pauli, rotation};
+use crate::hashing::FastMap;
 use crate::ir::Instruction;
 use crate::linalg::{M2, M4, equal_up_to_phase4, kron};
+use crate::lower::key_2q;
 use crate::one_qubit::{Basis1q, count_1q, synthesize_1q};
 use crate::passes::Block;
 use crate::two_qubit::{Kak, TOL, kak, special_angles};
@@ -71,8 +73,13 @@ pub fn shift_through_blocks(
     let blocks = find_blocks(&items);
     // Runs to create, as (item index to put them before, qubit, matrix).
     let mut created: Vec<(usize, usize, M2)> = Vec::new();
+    // Most blocks are the same few cores (a lone CX on its pair, for one):
+    // their KAK decompositions, by the core's bits. A decomposition depends
+    // only on those, so this changes no output; on the 32-qubit Hamiltonian
+    // it saved 15 000 decompositions over a compilation's pipelines.
+    let mut kaks: FastMap<[u64; 32], Kak> = FastMap::default();
     for block in &blocks {
-        shift(&mut items, block, bases, cx_like, &mut created);
+        shift(&mut items, block, bases, cx_like, &mut created, &mut kaks);
     }
     created.sort_by_key(|&(at, _, _)| at);
     let mut created = created.into_iter().peekable();
@@ -244,6 +251,7 @@ fn shift(
     bases: &[Basis1q],
     cx_like: bool,
     created: &mut Vec<(usize, usize, M2)>,
+    kaks: &mut FastMap<[u64; 32], Kak>,
 ) {
     // The block's core: its gates and the runs between them.
     let (first, last) = (block.ops[0], *block.ops.last().unwrap());
@@ -264,7 +272,7 @@ fn shift(
     .matrix() else {
         return;
     };
-    let k = kak(&u);
+    let k = kaks.entry(key_2q(&u)).or_insert_with(|| kak(&u)).clone();
     let [a, b, c] = k.point;
     if cx_like && a > TOL && b < TOL && c.abs() < TOL {
         shift_independently(items, block, &k, &u, bases, created);
@@ -392,6 +400,13 @@ fn shift_independently(
     let cost = |(b, a): (M2, M2)| count_1q(&b, bases) + count_1q(&a, bases);
     let mut angles = [0.0; 2];
     for j in 0..2 {
+        // Runs that cost nothing as they are cannot get cheaper: no
+        // candidate below could beat them, so skip working them out (most
+        // CXs of a CX ladder have no single-qubit gates on one side).
+        let mut best = (cost(runs(j, 0.0)), 0.0);
+        if best.0 == 0 {
+            continue;
+        }
         // Angles where either run's middle Euler angle is 0, π/2 or π (see
         // `special_angles`), and those that turn either run into the
         // identity when it is an X rotation in the block's frame.
@@ -407,7 +422,6 @@ fn shift_independently(
             let w = off * diagonal.conj();
             candidates.push(2.0 * (-w.im).atan2(diagonal.norm_sqr()));
         }
-        let mut best = (cost(runs(j, 0.0)), 0.0);
         for t in candidates {
             let c = cost(runs(j, t));
             if c < best.0 {

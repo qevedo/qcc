@@ -8,6 +8,74 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-13 — Pauli-network scoring from tables, shared KAKs in symmetric blocks (0.4.10)
+
+**What.**
+- `core/src/pauli_network.rs`: `candidate_tables()` works out once what
+  each of the nine candidate controlled-Pauli gates (σ controlling τ) does
+  to the 16 pairs of letters on its two qubits, and how many local
+  Cliffords it needs. `best_gate` used to build each candidate's gates
+  (three small `Vec`s and a concatenation) and apply them to the 16 pairs
+  for every pair of qubits and every gate placed. `State::scored` reads
+  each Pauli's weight and discount once per step instead of once per pair,
+  and `State::changes` sums the nine candidates' scores in one pass over
+  those Paulis, each sum in the old order and from −0.0 as
+  `Iterator::sum` does, so every score is the same float. Only the
+  winner's gates are built. `Gate::Sx` conjugates in one step (the X bit
+  takes the Z bit, the phase gains three Z bits) instead of as H, S, H.
+- `core/src/symmetric_blocks.rs`: each pass keeps the KAK decomposition of
+  every block core it has seen, by the matrix's bits (`key_2q`, now
+  `pub(crate)` in `lower.rs`); and for a lone CX-like block, a side whose
+  two runs already cost nothing skips the search for a better angle, which
+  could not beat it.
+- New tests: `sx_is_h_s_h` (every letter and phase against the three
+  gates), `candidate_tables_match_the_gates` (the tables against the gates
+  placed on qubits 5 and 2 next to a third letter).
+
+**Why.** Next items 2 and 3 were compile time on Hamiltonians: 0.33 s at
+32 qubits against Qiskit's 17 ms. Before choosing, two quality leads were
+measured and dropped (see experiments.md): phase-polynomial resynthesis
+of CNOT+Rz regions (GraySynth + PMH) saved no CNOT on any benchmark
+output, and three-qubit resynthesis (pytket's `ThreeQubitSquash` on QCC's
+output) saves 2–3 CNOTs all-to-all and its chip "savings" put most of
+their CXs on uncoupled pairs. A callgrind profile of the 32-qubit
+Hamiltonian in a Rust driver (14.4 billion instructions) put 83% in the
+Pauli network's greedy synthesis, 45% in `Gate::conjugate` called from the
+candidate scoring and 20% in allocation, all of it exact work that could
+be done once.
+
+**Measured** (4-vCPU Xeon VM). Outputs: 142 compilations (every benchmark
+circuit all-to-all with CX and CZ, on the chip with QCC alone and inside
+Qiskit, plus 15 held-out random Hamiltonians of 6–24 qubits with CX and
+CZ) byte-identical to 0.4.9's; `run.py` and `device.py` rerun in full
+give the same counts on all 96 + 96 rows. Instructions (callgrind, core
+alone, 32-qubit Hamiltonian, billions), step by step: tables and the
+one-step √X 14.4 → 4.9, nine sums in one pass 4.9 → 4.1, weights read
+once per step 4.1 → 3.8, KAK memo 3.8 → 3.5, skipping free sides
+3.5 → 3.4; the network synthesis itself 12.0 → 1.4.
+Time against 0.4.9, side by side, best of two medians of 11, all-to-all:
+Hamiltonian 8 / 16 / 32 with CX 31.4 → 18.5, 137.2 → 51.0, 340.2 →
+110.2 ms (0.59×, 0.37×, 0.32×); with CZ 51.4 → 36.4, 175.7 → 90.8,
+444.8 → 188.8 ms (0.71×, 0.52×, 0.42×); the other 42 rows 0.94× in
+geometric mean (three that read 1.12–1.16× were 0.88–0.97× in medians of
+101). On the chip (best of two medians of five): 0.96× with CX and with
+CZ; Hamiltonian 16 438 → 376 ms with CX, 1.45 → 1.37 s with CZ, where
+SABRE (24% of the instructions), the repeated CZ rounds (189 pipelines)
+and two-qubit synthesis (20%) dominate.
+
+**Learned.** Profile before choosing among speed items: the Next list
+guessed "stop a trial early" and "cache templates' KAK", but the cost
+was the scoring loop. Scores are compared with a 1e-9 margin, but keeping
+each float sum in its old order made the outputs provably identical
+rather than merely very likely so. On the CZ chip path no single pass
+dominates: 189 pipeline runs share the time between resynthesis (11%),
+moving gates through blocks (7%), single-qubit merging (4%) and rotation
+merging (4%), and SABRE takes another 24%.
+
+**Next.** Chip CZ time (pipeline rounds and SABRE), the pyo3 crossing on
+Quantum Volume, routing quality (LightSABRE's relative scoring), the
+cross-pair rewrite found in the 3-qubit analysis (below in experiments.md).
+
 ## 2026-11-11 — Instructions without heap memory, a faster hasher, and no GC storms (0.4.9)
 
 **What.**

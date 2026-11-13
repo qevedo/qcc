@@ -454,7 +454,7 @@ impl Lowering {
 const PARALLEL_MIN: usize = 32;
 
 /// The memo key of a 4×4 matrix: its bits.
-fn key_2q(m: &M4) -> [u64; 32] {
+pub(crate) fn key_2q(m: &M4) -> [u64; 32] {
     let mut key = [0u64; 32];
     for i in 0..4 {
         for j in 0..4 {

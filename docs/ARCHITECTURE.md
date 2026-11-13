@@ -203,6 +203,15 @@ are, the Rust core also synthesizes the circuit again from scratch
    first of the cheapest that pays is kept, the same on any machine
    (`network_trials` and `paying_network` in `core/src/passes.rs`).
 
+Scoring is most of the synthesis's work: nine candidate gates (σ on one
+qubit controlling τ on the other) on up to 64 pairs for every gate placed.
+What a candidate does to the letters of its two qubits is the same on any
+pair, so each candidate is a table of what becomes of the 16 pairs of
+letters, worked out once (`candidate_tables`), and the nine scores of a
+pair are summed in one pass over the rotations ahead, each in the same
+order as nine passes, so they are the same numbers (since 0.4.10; the
+32-qubit Hamiltonian compiles in a third of the time it took before).
+
 It runs only on circuits with three or more CXs per non-Clifford rotation
 (at most 400 rotations) and on all-to-all devices, and its result is kept
 only when it needs no more two-qubit gates and no more gates in all than
