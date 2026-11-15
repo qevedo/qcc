@@ -59,8 +59,8 @@ pytket 2.18.5, UCC 0.4.12):
 |  | 16 | 92 / 245 | 113 / 273 | 106 / 301 | 113 / 988 |
 |  | 32 | 196 / 525 | 241 / 585 | 226 / 645 | 241 / 2116 |
 | Clifford+T | 8 | 73 / 278 | 77 / 308 | 73 / 280 | 77 / 871 |
-|  | 16 | 150 / 505 | 155 / 550 | 148 / 495 | 155 / 1743 |
-|  | 32 | 310 / 1034 | 316 / 1104 | 310 / 1039 | 316 / 3450 |
+|  | 16 | 148 / 499 | 155 / 550 | 148 / 495 | 155 / 1743 |
+|  | 32 | 308 / 1030 | 316 / 1104 | 310 / 1039 | 316 / 3450 |
 | Hamiltonian | 8 | 101 / 286 | 191 / 474 | 178 / 403 | 191 / 1986 |
 |  | 16 | 313 / 790 | 393 / 972 | 390 / 887 | 393 / 4186 |
 |  | 32 | 687 / 1511 | 740 / 1789 | 737 / 1681 | 740 / 7739 |
@@ -69,13 +69,13 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
 
 | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|
-| QCC | 0.933× | 0.875× | 5 ms |
-| Qiskit | 1.000× | 1.000× | 12 ms |
-| pytket | 0.998× | 1.093× | 1634 ms |
-| UCC | 1.015× | 2.400× | 33 ms |
+| QCC | 0.932× | 0.874× | 6 ms |
+| Qiskit | 1.000× | 1.000× | 10 ms |
+| pytket | 0.998× | 1.093× | 1790 ms |
+| UCC | 1.015× | 2.400× | 27 ms |
 
 - QCC uses the fewest gates of the four compilers: 7% fewer two-qubit gates
-  than Qiskit (0.933×) and 12% fewer gates in all, and no more two-qubit
+  than Qiskit (0.932×) and 12.6% fewer gates in all, and no more two-qubit
   gates than Qiskit on any circuit. Phase folding
   (`core/src/phase_folding.rs`) does most of it on the arithmetic: on the
   adder it removes 19% of the two-qubit gates (196 against Qiskit's 241 and
@@ -129,9 +129,12 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
   rotation on its control and an X rotation on its target, to make the
   runs around it cheapest (`core/src/symmetric_blocks.rs`). On Clifford+T
   that took the 16-qubit circuit from 154 / 525 to 150 / 505 and the
-  32-qubit one from 313 / 1074 to 310 / 1034: as many CNOTs as pytket at 32
-  qubits and fewer gates in all (1034 against 1039); at 16 pytket still
-  uses 2 fewer CNOTs (148). The Hamiltonian lost 2–13 gates (792 → 790 at
+  32-qubit one from 313 / 1074 to 310 / 1034. Since 0.4.11 the end of a
+  block can also be carried into the next block on its pair through the
+  gates between (`carry_through`, see "On a chip" below): 148 / 499 at 16
+  qubits, as many CNOTs as pytket (148 / 495, which has 4 fewer gates in
+  all), and 308 / 1030 at 32, 2 CNOTs and 9 gates fewer than pytket
+  (310 / 1039). The Hamiltonian lost 2–13 gates (792 → 790 at
   16 qubits, 1568 → 1555 at 32).
 - On the adder, gathering would leave 37, 85 and 181 CNOTs instead of 40,
   92 and 196, but 108, 252 and 540 gates in all instead of 105, 245 and
@@ -149,13 +152,16 @@ Geometric means over the 21 circuits, relative to Qiskit, and median time:
 - On the Heisenberg chain, moving single-qubit gates through its symmetric
   XX + YY + ZZ blocks (`core/src/symmetric_blocks.rs`) saves another 8–9%
   of the gates: 1173 at 32 qubits, against Qiskit's 1568.
-- QCC is faster than Qiskit on most circuits (20 of 24; a median of 5 ms,
-  against 12), but slower on the Hamiltonian (1.1–5.7× in this run: 131
-  against 23 ms at 32 qubits), where it also tries the Pauli networks
-  (twelve of them, side by side) and runs the whole pipeline on each, and
-  on Quantum Volume at 32 qubits (110 against 60 ms), where most of the
-  work is resynthesizing generic two-qubit blocks (on all cores, of which
-  this machine has four). Times are single compilations and vary between
+- QCC is faster than Qiskit on most circuits (18 of 24 in the 0.4.11 run;
+  a median of 6 ms, against 10), but slower on the Hamiltonian (2.3–9.1×
+  in this run: 162 against 18 ms at 32 qubits), where it also tries the
+  Pauli networks (twelve of them, side by side) and runs the whole
+  pipeline on each; on Quantum Volume at 32 qubits (113 against 55 ms),
+  where most of the work is resynthesizing generic two-qubit blocks (on
+  all cores, of which this machine has four); and on Clifford+T at 16 and
+  32 qubits (11 against 9 ms, 27 against 19), where carrying gates
+  between blocks (0.4.11, see "On a chip") finds moves and the blocks it
+  changes are synthesized and finished again. Times are single compilations and vary between
   runs on this VM by up to a fifth on circuits of a few milliseconds.
 - 0.4.3 made every circuit faster without changing a gate (the outputs are
   identical): a median of 11 compilations of each circuit, 0.4.2 and 0.4.3
@@ -233,15 +239,15 @@ chip, with and without it, and checks every output's state
 
 | gates | two-qubit gates | all gates |
 |---|---|---|
-| {rz, sx, x, cx} | 0.970× | 0.844× |
-| {rz, sx, x, cz} | 0.936× | 0.837× |
+| {rz, sx, x, cx} | 0.969× | 0.844× |
+| {rz, sx, x, cz} | 0.929× | 0.835× |
 
 - With CX, QCC removes 16% of the gates and 3% of the two-qubit gates (the
-  16-qubit QFT: 1324 → 516 gates; the adder: 180 → 159 two-qubit gates);
+  16-qubit QFT: 1324 → 516 gates; the adder: 180 → 157 two-qubit gates);
   Quantum Volume gets up to 1% more single-qubit gates.
-- With CZ, QCC removes 16% of the gates and 6% of the two-qubit gates
+- With CZ, QCC removes 16.5% of the gates and 7% of the two-qubit gates
   (the 16-qubit QFT: 380 → 348 CZs, 2022 → 1244 gates; the 16-qubit
-  Hamiltonian: 1477 → 1312 CZs), and 15–16% of the gates on the Heisenberg
+  Hamiltonian: 1477 → 1294 CZs), and 15–16% of the gates on the Heisenberg
   chain (16 qubits: 992 → 844). Its XX + YY + ZZ blocks have a symmetric Weyl
   point, where the outer single-qubit gates of the KAK decomposition are
   not unique; QCC now picks them for each block and its neighbours
@@ -256,18 +262,18 @@ heavy-hex chip with QCC alone (`compile_circuit` with the chip's couplings:
 it optimizes, lays out, routes and optimizes again; see
 `docs/ARCHITECTURE.md`), with Qiskit at level 3, and with Qiskit using QCC as
 its optimization stage, and checks every output's state
-(`results/device.csv`; last run for 0.4.10, on a 4-vCPU Xeon VM). Geometric means over
+(`results/device.csv`; last run for 0.4.11, on a 4-vCPU Xeon VM). Geometric means over
 Qiskit's level 3:
 
 | gates | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|---|
-| {rz, sx, x, cx} | QCC | 0.928× | 0.818× | 25 ms |
-|  | Qiskit + QCC | 0.970× | 0.844× | 32 ms |
-| {rz, sx, x, cz} | QCC | 0.899× | 0.834× | 78 ms |
-|  | Qiskit + QCC | 0.936× | 0.837× | 103 ms |
+| {rz, sx, x, cx} | QCC | 0.924× | 0.816× | 27 ms |
+|  | Qiskit + QCC | 0.969× | 0.844× | 33 ms |
+| {rz, sx, x, cz} | QCC | 0.897× | 0.830× | 76 ms |
+|  | Qiskit + QCC | 0.929× | 0.835× | 103 ms |
 
-Qiskit's own median in the same run: 45 ms with CX, 41 ms with CZ (31 and
-32 ms in the 0.4.9 run: medians of single compilations move this much
+Qiskit's own median in the same run: 31 ms with CX, 38 ms with CZ (45 and
+41 ms in the 0.4.10 run: medians of single compilations move this much
 between runs on this VM).
 
 Two-qubit gates / all gates with CX:
@@ -276,7 +282,7 @@ Two-qubit gates / all gates with CX:
 |---|---|---|---|---|
 | QFT | 8 | 80 / 132 | 102 / 188 | 92 / 144 |
 |  | 16 | 353 / 520 | 356 / 1324 | 348 / 516 |
-| QAOA | 8 | 94 / 207 | 97 / 232 | 95 / 207 |
+| QAOA | 8 | 92 / 207 | 97 / 232 | 95 / 207 |
 |  | 16 | 179 / 403 | 187 / 445 | 183 / 405 |
 | Quantum Volume | 8 | 111 / 515 | 108 / 575 | 108 / 560 |
 |  | 16 | 783 / 2781 | 828 / 3182 | 828 / 3203 |
@@ -285,13 +291,13 @@ Two-qubit gates / all gates with CX:
 | Heisenberg | 8 | 84 / 271 | 84 / 356 | 84 / 300 |
 |  | 16 | 180 / 571 | 180 / 760 | 180 / 631 |
 | Adder | 8 | 57 / 151 | 72 / 184 | 59 / 161 |
-|  | 16 | 148 / 405 | 180 / 452 | 159 / 409 |
+|  | 16 | 146 / 402 | 180 / 452 | 157 / 405 |
 | Clifford+T | 8 | 236 / 512 | 249 / 546 | 249 / 479 |
 |  | 16 | 733 / 1209 | 774 / 1394 | 772 / 1205 |
-| Hamiltonian | 8 | 345 / 648 | 425 / 867 | 425 / 686 |
-|  | 16 | 1336 / 2100 | 1463 / 2348 | 1463 / 1985 |
+| Hamiltonian | 8 | 335 / 639 | 425 / 867 | 425 / 686 |
+|  | 16 | 1321 / 2099 | 1463 / 2348 | 1463 / 1985 |
 
-- QCC's own layout and routing do better than Qiskit's on the adder (148
+- QCC's own layout and routing do better than Qiskit's on the adder (146
   CNOTs against 180) and Clifford+T, and as well on the rest, give or take a
   few gates. GHZ and the Heisenberg chain fit the chip, and both find the
   layout that needs no SWAP.
@@ -313,6 +319,41 @@ Two-qubit gates / all gates with CX:
   repeated rounds above, the Hamiltonian at 8 is better on both (331 /
   1333, and 310 / 1119 since 0.4.7); the adder (149 / 615) and the QFT (353 / 1421) still have more
   gates in all than before gathering.
+- 0.4.11 carries gates between blocks on the same pair
+  (`carry_through` in `core/src/commuting_blocks.rs`), where gathering
+  cannot because the gates between do not commute with the blocks. Part
+  of a block may commute with them once moved through the single-qubit
+  gates between: `cx a,b; h b; cx b,c; cx a,b` is `h b; cx b,c` and then
+  `cz a,b · cx a,b`, one CX on `{a, b}`, as `h b · cx a,b = cz a,b · h b`
+  and the CZ commutes with the control of `cx b,c`. The pass carries the
+  end of a block (from one of its last three two-qubit gates) forward into
+  the next block on its pair, or the start of a block back into the
+  previous one, crossing each single-qubit gate g as g D g† and each other
+  gate only if it commutes with D as it stands there, and only where the
+  two blocks then need fewer CX-like gates. It is coupling-safe, as gates
+  stay on their pairs. It runs on results that will not be optimized
+  again (after routing), after block resynthesis, and the carried circuit
+  is kept only when it needs no more two-qubit gates and no more gates in
+  all; for CZ the rounds below run without it until they stop shrinking,
+  then with it, so no circuit can get costlier. On the chip with CX:
+  QAOA 8 94 → 92 CNOTs, the adder 16 148 / 405 → 146 / 402, the
+  Hamiltonian 345 / 648 → 335 / 639 at 8 qubits and 1336 / 2100 → 1321 /
+  2099 at 16; with CZ, Clifford+T 16 692 → 691, the Hamiltonian 310 /
+  1119 → 307 / 1103 at 8 and 1256 / 4454 → 1231 / 4208 at 16. Inside
+  Qiskit: the adder 159 → 157 with CX; with CZ, Clifford+T 242 / 848 →
+  240 / 840 and 741 / 2455 → 735 / 2439, the Hamiltonian 388 / 1318 →
+  354 / 1288 at 8 and 1312 / 4416 → 1294 / 4434 at 16 (18 fewer CZs and
+  18 more gates in all, as the CZ rounds keep a round with fewer
+  two-qubit gates). No other row changed. On 82 other compilations
+  (Hamiltonians, Clifford+T, QAOA, adders, QFTs and Heisenberg chains of
+  6–24 qubits, all-to-all and on the chip, CX and CZ) 22 got fewer
+  two-qubit gates and none more; two of them (CZ, on the chip) have 4–6
+  fewer CZs and 2–12 more gates in all, as above. It costs time where
+  moves are found: against 0.4.10 side by side (medians of nine
+  all-to-all, five on the chip), 1.05× all-to-all and 1.07× on the chip in
+  geometric mean; Clifford+T at 32 qubits all-to-all 14 → 27 ms, the
+  16-qubit Hamiltonian on the chip with CZ 1.46 → 2.44 s, where the
+  carrying rounds keep finding CZs to remove for four rounds.
 - For CZ the pipeline is not a fixed point, as it nearly is for CX: it
   reads the circuit through CX (each CZ as H·CX·H) so that phase folding
   sees parities, then translates it back, and each translation leaves the

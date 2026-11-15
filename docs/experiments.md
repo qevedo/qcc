@@ -17,34 +17,34 @@ stated) and only comparable within that run.
 
 In priority order. Replace this list at the end of each run.
 
-1. **CZ device time.** The 16-qubit Hamiltonian on the chip takes 1.37 s
-   (Qiskit 0.10–0.15 s). Profiled 2026-11-13 (callgrind, 42.6 billion
-   instructions): 189 pipeline runs (55%: resynthesis 11%, symmetric
-   blocks 7%, single-qubit merging 4%, rotation merging 4%), SABRE 24%
-   (1 408 routings), two-qubit synthesis 20%. Ideas: skip the second
-   routing's rounds once its first round is clearly worse; a one-pass
-   CX→CZ translation good enough to end the rounds sooner (see per-CZ
-   H-side orientation under **Didn't work**); `shift_independently`'s
-   angle search (special angles per run) is the rest of symmetric blocks.
-2. **Quantum Volume speed, all-to-all.** QV-32 110 ms against Qiskit's 60
-   in the 2026-11-13 run (89 / 50 on 2026-11-11). The pyo3 crossing (a
-   list, a tuple and a string per instruction each way) and synthesis
-   (`TwoQubitSynth::dress`, `Shape::of`, `M4` products, `hypot`).
-3. **Hamiltonian compile time, continued.** 131 ms at 32 qubits against
-   Qiskit's 23 (was 341). What is left: 13 full pipelines (one per network
-   trial, plus the direct one) at about 1.9 billion instructions together,
-   and the synthesis's `layers()` (O(window²) commutation checks per step).
-   Stopping a trial's pipeline once it cannot beat the direct compilation
-   is not exact (the pipeline can remove CXs), so check it on held-out
-   Hamiltonians.
-4. **A cross-pair rewrite** (found 2026-11-13, see **Considered**): a block
-   on {a, b}, then a gate on {b, c}, then a block on {a, b} again, where the
-   first block can be split as U = U₂·U₁ with U₂ commuting with the middle
-   gate (diagonal on b in the basis the middle gate is controlled in), so
-   U₂ joins the second block. Example from Clifford+T-16's output:
-   CX(15,1) H(1) CX(1,7) CX(15,1) is 2 CXs, not 3. Gathering
-   (`commuting_blocks.rs`) only moves whole gates. Coupling-safe, so it
-   could pay on the chip too.
+1. **CZ device time.** The 16-qubit Hamiltonian on the chip takes 2.44 s
+   since 0.4.11 (1.46 s before; Qiskit 0.11–0.15 s): the carrying rounds
+   keep removing CZs for four rounds on the winning routing, and every
+   routed candidate runs its own rounds. Ideas: run the rounds only on the
+   best one or two routed candidates (rounds on the losers are wasted:
+   the 2026-11-15 trace shows seven trajectories); skip the second
+   routing's rounds once its first round is clearly worse; the profile of
+   2026-11-13 (pipeline runs 55%, SABRE 24%, two-qubit synthesis 20%)
+   still applies to the rest.
+2. **Carrying, beyond the strict rule** (2026-11-15). Applied to the
+   final output and judged by CX alone, carrying would take chip CX
+   Clifford+T-16 from 733 / 1209 to 704 / 1251 and QAOA-16 all-to-all from
+   96 / 317 to 90 / 340; the no-more-of-either rule refuses both (and
+   `check.py` would fail on the all-to-all one). A carry that leaves fewer
+   single-qubit gates (choosing the split U = U₂·U₁ by the merged blocks'
+   synthesized gate counts, not only cut at gate boundaries; or carrying
+   before `shift_through_blocks` and letting it absorb the R gates) could
+   win part of it within the rule. Per-move judging by synthesized gate
+   counts (below, **Didn't work**) was not enough.
+3. **Quantum Volume speed, all-to-all.** QV-32 113 ms against Qiskit's 55
+   in the 2026-11-15 run. The pyo3 crossing (a list, a tuple and a string
+   per instruction each way) and synthesis (`TwoQubitSynth::dress`,
+   `Shape::of`, `M4` products, `hypot`).
+4. **Hamiltonian compile time, continued.** 162 ms at 32 qubits against
+   Qiskit's 18 in the 2026-11-15 run (carrying added about 1.17×). Left:
+   13 full pipelines (one per network trial, plus the direct one) and the
+   synthesis's `layers()`. Stopping a trial's pipeline once it cannot beat
+   the direct compilation is not exact; check on held-out Hamiltonians.
 5. **Routing quality beyond more trials.** QV-8 on the chip still uses 111
    CNOTs (Qiskit 108 or 111 depending on its seed). Untried from
    LightSABRE (Zou et al., arXiv:2409.08368): its relative scoring;
@@ -53,6 +53,13 @@ In priority order. Replace this list at the end of each run.
    40/92/196 kept). They cost 108/252/540 gates against 105/245/525, so the
    keep rule declines them. Win them back by choosing the outer gates of the
    SWAP-elided blocks with their neighbours in view.
+7. **Pauli-network judging after carrying** (2026-11-15, not observed).
+   `network_pays` compares a network with the direct candidates after
+   both were carried; carrying could in principle make the direct one
+   cheaper in all gates while the network keeps fewer CXs, flipping the
+   choice to more CXs (as it did for gathering, fixed by judging on the
+   costs without carrying). None of 30 Hamiltonian compilations showed it;
+   fix the same way if one does.
 
 ## Worked
 
@@ -60,6 +67,7 @@ Newest first. Details are in `improvement-log.md` under the same date.
 
 | Date | Version | Change | Effect |
 |---|---|---|---|
+| 2026-11-15 | 0.4.11 | Carrying gates between blocks on the same pair (`carry_through`, `commuting_blocks.rs`): the end of a block (from one of its last 3 two-qubit gates) forward, or the start of one back, through single-qubit gates by conjugation (g D g†) and through blockers that commute exactly, where the two blocks then need fewer CX-like gates; only on final results, after resynthesis, kept only if no more of either; gathering judged on costs without carrying; CZ rounds plain first, then carrying (`Last` in `passes.rs`) | All-to-all Clifford+T 16 150/505 → 148/499 (pytket 148/495), 32 310/1034 → 308/1030; geometric mean 0.933×/0.875× → 0.932×/0.874×. Chip CX: QAOA-8 94 → 92, adder-16 148/405 → 146/402, Hamiltonian-8 345/648 → 335/639, -16 1336/2100 → 1321/2099; CZ: Clifford+T-16 692 → 691, Hamiltonian-8 310/1119 → 307/1103, -16 1256/4454 → 1231/4208; inside Qiskit 5 rows fewer 2q. Held-out 82: fewer 2q on 22, more on none. Time 1.05× all-to-all, 1.07× chip (CZ Hamiltonian-16 1.46 → 2.44 s) |
 | 2026-11-13 | 0.4.10 | Pauli-network scoring from per-candidate tables (`candidate_tables`), nine scores summed in one pass in the old order, weights read once per step, √X conjugated in one step (`pauli_network.rs`); per-pass KAK memo and skipping free sides of lone CXs (`symmetric_blocks.rs`) | 142/142 outputs byte-identical (incl. 30 held-out Hamiltonian compilations). Ham-32 core 14.4 → 3.4 G instructions (synthesis 12.0 → 1.4 G). All-to-all Hamiltonian 8/16/32 0.59×/0.37×/0.32× the time with CX (340 → 110 ms at 32), 0.71×/0.52×/0.42× with CZ; others 0.94×; chip 0.96× (CZ Ham-16 1.45 → 1.37 s) |
 | 2026-11-11 | 0.4.9 | Instructions own no heap memory (`ir.rs`: `Name` borrows known gate names, `Inline<T, 3>` qubits and parameters); FxHash for internal maps (`hashing.rs`); Python's cyclic GC paused while instructions cross to and from the core (`paused_gc`, `native.py`, also the Qiskit plugin) | 160/160 outputs byte-identical. All-to-all 0.85× the time (geometric mean, side by side); QV-32 149 → 92 ms (core alone 93 → 59 ms, 1.09 → 0.91 G instructions, allocation 27% → 10%); chip 0.93× CX, 0.83× CZ (CZ Hamiltonian-16 1.79 → 1.42 s). Faster than Qiskit on 20 of 24 circuits (was 18) |
 | 2026-11-09 | 0.4.8 | Faster SABRE with the same choices (`routing/sabre.rs`: shared `Dag`, scratch-space extended set, `Trace` written out only if kept, `Savings` memo, flat distances); device routing 16 swap trials per layout instead of 4, and the 4-trial routing optimized beside it (`layout_and_route_and_first`, `device.rs`) | Routing 2.1–2.9× fewer instructions, same routings (112/112 outputs byte-identical with old options). Chip: QV-16 822 → 783 CX/CZ, Clifford+T-16 752 → 733 CX, 708 → 692 CZ, Hamiltonian-16 1368 → 1336 CX, 1292 → 1256 CZ, QAOA-16 CX 180 → 179; no row worse. Held-out 40: fewer 2q gates on 19, more on none. Time 0.86× CX, 0.97× CZ (CZ Hamiltonian-16 1.37×) |
@@ -102,6 +110,16 @@ what new fact would justify another attempt.
 - **A guard keeping diagonal runs diagonal** (2026-10-30). No gain (CZ Clifford+T-8 still 236/965). Running the trades last was the fix.
 - **Accepted weaknesses after 0.4.2** (2026-10-30). Some chip rows got slightly worse in one count from routing variance: CX Clifford+T-16, CZ adder-16, CZ Hamiltonian-8, CZ QFT-16. Remedy, not yet tried: route the logical circuit with and without gathering and keep the cheaper.
 
+**Carrying gates between blocks (`commuting_blocks.rs` `carry_through`, `passes.rs`, 2026-11-15)**
+- **Carrying with gathering, before resynthesis** ("placement A": `carry_through` right after `gather_blocks`, every pipeline). Chip CX Hamiltonian-16 1336 → 1373 CNOTs, CZ Clifford+T-8 227/826 → 229/838; total two-qubit gates over the 80 benchmark compilations unchanged. It changes the circuit before routing and the CZ rounds' trajectory. Carrying runs only on final results.
+- **Carrying in every pipeline after resynthesis, including before routing** ("B" without `last`): CZ rows worse (Clifford+T-16 692 → 695, Hamiltonian-16 1256 → 1263 in one variant), chip CX Hamiltonian-16 sometimes worse. Restricting it to `last` pipelines fixed the CX rows.
+- **Keeping the carried circuit when lexicographically cheaper** (fewer CXs first, "L"). The largest wins (chip CX Clifford+T-16 733/1209 → 704/1251 with all moves; 716/1228 in one variant; all-to-all Hamiltonian-16 313/790 → 310/801) come with more gates in all, which the pipeline's no-more-of-either rule and `check.py` (all-to-all) refuse. Retry only with a decision on that rule (see Next 2).
+- **Per-move judging by synthesized gate counts** (each move also had to leave the two blocks, synthesized with `Objective::InCircuit`, with no more gates in all, or no more inner single-qubit gates). Not better than judging by CX alone under the global rule: all gates 1321/2099 vs 1324/2094 and 1328/2086 (inner) on chip CX Hamiltonian-16, but fewer CNOTs saved over the benchmark (−40 and −58 against −67), and a synthesis per candidate. Dropped for the simpler CX-only test.
+- **Carrying in the CZ rounds from the start.** CZ Clifford+T-16 on the chip 692/2677 → 695/2688: a different trajectory of rounds ends at a worse fixed point. Shipped: rounds without carrying until they stop, then rounds with carrying (never worse).
+- **More blockers (8 instead of 3)**: CZ QAOA-16 180/704 → 175/713, Hamiltonian-16 1231/4208 → 1226/4236, 1.19× the time; mixed. **One carried two-qubit gate instead of up to 3**: QAOA-8 chip 92 → 94. **Up to 6**: no change. Kept 3 and 3.
+- **Ruled out while debugging**: an all-to-all Clifford+T-16 result of 152/504 (more CXs than 0.4.10's 150/505) came from the gathering keep rule, not carrying itself: carrying made the circuit without gathering cheaper in all gates, so the gathered one no longer dominated it and the rule fell back to the one with more CXs. Fixed by judging gathering on the costs without carrying.
+- **Skipping the carrying rounds when the result has nothing to carry** (shipped as a speed-up) lost one row's 7 gates (all-to-all CZ Heisenberg-32 372/1789 back to 0.4.10's 372/1796).
+
 **CZ devices (`passes.rs`, `until_fixed_point`)**
 - **Rounds without the last-pass single-qubit shift, then one final full pass ("mode 2")** (2026-11-03). Hamiltonian-16 4430 gates in 4896 ms against mode 1's 4572 in 4445 ms. But it was worse on Clifford+T-8 (229 vs 227), QAOA-16 (713 vs 704), QAOA-8 (363 vs 360), Hamiltonian-8 (1334 vs 1333) and slightly worse on CX rows. Mode 1 shipped.
 - **Per-CZ H-side orientation** (2026-11-03, Python prototype on device output plus one recompile). Choose which qubit of each CZ takes the H, scored by "neighbouring runs become diagonal" or by √X count. Gates against a plain second pass:
@@ -137,9 +155,11 @@ what new fact would justify another attempt.
 - **A new synthesis method instead of exact speed-ups** (2026-11-01). Speed-ups were chosen because they can be verified byte for byte.
 - **LightSABRE (Zou, Treinish, Hartman, Ivrii and Lishman, arXiv:2409.08368)** (2026-11-06, 2026-11-09). Read for 0.4.8: QCC already has its release valve and uses SABRE's nondeterminism (trials); 0.4.8 took its lesson that more trials pay once routing is cheap. Its relative scoring would change float ties, so the outputs could not be checked byte for byte; left for a run that aims at routing quality (Next item 4).
 - **CZ-native single-qubit reduction** (2026-11-06). Searched; no decision recorded.
-- **Splitting a block to move part of it past a gate** (2026-11-13; Next item 4). From bisecting where `ThreeQubitSquash` saves CNOTs on Clifford+T-16: CX(15,1) H(1) CX(1,7) CX(15,1) = CX(15,1)·CZ(15,1) after CX(1,7), H(1) first, as H·CX(15,1) = CZ(15,1)·H and CZ commutes with CX(1,7)'s control. Needs a search over splits U = U₂·U₁ (U₂ diagonal on the shared qubit in the middle gate's basis); not built this run because the gain measured all-to-all was 2–3 CNOTs and the chip gain is unknown without a prototype.
+- **Splitting a block to move part of it past a gate** (2026-11-13; built 2026-11-15 as `carry_through`, splits at gate boundaries only). From bisecting where `ThreeQubitSquash` saves CNOTs on Clifford+T-16: CX(15,1) H(1) CX(1,7) CX(15,1) = CX(15,1)·CZ(15,1) after CX(1,7), H(1) first, as H·CX(15,1) = CZ(15,1)·H and CZ commutes with CX(1,7)'s control. Needs a search over splits U = U₂·U₁ (U₂ diagonal on the shared qubit in the middle gate's basis); not built this run because the gain measured all-to-all was 2–3 CNOTs and the chip gain is unknown without a prototype.
 - **A coupling-aware three-qubit synthesis** (2026-11-13). The only way pytket-style three-qubit squashing could be used on a chip (heavy-hex triples are paths a–b–c). Large (a QSD-style decomposition restricted to two edges); not tried.
 - **pytket `ThreeQubitSquash`** (2026-10-30). Measured 2026-11-13: see **Didn't work**, "Resynthesis of larger regions".
+- **A continuous search for the split U = U₂·U₁** (2026-11-15). U₂ must commute with the gates between (for a CX control on the shared qubit: block-diagonal on it, a controlled gate with one CX at most), a 7-parameter family; minimizing the two blocks' CX counts over it would find splits that are not at gate boundaries. Not tried: the gate-boundary splits found the benchmark's cases, and the CX count is a step function, hard to optimize numerically (the Makhlin-invariant fit of `numeric.rs` would be the starting point).
+- **ZX-calculus simplification and extraction of whole circuits** (PyZX's `full_reduce`; Duncan, Kissinger, Perdrix and van de Wetering, arXiv:1902.03178) (2026-11-15). Aimed at T-count and gate count on Clifford+T circuits; extracting a circuit from the reduced graph is not coupling-aware and can raise the CNOT count, so it would not serve the chip. Not measured on QCC's output; a quick upper-bound check like the 2026-11-13 `ThreeQubitSquash` one would tell.
 
 ## Method lessons
 
@@ -159,3 +179,6 @@ what new fact would justify another attempt.
 - **Byte-for-byte checks for network changes** (2026-11-13): the benchmark's three Hamiltonians are few; add held-out random Hamiltonians (other seeds, 6–24 qubits) to the outputs file, with CX and CZ.
 - **Measuring a quality idea before building it** (2026-11-13): a pytket pass applied to QCC's output is a quick upper bound, but on a chip check the result's two-qubit gates are still on coupled pairs.
 - **CI.** CI may run a newer Rust and clippy than the run's machine (a 1.99 clippy lint stopped a simulator release built with 1.97), so update to the latest stable before releasing. While master's version equals the one on PyPI, CI's `pip install --find-links dist` can pick the published wheel instead of the local build.
+- **A keep rule that falls back can turn an improvement into a regression** (2026-11-15). "Keep A if it dominates B, else B" is not monotone: improving B in one count can make A stop dominating it, and the rule then picks a B with more CXs than the old A. When a new pass improves candidates that an existing rule compares, judge that rule on the costs without the new pass (`plain_cost` in `pipeline`).
+- **Prototype a new rewrite on QCC's output in Python first** (2026-11-15): a numpy/Qiskit script that applies it to the final circuits and recompiles them (all-to-all and on the chip, checking couplings) measured the opportunity in 20 minutes (est. CNOTs saved per circuit), before any Rust; the Rust version then went through four placements in the pipeline, each measured over all 80 benchmark compilations with a throwaway env var (removed before timing).
+- **Paired timing with two venvs** (2026-11-15): two long-lived worker processes (old wheel, new editable build) reading circuit keys on stdin, the driver alternating which goes first, medians of 9 (5 on the chip). Avoids process start-up and import noise.

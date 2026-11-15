@@ -8,6 +8,105 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-15 — Carrying gates between blocks on the same pair (0.4.11)
+
+**What.**
+- `core/src/commuting_blocks.rs`: `carry_through`. For each two-qubit gate,
+  the next two-qubit gate on its pair is found, with at most three
+  blockers (two-qubit gates on one of the pair's qubits and a third)
+  and any single-qubit gates on the pair between. The end of the first
+  block, from one of its last three two-qubit gates, is carried forward:
+  it crosses each single-qubit gate g as g D g† and each blocker only if
+  it commutes with D as it stands there (an exact 8×8 check), and is put
+  down before the next block as its own gates between the inverse of the
+  single-qubit gates it crossed and those gates again (R† D R), for the
+  resynthesis to merge. Likewise the start of the second block, carried
+  back. A move is made when the two blocks then need fewer CX-like gates
+  (one KAK each, only for parts that cross).
+- `core/src/passes.rs`: `pipeline` takes `last: Last` (`No`, `Yes`,
+  `Carrying`) instead of a bool. With `Carrying`, `finish` carries after
+  block resynthesis, resynthesizes again and finishes both circuits,
+  keeping the carried one only if it needs no more two-qubit gates and
+  no more gates in all. The choice between gathering and not is now made
+  on the costs without carrying (`plain_cost`). For CX-like non-CX
+  devices, `until_fixed_point` runs its rounds without carrying until
+  they stop shrinking, then with carrying (skipped when nothing in the
+  result can be carried); for CX the first final pipeline carries.
+  Routing's logical pipeline (`Last::No`) never carries.
+- Tests: `a_cx_carried_through_a_hadamard_joins_the_next_block`, its mirror
+  backwards, `nothing_is_carried_through_a_gate_it_does_not_commute_with`,
+  `carrying_keeps_random_circuits_equivalent` (300 random Clifford+T-like
+  circuits, unitaries checked) and, end to end,
+  `a_cx_is_carried_to_the_next_block_on_its_pair` (3 CXs → 2 with CX; for
+  CZ the rounds already found it).
+
+**Why.** Next item 4 of the last run: a block on {a, b}, a gate on {b, c},
+a block on {a, b} again, where part of the first block commutes with the
+middle gate once moved through the single-qubit gates between
+(CX(15,1) H(1) CX(1,7) CX(15,1) is two CXs, not three). Gathering moves
+only whole gates, unchanged. A Python prototype applied the move to
+QCC's final outputs and recompiled them: all-to-all it saved 2–6 CNOTs on
+QAOA, Clifford+T and the Hamiltonian (with more single-qubit gates on
+some); on the chip, where every gate stays on its coupled pair, 29 CNOTs
+on Clifford+T-16, 10 on the 8-qubit Hamiltonian, 14 on the 16-qubit one
+(CX), 23 with CZ. This beat the other Next items as a measured quality gap
+that is coupling-safe, exact and testable today; the speed items (CZ
+rounds, Quantum Volume) make no circuit smaller. Searched beforehand:
+`ThreeQubitSquash` and phase-polynomial resynthesis were dropped on
+2026-11-13; ZX-calculus extraction is not coupling-aware.
+
+**Measured** (4-vCPU Xeon VM; `run.py`, `device.py` and `plugin.py`
+rerun in full, every output verified).
+- All-to-all: Clifford+T 16 150 / 505 → 148 / 499 (pytket 148 / 495),
+  32 310 / 1034 → 308 / 1030 (pytket 310 / 1039); geometric mean over
+  Qiskit 0.933× / 0.875× → 0.932× / 0.874×. Every other row unchanged;
+  `check.py` passes.
+- Chip with CX: QAOA-8 94 / 207 → 92 / 207, adder-16 148 / 405 →
+  146 / 402, Hamiltonian-8 345 / 648 → 335 / 639, -16 1336 / 2100 →
+  1321 / 2099 (geometric mean 0.928× / 0.818× → 0.924× / 0.816×). With
+  CZ: Clifford+T-16 692 / 2677 → 691 / 2677, Hamiltonian-8 310 / 1119 →
+  307 / 1103, -16 1256 / 4454 → 1231 / 4208 (0.899× / 0.834× → 0.897× /
+  0.830×). Inside Qiskit: adder-16 CX 159 / 409 → 157 / 405; CZ
+  Clifford+T-8 242 / 848 → 240 / 840, -16 741 / 2455 → 735 / 2439,
+  Hamiltonian-8 388 / 1318 → 354 / 1288, -16 1312 / 4416 → 1294 / 4434
+  (18 fewer CZs, 18 more gates in all: the CZ rounds keep a round with
+  fewer two-qubit gates). No row has more two-qubit gates.
+- Held out: 82 compilations (Hamiltonians of 6–24 qubits, Clifford+T of
+  6–24, QAOA 6–18, adders 10–14, QFT 10–12, Heisenberg 10–12;
+  all-to-all and on the chip up to 18 qubits, CX and CZ) against 0.4.10:
+  fewer two-qubit gates on 22, more on none (124 fewer, 415 fewer gates
+  in all); two CZ chip rows have 4–6 fewer CZs and 2–12 more gates in
+  all.
+- Time, against 0.4.10 side by side, interleaved (medians of 9
+  all-to-all, 5 on the chip): 1.05× all-to-all and 1.07× on the chip in
+  geometric mean. Where moves are found it costs a second resynthesis
+  and finish: Clifford+T-32 all-to-all 13.7 → 26.8 ms, the adder 1.14–
+  1.21×, the Hamiltonian 1.15–1.19×; the CZ chip Hamiltonian-16 1.46 →
+  2.44 s, where the carrying rounds keep removing CZs (1256 → 1241 →
+  1235 → 1231 → 1231 / 4208 over four rounds on the winning routing).
+  Before the two speed-ups (KAKs only for parts that cross; no carrying
+  rounds when nothing can be carried) it was 1.19× all-to-all, with every
+  CZ circuit paying one more round.
+
+**Learned.**
+- Placement mattered more than the move. Carrying before routing, or in
+  every pipeline, changed what SABRE and the CZ rounds saw and made some
+  rows worse; on final results only, after resynthesis, it never did.
+- The gathering keep rule ("gathered if it dominates, else not") was not
+  monotone under a pass that improves both sides: an all-to-all
+  Clifford+T-16 result got 2 more CXs until gathering was judged on the
+  costs without carrying.
+- The CZ rounds are trajectory-dependent: carrying from the first round
+  ended Clifford+T-16 at 695 CZs instead of 692; plain rounds first, then
+  carrying rounds, is never worse.
+- The biggest wins trade single-qubit gates for CXs (chip CX
+  Clifford+T-16: 704 / 1251 against 733 / 1209) and are refused by the
+  no-more-of-either rule; judging each move by synthesized gate counts
+  did not recover them.
+
+**Next.** Chip CZ time (rounds on every routed candidate), carrying
+within the rule with fewer single-qubit gates, Quantum Volume speed.
+
 ## 2026-11-13 — Pauli-network scoring from tables, shared KAKs in symmetric blocks (0.4.10)
 
 **What.**

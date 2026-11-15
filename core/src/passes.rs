@@ -3,7 +3,7 @@
 //! `phase_folding`). Matches
 //! `qevedo/compiler/passes/{optimize,resynthesize,base}.py`.
 
-use crate::commuting_blocks::gather_blocks;
+use crate::commuting_blocks::{carry_through, gather_blocks};
 use crate::gates::{is_known_gate, matrix_1q, matrix_2q, signature};
 use crate::hashing::FastMap;
 use crate::ir::{Instruction, NON_GATES, cost};
@@ -739,7 +739,14 @@ pub(crate) fn on_the_same_pairs(
     native: &[String],
     cache: &SynthesisCache,
 ) -> Result<Vec<Instruction>, String> {
-    let (out, _) = best_pipeline(instructions, native, Relabel::Never, false, true, cache)?;
+    let (out, _) = best_pipeline(
+        instructions,
+        native,
+        Relabel::Never,
+        false,
+        Last::first(native),
+        cache,
+    )?;
     until_fixed_point(out, native, cache)
 }
 
@@ -771,14 +778,50 @@ fn until_fixed_point(
     if through_cx(native).is_none() {
         return Ok(out);
     }
-    for _ in 0..MAX_ROUNDS {
-        let (next, _) = best_pipeline(&out, native, Relabel::Never, false, true, cache)?;
-        if cost(&next) >= cost(&out) {
-            break;
+    for last in [Last::Yes, Last::Carrying] {
+        // A carrying round costs as much as any other, and finds nothing
+        // new where no gate of the result can be carried.
+        if last == Last::Carrying {
+            let bases = crate::one_qubit::bases_for(&native.iter().cloned().collect());
+            if carry_through(out.clone(), false, &bases) == out {
+                break;
+            }
         }
-        out = next;
+        for _ in 0..MAX_ROUNDS {
+            let (next, _) = best_pipeline(&out, native, Relabel::Never, false, last, cache)?;
+            if cost(&next) >= cost(&out) {
+                break;
+            }
+            out = next;
+        }
     }
     Ok(out)
+}
+
+/// What becomes of a pipeline's result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Last {
+    /// It will be optimized again: routed first, or translated from CX.
+    No,
+    /// It is the result: single-qubit gates may be shifted through CX-like
+    /// gates (`symmetric_blocks.rs`).
+    Yes,
+    /// As `Yes`, and gates of a block may be carried to the next block on
+    /// its pair (`carry_through` in `commuting_blocks.rs`).
+    Carrying,
+}
+
+impl Last {
+    /// For the first pipeline whose result is final: carrying, unless
+    /// [`until_fixed_point`] will run rounds, which carry only once they
+    /// stop finding anything without.
+    pub(crate) fn first(native: &[String]) -> Last {
+        if through_cx(native).is_some() {
+            Last::Yes
+        } else {
+            Last::Carrying
+        }
+    }
 }
 
 /// Whether the pipeline may leave qubits' states on other wires at the end.
@@ -809,7 +852,14 @@ pub fn compile_relabelling(
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let native: Vec<String> = native.into_iter().collect();
     let cache = SynthesisCache::new();
-    let (out, wires) = best_pipeline(&instructions, &native, relabel, true, true, &cache)?;
+    let (out, wires) = best_pipeline(
+        &instructions,
+        &native,
+        relabel,
+        true,
+        Last::first(&native),
+        &cache,
+    )?;
     Ok((until_fixed_point(out, &native, &cache)?, wires))
 }
 
@@ -824,7 +874,7 @@ pub(crate) fn best_pipeline(
     native: &[String],
     relabel: Relabel,
     new_pairs: bool,
-    last: bool,
+    last: Last,
     cache: &SynthesisCache,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let permute = relabel != Relabel::Never;
@@ -859,7 +909,7 @@ pub(crate) fn best_pipeline(
 pub(crate) fn with_and_without_network(
     instructions: &[Instruction],
     native: &[String],
-    last: bool,
+    last: Last,
     cache: &SynthesisCache,
 ) -> Result<Vec<Candidate>, String> {
     let lowered = lowered_for_network(instructions, native);
@@ -892,7 +942,7 @@ fn beside_network(
     native: &[String],
     lowered: Option<Vec<Instruction>>,
     permute: bool,
-    last: bool,
+    last: Last,
     cache: &SynthesisCache,
 ) -> (Result<Vec<Candidate>, String>, Vec<Candidate>) {
     match lowered {
@@ -915,7 +965,7 @@ fn direct_candidates(
     instructions: &[Instruction],
     native: &[String],
     permute: bool,
-    last: bool,
+    last: Last,
     cache: &SynthesisCache,
 ) -> Result<Vec<Candidate>, String> {
     let Some(via) = through_cx(native) else {
@@ -925,7 +975,7 @@ fn direct_candidates(
         instructions.len() >= SIDE_BY_SIDE_MIN,
         || pipeline(instructions, native, permute, last, cache),
         || {
-            let (middle, first) = pipeline(instructions, &via, permute, false, cache).ok()?;
+            let (middle, first) = pipeline(instructions, &via, permute, Last::No, cache).ok()?;
             Some(
                 pipeline(&middle, native, permute, last, cache).map(|(out, second)| {
                     let wires = first
@@ -976,7 +1026,7 @@ fn through_pauli_network(
     lowered: &[Instruction],
     native: &[String],
     permute: bool,
-    last: bool,
+    last: Last,
     cache: &SynthesisCache,
 ) -> Vec<Candidate> {
     let trial = |(seed, local_penalty): (u64, f64)| -> Option<Candidate> {
@@ -1064,12 +1114,13 @@ fn through_cx(native: &[String]) -> Option<Vec<String>> {
 
 /// The default pipeline (see [`compile`]), with permutation-aware block
 /// resynthesis if `permute`, and for a result that will not be optimized
-/// again (`last`) single-qubit gates shifted through CX-like gates.
+/// again (`last`) single-qubit gates shifted through CX-like gates, and
+/// with [`Last::Carrying`] gates carried between blocks on the same pair.
 fn pipeline(
     instructions: &[Instruction],
     native: &[String],
     permute: bool,
-    last: bool,
+    last: Last,
     cache: &SynthesisCache,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let mut lowering = Lowering::sharing(native.iter().cloned(), cache);
@@ -1086,14 +1137,34 @@ fn pipeline(
         commutative_cancellation(current)
     };
     let current = cleanup(current, &lowering);
+    // The rest of the pipeline after gathering; returns the circuit, where
+    // each state ends, and what the circuit would cost without carrying.
     let mut finish = |current: Vec<Instruction>| {
         let (current, wires) = resynthesize_permuting(current, &mut lowering, permute);
+        let carried = if last == Last::Carrying {
+            carry_through(current.clone(), false, &lowering.bases_1q)
+        } else {
+            current.clone()
+        };
+        let carried =
+            (carried != current).then(|| resynthesize_permuting(carried, &mut lowering, false).0);
         // Once more, without resynthesis: a second one never removed a gate
         // on the benchmarks, and resynthesis is most of the time.
-        let current = cleanup(current, &lowering);
-        let current = shift_through_blocks(current, &lowering.bases_1q, last);
-        let current = merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q);
-        (current, wires)
+        let tail = |current: Vec<Instruction>, lowering: &Lowering| {
+            let current = cleanup(current, lowering);
+            let current = shift_through_blocks(current, &lowering.bases_1q, last != Last::No);
+            merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q)
+        };
+        let plain = tail(current, &lowering);
+        let plain_cost = cost(&plain);
+        // Carrying lowers the two-qubit gates of the blocks it joins, but
+        // their single-qubit gates can grow: kept only if no costlier in
+        // either, as for gathering below.
+        let current = match carried.map(|c| tail(c, &lowering)) {
+            Some(c) if no_costlier(cost(&c), plain_cost) => c,
+            _ => plain,
+        };
+        (current, wires, plain_cost)
     };
     // Gathering blocks through commuting gates can trade single-qubit gates
     // for two-qubit ones: on the 16-qubit adder, with relabelling, 85 CXs
@@ -1103,16 +1174,27 @@ fn pipeline(
     // when it needs no more of either.
     let gathered = gather_blocks(current.clone(), permute);
     if gathered == current {
-        return Ok(finish(current));
+        let (out, wires, _) = finish(current);
+        return Ok((out, wires));
     }
     let with = finish(gathered);
     let without = finish(current);
-    let ((two, all), (b_two, b_all)) = (cost(&with.0), cost(&without.0));
-    Ok(if two <= b_two && all <= b_all {
+    // Judged as they would be without carrying: carrying makes each no
+    // costlier, but could make the circuit without gathering cheaper in all
+    // gates and costlier in two-qubit ones than the gathered one, which
+    // the rule would then refuse.
+    let (out, wires, _) = if no_costlier(with.2, without.2) {
         with
     } else {
         without
-    })
+    };
+    Ok((out, wires))
+}
+
+/// Whether a circuit costing `(two, all)` needs no more two-qubit gates and
+/// no more gates in all than one costing `(b_two, b_all)`.
+fn no_costlier((two, all): (usize, usize), (b_two, b_all): (usize, usize)) -> bool {
+    two <= b_two && all <= b_all
 }
 
 #[cfg(test)]
@@ -1193,9 +1275,15 @@ mod tests {
             let mut cheaper = 0;
             for _ in 0..30 {
                 let circuit = random_circuit(&mut rng, 4, 40);
-                let (once, _) =
-                    best_pipeline(&circuit, &native, Relabel::Never, false, true, &fresh())
-                        .unwrap();
+                let (once, _) = best_pipeline(
+                    &circuit,
+                    &native,
+                    Relabel::Never,
+                    false,
+                    Last::first(&native),
+                    &fresh(),
+                )
+                .unwrap();
                 let out = compile(circuit.clone(), native.clone()).unwrap();
                 assert!(dense_equal_up_to_phase(
                     &circuit_unitary(&out, 4),
@@ -1225,6 +1313,44 @@ mod tests {
             }
             if through_cx(&native).is_some() {
                 assert!(cheaper > 0, "{device:?}: no circuit got cheaper");
+            }
+        }
+    }
+
+    #[test]
+    fn a_cx_is_carried_to_the_next_block_on_its_pair() {
+        // cx 0,1; h 1; cx 1,2; cx 0,1 is h 1; cx 1,2; then cz 0,1 · cx 0,1
+        // on {0, 1}, one CX (see `carry_through`): two CXs, not three. The
+        // same backwards; and for CZ, where the rounds of `until_fixed_point`
+        // already found it. The Z rotations around them take the
+        // single-qubit gates the joined block needs, so the circuit is
+        // cheaper in all its gates too, as the pipeline requires.
+        let rz = |q: usize, t: f64| Instruction::gate("rz", [q], [t]);
+        let forward = vec![
+            Instruction::gate("cx", [0, 1], []),
+            Instruction::gate("h", [1], []),
+            Instruction::gate("cx", [1, 2], []),
+            Instruction::gate("cx", [0, 1], []),
+            rz(0, 0.3),
+            rz(1, 0.4),
+        ];
+        let backward = vec![
+            rz(0, 0.3),
+            rz(1, 0.4),
+            Instruction::gate("cx", [0, 1], []),
+            Instruction::gate("cx", [1, 2], []),
+            Instruction::gate("h", [1], []),
+            Instruction::gate("cx", [0, 1], []),
+        ];
+        for circuit in [forward, backward] {
+            for native in [["rz", "sx", "x", "cx"], ["rz", "sx", "x", "cz"]] {
+                let out = compile(circuit.clone(), natives(&native)).unwrap();
+                assert_eq!(cost(&out).0, 2, "{native:?}");
+                assert!(dense_equal_up_to_phase(
+                    &circuit_unitary(&out, 3),
+                    &circuit_unitary(&circuit, 3),
+                    1e-8
+                ));
             }
         }
     }
@@ -1411,7 +1537,7 @@ mod tests {
                 1e-7
             ));
             // No more two-qubit gates, nor gates in all, than without it.
-            let (direct, _) = pipeline(&circuit, &native, true, true, &fresh()).unwrap();
+            let (direct, _) = pipeline(&circuit, &native, true, Last::Carrying, &fresh()).unwrap();
             let ((two, all), (direct_two, direct_all)) = (cost(&out), cost(&direct));
             assert!(two <= direct_two && all <= direct_all);
             kept += usize::from(two < direct_two);
@@ -1472,10 +1598,11 @@ mod tests {
         native: &[String],
         new_pairs: bool,
     ) -> (Vec<Instruction>, Vec<usize>) {
-        let mut candidates = vec![pipeline(instructions, native, true, false, &fresh()).unwrap()];
+        let mut candidates =
+            vec![pipeline(instructions, native, true, Last::No, &fresh()).unwrap()];
         if let Some(via) = through_cx(native) {
-            let (middle, first) = pipeline(instructions, &via, true, false, &fresh()).unwrap();
-            let (out, second) = pipeline(&middle, native, true, false, &fresh()).unwrap();
+            let (middle, first) = pipeline(instructions, &via, true, Last::No, &fresh()).unwrap();
+            let (out, second) = pipeline(&middle, native, true, Last::No, &fresh()).unwrap();
             let wires = first.iter().map(|&w| second[w]).collect();
             candidates.push((out, wires));
         }
@@ -1490,7 +1617,7 @@ mod tests {
                 else {
                     continue;
                 };
-                let (out, second) = pipeline(&network, native, true, false, &fresh()).unwrap();
+                let (out, second) = pipeline(&network, native, true, Last::No, &fresh()).unwrap();
                 let (two, all) = cost(&out);
                 let cheaper = chosen.as_ref().is_none_or(|(c, _)| (two, all) < cost(c));
                 if two <= best.0 && all <= best.1 && cheaper {
@@ -1533,7 +1660,7 @@ mod tests {
                         &native,
                         Relabel::Always,
                         new_pairs,
-                        false,
+                        Last::No,
                         &shared,
                     )
                     .unwrap();
@@ -1547,7 +1674,7 @@ mod tests {
                     networks += 1;
                 }
                 assert_eq!(
-                    with_and_without_network(&circuit, &native, false, &shared).unwrap(),
+                    with_and_without_network(&circuit, &native, Last::No, &shared).unwrap(),
                     expected
                 );
             }

@@ -31,10 +31,16 @@
 //! needs fewer as the cheaper of the two, as the resynthesis will elide that
 //! SWAP). Whether the whole circuit gets cheaper is for the pipeline to
 //! judge (`pipeline` in `passes.rs`).
+//!
+//! Where the blockers do not commute with the blocks, part of a block may
+//! still commute with them once moved through the single-qubit gates
+//! between: [`carry_through`] carries the end of a block forward, or the
+//! start of the next one back, so that the two blocks join.
 
 use crate::gates::{is_known_gate, matrix_1q, matrix_2q};
 use crate::ir::Instruction;
-use crate::linalg::{C, M4};
+use crate::linalg::{C, M2, M4, kron};
+use crate::one_qubit::{Basis1q, synthesize_1q};
 use crate::passes::pair_matrix;
 use crate::two_qubit::cx_count;
 
@@ -314,9 +320,6 @@ fn crosses(blocker: &Instruction, crossed: Vec<&Instruction>, pair: [usize; 2]) 
     let Some(shared) = blocker.qubits.iter().find(|q| pair.contains(q)).copied() else {
         return false;
     };
-    let Some(other) = blocker.qubits.iter().find(|&&q| q != shared).copied() else {
-        return false;
-    };
     // Only the gates acting on the shared qubit can fail to commute.
     if !crossed.iter().any(|x| x.qubits.contains(&shared)) {
         return true;
@@ -324,9 +327,22 @@ fn crosses(blocker: &Instruction, crossed: Vec<&Instruction>, pair: [usize; 2]) 
     let Some(s) = pair_matrix(pair, crossed) else {
         return false;
     };
+    commutes_on_pair(blocker, &s, pair)
+}
+
+/// Whether `blocker`, a two-qubit gate on one qubit of `pair` and another
+/// qubit, commutes with `s`, an operator on `pair` (`pair[0]` the most
+/// significant qubit).
+fn commutes_on_pair(blocker: &Instruction, s: &M4, pair: [usize; 2]) -> bool {
+    let Some(shared) = blocker.qubits.iter().find(|q| pair.contains(q)).copied() else {
+        return false;
+    };
+    let Some(other) = blocker.qubits.iter().find(|&&q| q != shared).copied() else {
+        return false;
+    };
     let unshared = if pair[0] == shared { pair[1] } else { pair[0] };
     let qubits = [shared, unshared, other];
-    let s = embed(&s, [position(&qubits, pair[0]), position(&qubits, pair[1])]);
+    let s = embed(s, [position(&qubits, pair[0]), position(&qubits, pair[1])]);
     on3(blocker, &qubits).is_some_and(|b| commutes(&b, &s))
 }
 
@@ -400,6 +416,266 @@ fn mul8(a: &M8, b: &M8) -> M8 {
 fn commutes(a: &M8, b: &M8) -> bool {
     let (ab, ba) = (mul8(a, b), mul8(b, a));
     (0..8).all(|i| (0..8).all(|j| (ab[i][j] - ba[i][j]).norm() < 1e-9))
+}
+
+// -- carrying gates of a block to the next block on its pair ------------------------------
+
+/// How many two-qubit gates at the end (or start) of a block may be carried
+/// to the next (or previous) block on its pair at once.
+const CARRIED: usize = 3;
+
+/// `instructions` with the last two-qubit gates of a block carried forward
+/// into the next block on the same pair, or the first ones of a block
+/// carried back into the previous one, where that leaves fewer CX-like
+/// gates in the two blocks.
+///
+/// Gathering ([`gather_blocks`]) moves the gates between two blocks on a
+/// pair out of the way, whole: it cannot when they do not commute with the
+/// blocks. But a part of a block may commute with them, once moved through
+/// the single-qubit gates between. In `cx a,b; h b; cx b,c; cx a,b` the
+/// blocker `cx b,c` commutes with neither `cx a,b` nor `h b`, yet
+/// `h b · cx a,b = cz a,b · h b`, and the CZ, diagonal, commutes with the
+/// control of `cx b,c`: the circuit is `h b; cx b,c; (cx a,b · cz a,b)`,
+/// two CXs instead of three. ZX-calculus Clifford simplification (Fagan
+/// and Duncan, arXiv:1901.10114) makes rewrites of this kind on Clifford
+/// circuits; here any gates of a block may move, with exact checks:
+///
+/// - A carried part `D`, the gates of a block from one of its last
+///   [`CARRIED`] two-qubit gates to its end, crosses each single-qubit gate
+///   `g` after it on the pair by becoming `g D g†`, and each blocker only if
+///   it commutes with `D` as it stands there (an 8×8 check).
+/// - At the next block it is put down as the gates it was, between the
+///   inverse of the single-qubit gates it crossed and those gates again
+///   (`R† D R` in time order), for the resynthesis to merge.
+/// - The same backwards: the first gates of a block, carried back to just
+///   after the previous one.
+///
+/// A move is made only when the two blocks it changes need fewer CX-like
+/// gates than before (with `permute`, as [`gather_blocks`] counts them).
+/// The single-qubit gates the merged blocks need can grow, so whether the
+/// circuit gets cheaper is for the pipeline to judge.
+pub fn carry_through(
+    instructions: Vec<Instruction>,
+    permute: bool,
+    bases: &[Basis1q],
+) -> Vec<Instruction> {
+    if bases.is_empty() {
+        return instructions;
+    }
+    let mut insts = instructions;
+    // Each move lowers the CX count of the blocks it changes, so the pass
+    // ends; the budget is a guard all the same.
+    let mut budget = insts.len();
+    let mut i = 0;
+    while i < insts.len() {
+        i = match carry_at(&mut insts, i, permute, bases) {
+            Some(next) if budget > 0 => {
+                budget -= 1;
+                next
+            }
+            Some(_) => break,
+            None => i + 1,
+        };
+    }
+    insts
+}
+
+/// A single-qubit gate on one qubit of `pair` as an operator on the pair.
+fn on_pair_1q(inst: &Instruction, pair: [usize; 2]) -> Option<M4> {
+    let g = matrix_1q(&inst.name, &inst.params)?;
+    Some(if inst.qubits[0] == pair[0] {
+        kron(&g, &M2::IDENTITY)
+    } else {
+        kron(&M2::IDENTITY, &g)
+    })
+}
+
+/// Carry gates between the block of the two-qubit gate at `i` and the next
+/// block on its pair, if that pays; returns where to continue.
+fn carry_at(
+    insts: &mut Vec<Instruction>,
+    i: usize,
+    permute: bool,
+    bases: &[Basis1q],
+) -> Option<usize> {
+    if !two_qubit_gate(&insts[i]) {
+        return None;
+    }
+    let pair = [insts[i].qubits[0], insts[i].qubits[1]];
+    // The gap: what touches the pair between `i` and the next two-qubit
+    // gate on it, `j`. Single-qubit gates and blockers only.
+    let mut gap = Vec::new();
+    let mut blockers = 0;
+    let mut j = None;
+    for k in i + 1..insts.len() {
+        let x = &insts[k];
+        if !touches(x, pair) {
+            continue;
+        }
+        if gap.len() >= WINDOW {
+            return None;
+        }
+        if on_pair(x, pair) {
+            if x.qubits.len() == 2 {
+                j = Some(k);
+                break;
+            }
+            gap.push(k);
+        } else if two_qubit_gate(x) {
+            blockers += 1;
+            if blockers > MAX_BLOCKERS {
+                return None;
+            }
+            gap.push(k);
+        } else {
+            return None;
+        }
+    }
+    let j = j?;
+    if blockers == 0 {
+        return None;
+    }
+    // The blocks: the run on the pair that ends at i, and the one that
+    // starts at j.
+    let run = |range: &mut dyn Iterator<Item = usize>| {
+        let mut members = Vec::new();
+        for k in range {
+            let x = &insts[k];
+            if !touches(x, pair) {
+                continue;
+            }
+            if !on_pair(x, pair) || members.len() >= WINDOW {
+                break;
+            }
+            members.push(k);
+        }
+        members
+    };
+    let mut first: Vec<usize> = vec![i];
+    first.extend(run(&mut (0..i).rev()));
+    first.reverse();
+    let mut second: Vec<usize> = vec![j];
+    second.extend(run(&mut (j + 1..insts.len())));
+    let matrix = |members: &[usize]| pair_matrix(pair, members.iter().map(|&k| &insts[k]));
+    // The gap as steps: each single-qubit gate as an operator on the pair,
+    // each blocker as None. And the single-qubit gates on each qubit of the
+    // pair, multiplied in time order.
+    let mut steps: Vec<(usize, Option<M4>)> = Vec::with_capacity(gap.len());
+    let mut crossed = [M2::IDENTITY; 2];
+    for &k in &gap {
+        let x = &insts[k];
+        if x.qubits.len() == 1 {
+            let g = matrix_1q(&x.name, &x.params)?;
+            let side = usize::from(x.qubits[0] == pair[1]);
+            crossed[side] = g * crossed[side];
+            steps.push((k, Some(on_pair_1q(x, pair)?)));
+        } else {
+            steps.push((k, None));
+        }
+    }
+    // `d` moved through the gap, forward or backward, as it ends up; None if
+    // a blocker on the way does not commute with it as it stands there.
+    let carry = |mut d: M4, forward: bool| -> Option<M4> {
+        let mut cross = |&(k, e): &(usize, Option<M4>)| -> Option<()> {
+            match e {
+                Some(e) if forward => d = e * d * e.adjoint(),
+                Some(e) => d = e.adjoint() * d * e,
+                None if commutes_on_pair(&insts[k], &d, pair) => {}
+                None => return None,
+            }
+            Some(())
+        };
+        if forward {
+            steps.iter().try_for_each(&mut cross)?;
+        } else {
+            steps.iter().rev().try_for_each(&mut cross)?;
+        }
+        Some(d)
+    };
+    let two_qubit = |members: &[usize]| -> Vec<usize> {
+        (0..members.len())
+            .filter(|&p| insts[members[p]].qubits.len() == 2)
+            .collect()
+    };
+    // The parts that can be carried, as (forward, members moved, members
+    // left in their block, the moved part as it ends up). Forward: the end
+    // of the first block, from one of its last two-qubit gates, joins the
+    // second. Backward: the start of the second block joins the first.
+    let mut movable: Vec<(bool, &[usize], &[usize], M4)> = Vec::new();
+    for &cut in two_qubit(&first).iter().rev().take(CARRIED) {
+        let (left, moved) = first.split_at(cut);
+        if let Some(d) = matrix(moved).and_then(|d| carry(d, true)) {
+            movable.push((true, moved, left, d));
+        }
+    }
+    for &cut in two_qubit(&second).iter().take(CARRIED) {
+        let (moved, right) = second.split_at(cut + 1);
+        if let Some(d) = matrix(moved).and_then(|d| carry(d, false)) {
+            movable.push((false, moved, right, d));
+        }
+    }
+    // Most gates cannot be carried at all (on Quantum Volume's generic
+    // blocks, almost none): stop before any KAK decomposition.
+    if movable.is_empty() {
+        return None;
+    }
+    let (m_first, m_second) = (matrix(&first)?, matrix(&second)?);
+    let current = cx_cost(&m_first, permute) + cx_cost(&m_second, permute);
+    // The fewest CX-like gates, then the fewest gates moved.
+    let mut best: Option<(usize, bool, Vec<usize>)> = None;
+    for (forward, moved, rest, d) in movable {
+        let Some(rest) = matrix(rest) else {
+            continue;
+        };
+        let joined = if forward { m_second * d } else { d * m_first };
+        let total = cx_cost(&rest, permute) + cx_cost(&joined, permute);
+        let better = match &best {
+            None => total < current,
+            Some((t, _, m)) => (total, moved.len()) < (*t, m.len()),
+        };
+        if better {
+            best = Some((total, forward, moved.to_vec()));
+        }
+    }
+    let (_, forward, moved) = best?;
+    // The moved gates, between the gap's single-qubit gates undone and
+    // redone: forward, R† D R in time order; backward, R D R†.
+    let emit_all = |ms: [M2; 2]| -> Vec<Instruction> {
+        pair.iter()
+            .zip(ms)
+            .flat_map(|(&q, m)| emit_1q(q, &m, bases))
+            .collect()
+    };
+    let undone = [crossed[0].adjoint(), crossed[1].adjoint()];
+    let (before, after) = if forward {
+        (emit_all(undone), emit_all(crossed))
+    } else {
+        (emit_all(crossed), emit_all(undone))
+    };
+    let mut put: Vec<Instruction> = before;
+    put.extend(moved.iter().map(|&k| insts[k].clone()));
+    put.extend(after);
+    // Rebuild the list: the moved gates leave, and come back just before j
+    // (forward) or just after i (backward).
+    let at = if forward { j } else { i + 1 };
+    let mut out = Vec::with_capacity(insts.len() + put.len());
+    for (k, inst) in insts.drain(..).enumerate() {
+        if k == at {
+            out.append(&mut put);
+        }
+        if !moved.contains(&k) {
+            out.push(inst);
+        }
+    }
+    *insts = out;
+    Some(first[0])
+}
+
+fn emit_1q(qubit: usize, m: &M2, bases: &[Basis1q]) -> Vec<Instruction> {
+    synthesize_1q(m, bases)
+        .into_iter()
+        .map(|op| Instruction::gate(&op.name, [qubit], op.params))
+        .collect()
 }
 
 #[cfg(test)]
@@ -506,5 +782,145 @@ mod tests {
             }
         }
         assert!(gathered > 20, "only {gathered} circuits changed");
+    }
+
+    fn ibm_bases() -> Vec<Basis1q> {
+        let native = ["rz", "sx", "x"].iter().map(|g| g.to_string()).collect();
+        crate::one_qubit::bases_for(&native)
+    }
+
+    /// The CX-like gates the blocks on `pair` need, in list order.
+    fn pair_costs(circuit: &[Instruction], pair: [usize; 2]) -> Vec<usize> {
+        let mut costs = Vec::new();
+        let mut run: Vec<&Instruction> = Vec::new();
+        for inst in circuit {
+            if !touches(inst, pair) {
+                continue;
+            }
+            if on_pair(inst, pair) {
+                run.push(inst);
+            } else {
+                if run.iter().any(|i| i.qubits.len() == 2) {
+                    costs.push(cx_count(&pair_matrix(pair, run.iter().copied()).unwrap()));
+                }
+                run.clear();
+            }
+        }
+        if run.iter().any(|i| i.qubits.len() == 2) {
+            costs.push(cx_count(&pair_matrix(pair, run.iter().copied()).unwrap()));
+        }
+        costs
+    }
+
+    #[test]
+    fn a_cx_carried_through_a_hadamard_joins_the_next_block() {
+        // h 1 · cx 0,1 is cz 0,1 · h 1, and the CZ commutes with the control
+        // of cx 1,2: the first CX joins the last, and cx·cz on {0, 1} is one
+        // CX. Neither gate commutes with cx 1,2 as it stands, so gathering
+        // cannot move it.
+        let circuit = vec![
+            gate("cx", &[0, 1], &[]),
+            gate("h", &[1], &[]),
+            gate("cx", &[1, 2], &[]),
+            gate("cx", &[0, 1], &[]),
+        ];
+        assert_eq!(gather_blocks(circuit.clone(), false), circuit);
+        let out = carry_through(circuit.clone(), false, &ibm_bases());
+        assert!(dense_equal_up_to_phase(
+            &circuit_unitary(&circuit, 3),
+            &circuit_unitary(&out, 3),
+            1e-9
+        ));
+        assert_eq!(pair_costs(&circuit, [0, 1]), vec![1, 1]);
+        assert_eq!(pair_costs(&out, [0, 1]), vec![1]);
+        // The blocker now comes before every gate on {0, 1}.
+        let blocker = out.iter().position(|i| i.qubits == [1, 2]).unwrap();
+        assert!(out[..blocker].iter().all(|i| i.qubits.len() == 1));
+    }
+
+    #[test]
+    fn a_cx_carried_back_through_a_hadamard_joins_the_previous_block() {
+        // The mirror image: cx 0,1 · h 1 is h 1 · cz 0,1.
+        let circuit = vec![
+            gate("cx", &[0, 1], &[]),
+            gate("cx", &[1, 2], &[]),
+            gate("h", &[1], &[]),
+            gate("cx", &[0, 1], &[]),
+        ];
+        let out = carry_through(circuit.clone(), false, &ibm_bases());
+        assert!(dense_equal_up_to_phase(
+            &circuit_unitary(&circuit, 3),
+            &circuit_unitary(&out, 3),
+            1e-9
+        ));
+        assert_eq!(pair_costs(&out, [0, 1]), vec![1]);
+        let blocker = out.iter().position(|i| i.qubits == [1, 2]).unwrap();
+        assert!(out[blocker + 1..].iter().all(|i| i.qubits.len() == 1));
+    }
+
+    #[test]
+    fn nothing_is_carried_through_a_gate_it_does_not_commute_with() {
+        // cx 0,1 targets qubit 1, which cx 1,2 controls, and no single-qubit
+        // gate stands between to change that.
+        let circuit = vec![
+            gate("cx", &[0, 1], &[]),
+            gate("cx", &[1, 2], &[]),
+            gate("cx", &[0, 1], &[]),
+        ];
+        assert_eq!(carry_through(circuit.clone(), false, &ibm_bases()), circuit);
+        // Wherever gates move, the blocks on the pair need fewer CXs.
+        let circuit = vec![
+            gate("cx", &[0, 1], &[]),
+            gate("h", &[1], &[]),
+            gate("cx", &[1, 2], &[]),
+            gate("h", &[0], &[]),
+            gate("cz", &[1, 0], &[]),
+            gate("rz", &[1], &[0.3]),
+            gate("cx", &[1, 0], &[]),
+        ];
+        let out = carry_through(circuit.clone(), false, &ibm_bases());
+        let before: usize = pair_costs(&circuit, [0, 1]).iter().sum();
+        let after: usize = pair_costs(&out, [0, 1]).iter().sum();
+        assert!(out == circuit || after < before);
+    }
+
+    #[test]
+    fn carrying_keeps_random_circuits_equivalent() {
+        // As for gathering: Clifford+T-like circuits on few qubits, where
+        // gates can often be carried; every output must have the input's
+        // unitary.
+        let mut rng = Rng::new(23);
+        let names = ["h", "s", "t", "sx", "x", "rz"];
+        let bases = ibm_bases();
+        let mut carried = 0;
+        for trial in 0..300 {
+            let n = 3 + trial % 3;
+            let mut circuit = Vec::new();
+            for _ in 0..30 {
+                if rng.uniform() < 0.5 {
+                    let a = rng.below(n);
+                    let b = (a + 1 + rng.below(n - 1)) % n;
+                    circuit.push(gate(["cx", "cz"][rng.below(2)], &[a, b], &[]));
+                } else {
+                    let name = names[rng.below(names.len())];
+                    let params = if name == "rz" {
+                        vec![rng.uniform()]
+                    } else {
+                        vec![]
+                    };
+                    circuit.push(gate(name, &[rng.below(n)], &params));
+                }
+            }
+            for permute in [false, true] {
+                let out = carry_through(circuit.clone(), permute, &bases);
+                carried += usize::from(out != circuit);
+                assert!(dense_equal_up_to_phase(
+                    &circuit_unitary(&circuit, n),
+                    &circuit_unitary(&out, n),
+                    1e-9
+                ));
+            }
+        }
+        assert!(carried > 20, "only {carried} circuits changed");
     }
 }

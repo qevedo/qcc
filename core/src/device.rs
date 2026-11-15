@@ -12,7 +12,7 @@ use crate::gates::matrix_2q;
 use crate::ir::{Instruction, cost};
 use crate::linalg::{M2, equal_up_to_phase4, kron};
 use crate::lower::{Lowering, SynthesisCache};
-use crate::passes::{merge_single_qubit_runs, on_the_same_pairs, with_and_without_network};
+use crate::passes::{Last, merge_single_qubit_runs, on_the_same_pairs, with_and_without_network};
 use crate::routing::{CouplingGraph, SabreOptions, layout_and_route_and_first};
 use crate::two_qubit::kak;
 use std::collections::HashSet;
@@ -106,7 +106,7 @@ pub fn compile_for_device(
     // On logical qubits, where relabelling is free (the final layout reports
     // it). A Pauli network can need far more routing than it saves, so a
     // result with one is routed next to one without, and the cheaper kept.
-    let logical_candidates = with_and_without_network(&instructions, &native, false, &cache)?;
+    let logical_candidates = with_and_without_network(&instructions, &native, Last::No, &cache)?;
     // Each candidate is laid out and routed on its own thread. The CNOTs a
     // routing's SWAPs cost are only an estimate of what the optimized circuit
     // will need (the single-qubit gates, a CZ device's rounds and a Pauli

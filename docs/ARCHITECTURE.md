@@ -112,6 +112,30 @@ Hamiltonian from 1379 CZs and 5372 gates to 1292 and 4572.
    circuit with and without gathering whenever gathering moved a gate, and
    keeps the gathered one only when it needs no more two-qubit gates and
    no more gates in all.
+   **Carrying gates between blocks** (`carry_through` in the same file):
+   where the gates between two blocks on a pair do not commute with them,
+   part of a block may, once moved through the single-qubit gates between.
+   In `cx a,b; h b; cx b,c; cx a,b`, `h b · cx a,b` is `cz a,b · h b`, and
+   the CZ commutes with the control of `cx b,c`: it joins the last CX, and
+   `cx·cz` on `{a, b}` is one CX, so the circuit needs two CXs instead of
+   three. The pass carries the end of a block (from one of its last three
+   two-qubit gates) forward into the next block on its pair, or the start
+   of a block back into the previous one: a carried part `D` crosses a
+   single-qubit gate `g` as `g D g†` and a blocker only if it commutes
+   with `D` as it stands there (an 8×8 check), and is put down as its own
+   gates between the inverse of the single-qubit gates it crossed and
+   those gates again, for the resynthesis to merge. A move is made only
+   when the two blocks need fewer CX-like gates. It runs only on a result
+   that will not be optimized again (after routing, on the chip's qubits),
+   after block resynthesis; the blocks it changes are synthesized again,
+   and the result is kept only when it needs no more two-qubit gates and
+   no more gates in all than without it. Gathering's choice above is made
+   on the costs without carrying, so carrying cannot change it. For CZ-like
+   devices the repeated rounds (`until_fixed_point`, above) first run
+   without carrying until they stop shrinking, then with it, so that the result is never costlier than
+   before. On the heavy-hex chip it took the 16-qubit Hamiltonian from
+   1336 to 1321 CNOTs and, with CZ, from 1256 / 4454 to 1231 / 4208 CZs /
+   gates.
 7. **ResynthesizeTwoQubitBlocks**: collects maximal runs of gates that only
    touch one pair of qubits, multiplies each into its 4×4 unitary and
    replaces it by a fresh KAK synthesis when that has fewer two-qubit
@@ -258,8 +282,8 @@ The result is a circuit on a register `q` of the device's qubits;
 `Circuit.initial_layout` and `Circuit.output_permutation` say on which
 physical qubit each logical qubit starts and ends. A circuit whose two-qubit
 gates already act on coupled pairs keeps its layout. On a 19-qubit
-heavy-hex chip (`benchmarks/compilation/device.py`) this uses 7–10% fewer
-two-qubit gates than Qiskit's level 3 (0.928× with CX, 0.899× with CZ), and
+heavy-hex chip (`benchmarks/compilation/device.py`) this uses 8–10% fewer
+two-qubit gates than Qiskit's level 3 (0.924× with CX, 0.897× with CZ), and
 17–18% fewer gates in all.
 
 Still to come: technology-specific constraints from `DeviceSpec.gate_rules`,

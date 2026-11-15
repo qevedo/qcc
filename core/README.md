@@ -17,7 +17,7 @@ cargo run --release --example multicore -- 100 10 # compare multi-core mappers
 | `ir.rs` | the instruction list every pass works on; an instruction owns no heap memory in the usual case (known names are `&'static str`, up to three qubits and parameters inline) |
 | `device.rs` | compiling for a device whose qubits are not all coupled: optimize, lay out, route, optimize again |
 | `passes.rs` | the default pipeline: lowering, phase folding, single-qubit merging, commutative cancellation, two-qubit block resynthesis |
-| `commuting_blocks.rs` | gathering two-qubit blocks on the same pair through gates that commute out of the way (before block resynthesis) |
+| `commuting_blocks.rs` | gathering two-qubit blocks on the same pair through gates that commute out of the way (before block resynthesis); carrying the end of a block forward, or the start of one back, through single-qubit gates and commuting gates into the next block on its pair (`carry_through`, after resynthesis, on final results) |
 | `phase_folding.rs` | merging rotations that act on the same parity, however far apart |
 | `pauli_network.rs` | circuits read as Pauli rotations and synthesized again, greedily (for Pauli exponentials) |
 | `symmetric_blocks.rs` | moving single-qubit gates through blocks whose Weyl point is symmetric (XX + YY + ZZ, and a lone CX: a Z rotation on its control, an X rotation on its target) |
