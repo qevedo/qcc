@@ -8,6 +8,73 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-17 — One map update per gate in rotation merging (0.4.12)
+
+**What.** `core/src/pauli_network.rs`:
+- `apply_all_to_map`: the Clifford map that rotation merging and the Pauli
+  network's extraction keep (`C† X_q C`, `C† Z_q C`) is updated once per
+  gate instead of once per Clifford the gate is read as. Appending
+  g₁, …, gₖ maps each generator P to `C† g₁† ⋯ gₖ† P gₖ ⋯ g₁ C`, so P is
+  conjugated by gₖ† first and g₁† last, and its image read once. √X was
+  three updates (H S H), X four, Y six, CZ and SWAP three, Z rotations by
+  π/2, π and 3π/2 one to three; each is now one.
+- `read` returns its steps inline (`Step::Cliffords([Gate; 6], n)` or
+  `Step::Rotation`) instead of a `Vec` per instruction.
+- Test: `one_update_per_gate_is_the_same_map` (every multi-step gate
+  `read` gives and S², S³, on two qubits of three in both orders, on maps
+  scrambled by random Cliffords, against one update per Clifford). A
+  mutation that drops the inverses fails it; the step order alone cannot
+  be caught, as every gate's steps equal their reverse up to phase.
+
+**Why.** Next item 1 was the CZ chip time (16-qubit Hamiltonian 2.44 s
+against Qiskit's 0.11–0.15 s). The suggested remedy, running the rounds
+of `until_fixed_point` only on the best routed candidates, was measured
+first and does not hold (see **Didn't work** in `experiments.md`): the
+first pass does not predict which candidate ends cheapest. A callgrind
+profile of one candidate's rounds (the routed circuit dumped from the
+device path and run through `passes::compile` in a throwaway example)
+was spread out: two-qubit synthesis 28%, gathering 11%, M4 products 10%,
+rotation merging 8.9%, of which 7.0% was `apply_to_map`, mostly on the
+√X and CZ gates the CZ pipelines are full of. That part could be removed
+exactly.
+
+**Measured** (4-vCPU Xeon VM).
+- Outputs: 220 compilations byte-identical to 0.4.11 (every circuit
+  all-to-all and through the Qiskit plugin with CX and CZ; the chip with
+  CX and CZ including 27 held-out circuits per gate set; 31 held-out
+  circuits on the chip with CZ and 23 on a 4×5 grid with CX, other seeds).
+- Callgrind, one CZ candidate of the 16-qubit Hamiltonian on the chip:
+  15.30 → 14.74 G instructions (−3.7%); rotation merging 1.37 → 0.81 G.
+- Paired timings (two long-lived workers, 0.4.11 wheel and this build,
+  alternating, medians of 9 all-to-all and 5 on the chip): all-to-all
+  1.00× with CX and 0.974× with CZ in geometric mean; chip 1.001× with CX
+  and 0.983× with CZ, the CZ Hamiltonian-16 2.77 → 2.57 s (0.93×). Single
+  circuits of a few milliseconds vary by ±15% between runs here.
+- `check.py` passes; core 109 tests, Python 219.
+
+**Learned.**
+- Pruning routed candidates on their first-pass cost does not work (97
+  CZ compilations, 61 with several candidates): no margin up to 7% keeps
+  every result, and at 10%, the first that does, only 10% of the rounds
+  go (145 of 1518). Pruning in lockstep after every round is no better
+  (15% at 10%). The winner of
+  the 14-qubit held-out Hamiltonian started 2.1% behind another
+  candidate.
+- In the rounds neither pipeline can be dropped: the direct one won 368
+  rounds (365 strictly), the one through CX 139.
+- `cx_count` in gathering is a full KAK per call (5.3% of a CZ
+  candidate's instructions); a memo by the unitary's bits would hit 44%
+  of calls, at most 2.3%, not worth a cache passed through gathering.
+
+**Next.**
+1. The CZ rounds' time is spread over the whole pipeline; what remains
+   large is resynthesis (synthesis misses 28%, `dress` and `kak`) and
+   gathering's KAKs. Incremental rounds (re-run only the parts of the
+   circuit the last round changed) would cut it by much more than any
+   one pass, but need a way to bound where a change can reach.
+2. Carrying beyond the strict rule (unchanged).
+3. Quantum Volume speed all-to-all (QV-32: 96 ms, the core 78 of it).
+
 ## 2026-11-15 — Carrying gates between blocks on the same pair (0.4.11)
 
 **What.**

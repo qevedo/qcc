@@ -211,9 +211,14 @@ impl Gate {
 
 /// The circuit's gates as [`Gate`]s and Z rotations (`None` for a gate this
 /// module does not handle).
-fn read(inst: &Instruction) -> Option<Vec<Step>> {
+fn read(inst: &Instruction) -> Option<Step> {
     let q = |i: usize| inst.qubits[i];
-    let gates = |gs: &[Gate]| Some(gs.iter().map(|&g| Step::Clifford(g)).collect());
+    // At most six Cliffords (Y); the rest of the array is never read.
+    let gates = |gs: &[Gate]| {
+        let mut out = [Gate::H(0); 6];
+        out[..gs.len()].copy_from_slice(gs);
+        Some(Step::Cliffords(out, gs.len()))
+    };
     if !inst.is_gate() {
         return None;
     }
@@ -240,10 +245,10 @@ fn read(inst: &Instruction) -> Option<Vec<Step>> {
             Gate::Cx(q(1), q(0)),
             Gate::Cx(q(0), q(1)),
         ]),
-        ("rz" | "p" | "u1" | "phase", &[theta]) => Some(vec![Step::Rotation(q(0), theta)]),
-        ("t", []) => Some(vec![Step::Rotation(q(0), std::f64::consts::FRAC_PI_4)]),
-        ("tdg", []) => Some(vec![Step::Rotation(q(0), -std::f64::consts::FRAC_PI_4)]),
-        ("id", []) => Some(vec![]),
+        ("rz" | "p" | "u1" | "phase", &[theta]) => Some(Step::Rotation(q(0), theta)),
+        ("t", []) => Some(Step::Rotation(q(0), std::f64::consts::FRAC_PI_4)),
+        ("tdg", []) => Some(Step::Rotation(q(0), -std::f64::consts::FRAC_PI_4)),
+        ("id", []) => gates(&[]),
         _ => None,
     }
 }
@@ -253,8 +258,11 @@ type Rotation = (Pauli, f64);
 /// A rotation and the index of the instruction it comes from.
 type Located = (Pauli, f64, usize);
 
+/// What [`read`] makes of an instruction: Clifford gates, in order (the
+/// first `n` of the array), or one Z rotation. Kept inline rather than in a
+/// `Vec`: rotation merging reads every instruction of every pipeline.
 enum Step {
-    Clifford(Gate),
+    Cliffords([Gate; 6], usize),
     Rotation(usize, f64),
 }
 
@@ -281,22 +289,18 @@ fn extract_indexed(instructions: &[Instruction], n: usize) -> Option<(Vec<Locate
     let mut m: Vec<Pauli> = (0..n).flat_map(|q| [Pauli::x(q), Pauli::z(q)]).collect();
     let mut rotations = Vec::new();
     for (index, inst) in instructions.iter().enumerate() {
-        for step in read(inst)? {
-            match step {
-                Step::Rotation(q, theta) => {
-                    // Multiples of π/2 are Clifford: S, Z or S†.
-                    let quarter = theta / FRAC_PI_2;
-                    if (quarter - quarter.round()).abs() < 1e-12 {
-                        let k = quarter.round().rem_euclid(4.0) as usize;
-                        for _ in 0..k {
-                            apply_to_map(&mut m, Gate::S(q));
-                        }
-                    } else {
-                        rotations.push((m[2 * q + 1], theta, index));
-                    }
+        match read(inst)? {
+            Step::Rotation(q, theta) => {
+                // Multiples of π/2 are Clifford: S, Z or S†.
+                let quarter = theta / FRAC_PI_2;
+                if (quarter - quarter.round()).abs() < 1e-12 {
+                    let k = quarter.round().rem_euclid(4.0) as usize;
+                    apply_all_to_map(&mut m, &[Gate::S(q); 3][..k], &[q]);
+                } else {
+                    rotations.push((m[2 * q + 1], theta, index));
                 }
-                Step::Clifford(g) => apply_to_map(&mut m, g),
             }
+            Step::Cliffords(gates, n) => apply_all_to_map(&mut m, &gates[..n], &inst.qubits),
         }
     }
     Some((rotations, m))
@@ -415,6 +419,41 @@ fn apply_to_map(m: &mut [Pauli], g: Gate) {
         for (row, generator) in [(2 * q, Pauli::x(q)), (2 * q + 1, Pauli::z(q))] {
             let mut p = generator;
             inverse.conjugate(&mut p);
+            updates[count] = (row, image(m, &p));
+            count += 1;
+        }
+    }
+    for &(row, p) in &updates[..count] {
+        m[row] = p;
+    }
+}
+
+/// [`apply_to_map`] for each of `gates` in turn, acting on `qubits` (two at
+/// most), in one update: `m ← m ∘ conj(g₁†) ∘ … ∘ conj(gₖ†)`. Appending
+/// g₁, …, gₖ to C maps each generator P to `C† g₁† ⋯ gₖ† P gₖ ⋯ g₁ C`, so
+/// P is conjugated by gₖ† first and g₁† last, and its image read once. The
+/// Pauli arithmetic is exact, so the map is the same, bit for bit, as
+/// k updates give (`one_update_per_gate_is_the_same_map` checks it). A gate
+/// read as several Cliffords (√X as H S H, X as H S S H, CZ as H CX H, Z
+/// rotations by π/2 as S, S S or S S S) updates the map once: rotation
+/// merging reads every gate of every pipeline, and on the 16-qubit
+/// Hamiltonian on the heavy-hex chip with CZ one update per Clifford was
+/// most of its time.
+fn apply_all_to_map(m: &mut [Pauli], gates: &[Gate], qubits: &[usize]) {
+    debug_assert!(qubits.len() <= 2);
+    match gates {
+        [] => return,
+        &[g] => return apply_to_map(m, g),
+        _ => {}
+    }
+    let mut updates = [(0, Pauli::IDENTITY); 4];
+    let mut count = 0;
+    for &q in qubits {
+        for (row, generator) in [(2 * q, Pauli::x(q)), (2 * q + 1, Pauli::z(q))] {
+            let mut p = generator;
+            for g in gates.iter().rev() {
+                g.inverse().conjugate(&mut p);
+            }
             updates[count] = (row, image(m, &p));
             count += 1;
         }
@@ -965,6 +1004,56 @@ mod tests {
         let mut p = x;
         Gate::Cx(0, 1).conjugate(&mut p);
         assert_eq!((p.x, p.z), (0b11, 0));
+    }
+
+    #[test]
+    fn one_update_per_gate_is_the_same_map() {
+        // Every multi-step gate `read` gives, on two qubits of three, in
+        // both orders, applied to maps already scrambled by other gates.
+        let mut rng = crate::rng::Rng::new(5);
+        let pool = [
+            Gate::H(0),
+            Gate::S(1),
+            Gate::Cx(0, 2),
+            Gate::Cx(2, 1),
+            Gate::H(2),
+            Gate::Sdg(0),
+        ];
+        // The gates `read` gives several Cliffords for, and Z rotations by
+        // π/2, π and 3π/2 (S once, twice, three times).
+        let mut cases: Vec<(String, Vec<Gate>, Vec<usize>)> = Vec::new();
+        for qubits in [[1usize, 2], [2, 0]] {
+            for name in ["x", "y", "z", "sx", "sxdg", "cz", "swap"] {
+                let arity = if ["cz", "swap"].contains(&name) { 2 } else { 1 };
+                let inst = Instruction::gate(name, &qubits[..arity], []);
+                let Some(Step::Cliffords(array, n)) = read(&inst) else {
+                    panic!("{name} is read as Cliffords");
+                };
+                assert!(n > 1, "{name}");
+                cases.push((name.into(), array[..n].to_vec(), qubits[..arity].to_vec()));
+            }
+            for k in 2..=3 {
+                let q = qubits[0];
+                cases.push((format!("S^{k}"), vec![Gate::S(q); k], vec![q]));
+            }
+        }
+        for (name, gates, qubits) in &cases {
+            {
+                for _ in 0..20 {
+                    let mut m: Vec<Pauli> =
+                        (0..3).flat_map(|q| [Pauli::x(q), Pauli::z(q)]).collect();
+                    for _ in 0..8 {
+                        apply_to_map(&mut m, pool[rng.below(pool.len())]);
+                    }
+                    let mut one = m.clone();
+                    apply_all_to_map(&mut one, gates, qubits);
+                    for &g in gates {
+                        apply_to_map(&mut m, g);
+                    }
+                    assert_eq!(one, m, "{name} on {qubits:?}");
+                }
+            }
+        }
     }
 
     #[test]
