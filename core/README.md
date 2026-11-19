@@ -21,6 +21,7 @@ cargo run --release --example multicore -- 100 10 # compare multi-core mappers
 | `phase_folding.rs` | merging rotations that act on the same parity, however far apart |
 | `pauli_network.rs` | circuits read as Pauli rotations and synthesized again, greedily (for Pauli exponentials) |
 | `symmetric_blocks.rs` | moving single-qubit gates through blocks whose Weyl point is symmetric (XX + YY + ZZ, and a lone CX: a Z rotation on its control, an X rotation on its target) |
+| `pauli_pairs.rs` | pairs of Paulis around two-qubit gates they commute with (X on a CX's target, Z on its control or a CZ), chosen per wire by dynamic programming to make the single-qubit runs cheapest (on final results) |
 | `permutation.rs` | SWAP elision: removing SWAP gates by relabelling the qubits after them (block resynthesis in `passes.rs` can also elide the SWAP inside a block) |
 | `lower.rs` | lowering one gate to the device's native gates (definitions or synthesis, whichever is cheaper), and the two-qubit syntheses one compilation shares across its pipelines (`SynthesisCache`) |
 | `gates.rs` | matrices of the standard gates |

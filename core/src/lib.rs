@@ -18,6 +18,7 @@ pub mod one_qubit;
 pub mod parallel;
 pub mod passes;
 pub mod pauli_network;
+pub mod pauli_pairs;
 pub mod permutation;
 pub mod phase_folding;
 pub mod rng;

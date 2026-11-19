@@ -174,10 +174,32 @@ Hamiltonian from 1379 CZs and 5372 gates to 1292 and 4572.
    through CX for a CZ device). With gathering, it took the benchmark's
    random Clifford+T circuits from 293, 525 and 1074 gates to 278, 505 and
    1034.
+9. **Pauli pairs** (`core/src/pauli_pairs.rs`, Rust only): where a Pauli P
+   on one qubit commutes with a two-qubit gate G (X with a CX's target, Z
+   with its control or with either qubit of a CZ; checked on G's matrix),
+   G = P G P, so a P can be put just before G and another just after it,
+   each merging into the run on its side. Done around several gates along
+   a wire, this carries a Pauli from one run to another: an X that a
+   block's synthesis left alone between two CXs it is the target of can
+   travel to a run further on that absorbs it for free (in {rz, sx, x},
+   X·Rz(b)·SX·Rz(a) = Rz(π − b)·SX·Rz(π + a)), or meet another X and
+   cancel. Pairs on different wires are independent, so each wire is
+   solved exactly: a dynamic programme over its chain of runs, with the
+   Pauli at each gate as the state, picks the cheapest choices, and a wire
+   changes only if that is strictly cheaper. Qiskit's
+   `Optimize1qGatesSimpleCommutation` moves gates one commutation at a
+   time into runs that exist; this pass crosses any number of gates and can
+   create a run. It runs on final results, at the end of each pipeline
+   (so gathering above is judged with it), and for CZ-like devices once
+   after the repeated rounds, as inside them it changed which fixed point
+   they reached. With it, gathering pays on the adder: 37 / 104, 85 / 244
+   and 181 / 524 at 8, 16 and 32 qubits, against 40 / 105, 92 / 245 and
+   196 / 525.
 On the compilation benchmark (`benchmarks/compilation`: 24 circuits against
 Qiskit's level 3, pytket and UCC), QCC uses no more two-qubit gates than
 Qiskit on any circuit, and fewer on most; phase folding is most of the
-difference on arithmetic (19% fewer CNOTs on adders), the Pauli network on
+difference on arithmetic (with gathering and Pauli pairs, 25% fewer
+CNOTs on adders), the Pauli network on
 Hamiltonian simulation (up to 43%).
 
 The synthesis lives in `qevedo/compiler/synthesis/` (`gates.py`: matrices of

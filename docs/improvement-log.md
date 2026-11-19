@@ -8,6 +8,83 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-19 — Pauli pairs around two-qubit gates (0.4.13)
+
+**What.** New pass `core/src/pauli_pairs.rs` (`insert_pauli_pairs`), run
+in `passes.rs`:
+- If a Pauli P on one qubit commutes with a two-qubit gate G (checked on
+  G's matrix, up to phase: X on a CX's target, Z on its control, Z on
+  either qubit of a CZ), then G = P G P. Putting a P on each side merges
+  one into each neighbouring run. Along a wire this carries a Pauli from
+  run to run across any number of such gates. Pairs on different wires
+  are independent, so each wire is solved exactly: a dynamic programme
+  over the wire's chain of runs, four states (I, X, Y, Z) at each gate,
+  each run priced by `count_1q` of P_after · R · P_before (as it is when
+  both are I). A wire changes only if strictly cheaper; only changed runs
+  are resynthesized, and a run is created where a wire had none if that
+  pays.
+- It runs at the end of `tail` in every pipeline whose result is final
+  (`Last::Yes`, `Last::Carrying`), so the gathering keep rule and the
+  carrying rule compare circuits that have had it. For CX-like devices
+  other than CX it runs instead once after `until_fixed_point`'s rounds.
+- Masks of commuting Paulis are cached per gate kind; empty slots use a
+  precomputed table (speed only, outputs identical).
+- Tests: an X carried through two CX targets to a generic run; no Pauli
+  crosses a CX control or a measurement; two Xs cancel and a Z crosses a
+  CZ; 450 random native circuits (CX, CZ, ECR) keep their unitary, never
+  cost more, keep their two-qubit gates, and more than 50 get cheaper.
+  Two mutations (the product's order, a wrong commutation mask) are caught.
+
+**Why.** Next item 7 was the adder's gathered CNOTs (37 / 85 / 181
+against 40 / 92 / 196 kept), refused because the gathered circuits had 3,
+7 and 15 more gates in all. Counting gate names in the refused circuits
+showed the excess was exactly their `x` gates: each an X left by an
+elided SWAP, alone after a CX it is the target of. Within a few gates
+along the wire there is a run that would absorb it for free, but no pass
+looked further than one gate (`shift_through_blocks` trades one lone CX
+at a time; Qiskit's `Optimize1qGatesSimpleCommutation` likewise moves one
+commutation at a time into existing runs). A Python prototype on QCC's
+outputs (20 minutes) showed the same Xs everywhere: the 32-qubit Heisenberg
+chain had 66. Exact and cheap, it beat the Next list's other items, which
+need a decision on a keep rule (carrying) or large work (incremental rounds).
+
+**Measured** (4-vCPU Xeon VM, `run.py`, `device.py`, `plugin.py`, full runs).
+- All-to-all with CX: the adder 40 / 105 → 37 / 104, 92 / 245 → 85 / 244,
+  196 / 525 → 181 / 524 (gathering now kept); Clifford+T 278 → 274,
+  499 → 484 (pytket 495), 1030 → 1009; Heisenberg 273 → 267, 573 → 559,
+  1173 → 1143; QAOA 159 → 156, 317 → 312, 634 → 615; Hamiltonian
+  790 → 786, 1511 → 1504. Geometric mean against Qiskit 0.932× / 0.874× →
+  0.923× / 0.866×.
+- Chip with CX 0.816× → 0.813× of Qiskit's gates (Heisenberg-16 571 →
+  559, Hamiltonian-16 2099 → 2091); with CZ 0.830× → 0.829× (Clifford+T-16
+  2677 → 2668). Inside Qiskit 0.844× → 0.842× with CX, 0.835× → 0.830× with
+  CZ (adder-16 613 → 597). No two-qubit count changed off the adder, and
+  no row of any table got costlier.
+- Held out (other sizes and seeds, 6–24 qubits, all-to-all and chip, CX
+  and CZ): 132 compilations, 6 with fewer two-qubit gates (all adders,
+  7–8%), 65 with fewer gates, none worse in either.
+- Time, paired workers (0.4.12 wheel against this build, alternating,
+  medians): 1.04× all-to-all, 1.03× chip CX, 0.98× chip CZ in geometric
+  mean; Clifford+T-32 18.5 → 19.4 ms, Hamiltonian-32 131 → 132 ms.
+- `check.py` passes; core 113 tests, Python 219; wasm builds.
+
+**Variants dropped.** Inside the CZ rounds (some rows better, e.g. chip
+Clifford+T-16 2649 gates, but others reached worse fixed points: chip
+Hamiltonian-16 1226 / 4229 against 1231 / 4208, all-to-all QAOA-8 223
+against 213). In every pipeline, also before routing: chip CX adder-16
+146 / 402 → 151 / 456, Hamiltonian-16 1321 → 1339 CNOTs.
+
+**Learned.** A refused keep-rule trade can hide a missing pass: count
+the gate names of the refused circuit. A pass that never makes its input
+costlier can still make the CZ rounds end worse; such passes go after
+`until_fixed_point`. A prototype that prices unchanged runs differently
+from the real pass (here through a 1-qubit compile) overestimates.
+
+**Next.**
+1. Incremental CZ rounds (unchanged; CZ Hamiltonian-16 on the chip 2.0 s).
+2. Pauli pairs inside the CZ rounds, with both trajectories compared.
+3. Carrying beyond the strict rule: remeasure with Pauli pairs.
+
 ## 2026-11-17 — One map update per gate in rotation merging (0.4.12)
 
 **What.** `core/src/pauli_network.rs`:

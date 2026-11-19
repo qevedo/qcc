@@ -10,6 +10,7 @@ use crate::ir::{Instruction, NON_GATES, cost};
 use crate::linalg::{M2, M4, kron};
 use crate::lower::{Lowering, SynthesisCache};
 use crate::one_qubit::{Basis1q, count_1q, remainder, synthesize_1q};
+use crate::pauli_pairs::insert_pauli_pairs;
 use crate::permutation::measured_out;
 use crate::phase_folding::phase_folding;
 use crate::symmetric_blocks::{shift_through_blocks, shift_through_symmetric_blocks};
@@ -778,14 +779,12 @@ fn until_fixed_point(
     if through_cx(native).is_none() {
         return Ok(out);
     }
+    let bases = crate::one_qubit::bases_for(&native.iter().cloned().collect());
     for last in [Last::Yes, Last::Carrying] {
         // A carrying round costs as much as any other, and finds nothing
         // new where no gate of the result can be carried.
-        if last == Last::Carrying {
-            let bases = crate::one_qubit::bases_for(&native.iter().cloned().collect());
-            if carry_through(out.clone(), false, &bases) == out {
-                break;
-            }
+        if last == Last::Carrying && carry_through(out.clone(), false, &bases) == out {
+            break;
         }
         for _ in 0..MAX_ROUNDS {
             let (next, _) = best_pipeline(&out, native, Relabel::Never, false, last, cache)?;
@@ -795,7 +794,12 @@ fn until_fixed_point(
             out = next;
         }
     }
-    Ok(out)
+    // Pauli pairs (`pauli_pairs.rs`) last, on the rounds' result. Inside the
+    // rounds they changed which fixed point the rounds reached: on the chip
+    // the 16-qubit Hamiltonian ended at 1226 CZs and 4229 gates instead of
+    // 1231 and 4208, the 8-qubit QAOA all-to-all at 223 gates instead of
+    // 213. Once at the end they cannot make anything costlier.
+    Ok(insert_pauli_pairs(out, &bases))
 }
 
 /// What becomes of a pipeline's result.
@@ -1124,6 +1128,7 @@ fn pipeline(
     cache: &SynthesisCache,
 ) -> Result<(Vec<Instruction>, Vec<usize>), String> {
     let mut lowering = Lowering::sharing(native.iter().cloned(), cache);
+    let rounds_follow = through_cx(native).is_some();
     let mut current = Vec::with_capacity(instructions.len());
     for inst in instructions {
         current.extend(lowering.lower(inst)?);
@@ -1153,7 +1158,14 @@ fn pipeline(
         let tail = |current: Vec<Instruction>, lowering: &Lowering| {
             let current = cleanup(current, lowering);
             let current = shift_through_blocks(current, &lowering.bases_1q, last != Last::No);
-            merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q)
+            let current = merge_single_qubit_runs(current, &lowering.native, &lowering.bases_1q);
+            // Pauli pairs on final results; for CX-like devices other than
+            // CX once the rounds of `until_fixed_point` are over (see there).
+            if last == Last::No || rounds_follow {
+                current
+            } else {
+                insert_pauli_pairs(current, &lowering.bases_1q)
+            }
         };
         let plain = tail(current, &lowering);
         let plain_cost = cost(&plain);
