@@ -8,6 +8,98 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-21 — Rotation pairs around two-qubit gates (0.4.14)
+
+**What.** `core/src/pauli_pairs.rs` gains `insert_rotation_pairs`, run once
+on every final result (`with_rotation_pairs` in `passes.rs`, at the end of
+`until_fixed_point`, which all-to-all, plugin and each chip candidate go
+through):
+- Where a whole axis commutes with a two-qubit gate on one qubit (tested
+  on the gate's matrix with a rotation by a generic angle: Z on a CX's
+  control and on a CZ, X on a CX's target), any rotation D about it gives
+  G = D† G D. The wire DP of Pauli pairs now has, at such a gate, the
+  identity, the Pauli and rotations at angles taken from the runs in
+  reach: the two nearest non-empty runs on each side that the axis
+  reaches through gates of the same axis (`WINDOW`), each offering the
+  angle that removes its outer rotation in that axis (from its ZYZ angles
+  in that basis), shifted also by π and −π/2 (the other outer angles of
+  the {rz, sx} form), or its whole angle if it is a rotation about the
+  axis alone. Gates with only some Paulis commuting (ECR) keep those.
+- Pauli pairs inside the pipeline are unchanged (same code with rotations
+  off; the 234 compilations below are byte-identical to 0.4.13 before the
+  last pass). Rotations run only on the final result, so every keep rule
+  and candidate choice sees exactly what it saw in 0.4.13; the result is
+  kept only if no costlier (a guard; it never triggered).
+- Speed: between two Z-axis gates, a run priced with Rz(α) on one side
+  and Rz(−β) on the other has ZYZ angles (θ, φ + α, λ − β), and where its
+  count is `base + [λ + dλ ≠ 0] + [φ + dφ ≠ 0]` (`Basis1q::split_count`,
+  new in `one_qubit.rs`) the best choice before is found once for all
+  choices after (K instead of K² prices, same ties). Elsewhere such runs
+  are priced from their angles (`count_from_angles`) and the rest by
+  matrices. Euler angles once per run, flat choice and DP buffers, and
+  predecessors that already cost as much as the best total are skipped.
+  QV-32 with CZ: 2.86G → 1.00G instructions over 30 calls; QFT-32 with CX
+  (runs bordering CX targets, matrix path) 9.4M per call against 2.7M for
+  the Pauli pass. Wall time of the pass on the 32-qubit outputs 0.2–0.8
+  ms, Quantum Volume 3.2 ms (CZ) and 5.9 ms (CX).
+- Tests: a Z rotation through two CX controls and a CZ into the next run
+  (13 → 12 gates; a lone Rz between runs, two fewer), an X rotation hidden
+  on both sides of two CX targets is found, 600 random circuits (CX, CZ,
+  ECR, {rz, rx, ry}) never costlier than Pauli pairs and cheaper on more
+  than 50, the separable pricing gives identical outputs to the generic
+  one on 400 circuits (a sign mutation there is caught only by this test),
+  and `split_count` equals `count_from_angles` on 1000 samples. The
+  pipeline test now asserts that a CX compile is the first pipeline plus
+  `with_rotation_pairs`, exactly.
+
+**Why.** Next item 8 (Pauli pairs beyond Paulis). The research turned up
+nothing measured to beat QCC's weak spots today (see experiments.md,
+Considered); the CZ-time and routing items need much larger work. This one
+could be verified end to end in a run and, run last, cannot make any
+circuit costlier. Qiskit's `Optimize1qGatesSimpleCommutation` moves gates
+one commutation at a time into existing runs; this solves each wire
+exactly over a candidate set that contains the Pauli solution.
+
+**Measured** (4-vCPU Xeon VM; `run.py`, `device.py`, `plugin.py`, full runs).
+- All-to-all: Clifford+T 274 → 271, 484 → 476, 1009 → 988 (pytket 280,
+  495, 1039); QAOA 312 → 310, 615 → 612; Hamiltonian 286 → 284, 786 →
+  781, 1504 → 1499. Gates 0.866× → 0.863× of Qiskit, two-qubit gates
+  unchanged (0.923×). All outputs verified.
+- Chip with CX: adder 151 → 148, 402 → 395, QAOA-16 403 → 401,
+  Hamiltonian 636 → 634, 2091 → 2089, Clifford+T 507 → 506, 1207 → 1206;
+  with CZ: Clifford+T-16 2668 → 2664, Hamiltonian 1103 → 1099, 4203 →
+  4201, adder-16 614 → 612, QV-8 690 → 689. Inside Qiskit: adder 160 →
+  157, 405 → 398 (CX), Hamiltonian 1286 → 1283, 4421 → 4415 and QV-16
+  4266 → 4259 (CZ). Chip gates against Qiskit 0.813× → 0.811× with CX,
+  0.829× with CZ (unchanged at three decimals); inside Qiskit 0.842× →
+  0.839× with CX, 0.830× with CZ. All outputs verified.
+- Over 234 compilations (the benchmark's 112 and 122 held out: sizes 6–24,
+  all-to-all and chip, CX and CZ): 67 with fewer gates (32 / 118 gates on
+  the benchmark, 35 / 150 held out), none with more gates, no two-qubit
+  count changed.
+- Time, paired workers (0.4.13 wheel against this wheel, alternating):
+  all-to-all 1.03× in geometric mean (medians of 11); chip 1.00× (medians
+  of five). A harness check, old against old, read 1.002×.
+- `check.py` passes; core 118 tests (clippy clean on Rust 1.100), Python
+  219; wasm builds.
+
+**Variants dropped** (details in experiments.md). Rotations inside the
+pipeline (12 rows with more two-qubit gates: the adder lost gathering,
+181 → 196 CNOTs at 32 qubits); window 1 (4 rows a gate worse) or 4 (one
+gate better, more time); the pass twice (4 gates over 234 compilations);
+Z only or X only (each loses most of the other's rows); fewer angle
+offsets (14–48 rows worse); a sorted cut-off in the DP (slower).
+
+**Learned.** Run a pass with a strict never-worse guarantee after every
+decision, not inside, when its gains would move what keep rules compare.
+A fast path that only changes prices passes equivalence and never-worse
+tests even when wrong; test it against the slow path directly.
+
+**Next.** CZ device time (incremental rounds) and routing quality stay
+first (experiments.md Next); for these pairs, letting rotation gains inform the keep rules
+without the fall-back (chip CX Hamiltonian-8 got 333 two-qubit gates that
+way, against 335).
+
 ## 2026-11-19 — Pauli pairs around two-qubit gates (0.4.13)
 
 **What.** New pass `core/src/pauli_pairs.rs` (`insert_pauli_pairs`), run

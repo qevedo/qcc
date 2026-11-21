@@ -10,7 +10,7 @@ use crate::ir::{Instruction, NON_GATES, cost};
 use crate::linalg::{M2, M4, kron};
 use crate::lower::{Lowering, SynthesisCache};
 use crate::one_qubit::{Basis1q, count_1q, remainder, synthesize_1q};
-use crate::pauli_pairs::insert_pauli_pairs;
+use crate::pauli_pairs::{insert_pauli_pairs, insert_rotation_pairs};
 use crate::permutation::measured_out;
 use crate::phase_folding::phase_folding;
 use crate::symmetric_blocks::{shift_through_blocks, shift_through_symmetric_blocks};
@@ -776,10 +776,10 @@ fn until_fixed_point(
     native: &[String],
     cache: &SynthesisCache,
 ) -> Result<Vec<Instruction>, String> {
-    if through_cx(native).is_none() {
-        return Ok(out);
-    }
     let bases = crate::one_qubit::bases_for(&native.iter().cloned().collect());
+    if through_cx(native).is_none() {
+        return Ok(with_rotation_pairs(out, &bases));
+    }
     for last in [Last::Yes, Last::Carrying] {
         // A carrying round costs as much as any other, and finds nothing
         // new where no gate of the result can be carried.
@@ -799,7 +799,25 @@ fn until_fixed_point(
     // the 16-qubit Hamiltonian ended at 1226 CZs and 4229 gates instead of
     // 1231 and 4208, the 8-qubit QAOA all-to-all at 223 gates instead of
     // 213. Once at the end they cannot make anything costlier.
-    Ok(insert_pauli_pairs(out, &bases))
+    Ok(with_rotation_pairs(insert_pauli_pairs(out, &bases), &bases))
+}
+
+/// `out` with rotation pairs (`insert_rotation_pairs`), once, on a result
+/// no pipeline will see again. Inside the pipeline only Pauli pairs run:
+/// with rotations the circuits gathering and carrying are judged on
+/// changed, and the keep rules fell back to costlier ones (the adder
+/// all-to-all lost its gathered CXs, 181 back to 196 at 32 qubits; the
+/// 16-qubit Hamiltonian on the chip with CX went from 1321 to 1336 CXs).
+/// Here every choice is made as without them, so the two-qubit gates stay
+/// as they were and no circuit gets more gates; kept only if no costlier,
+/// in case a count read off angles and a synthesis ever disagreed.
+fn with_rotation_pairs(out: Vec<Instruction>, bases: &[Basis1q]) -> Vec<Instruction> {
+    let paired = insert_rotation_pairs(out.clone(), bases);
+    if cost(&paired) <= cost(&out) {
+        paired
+    } else {
+        out
+    }
 }
 
 /// What becomes of a pipeline's result.
@@ -1318,8 +1336,11 @@ mod tests {
                         .all(|i| pairs.contains(&pair(i)))
                 );
                 assert!(cost(&out) <= cost(&once), "{device:?}");
+                // Without rounds, the first pipeline's result with rotation
+                // pairs once (`with_rotation_pairs`), and nothing else.
                 if through_cx(&native).is_none() {
-                    assert_eq!(out, once);
+                    let bases = crate::one_qubit::bases_for(&native.iter().cloned().collect());
+                    assert_eq!(out, with_rotation_pairs(once.clone(), &bases));
                 }
                 cheaper += usize::from(cost(&out) < cost(&once));
             }

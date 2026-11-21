@@ -195,6 +195,37 @@ impl Basis1q {
         }
     }
 
+    /// [`Basis1q::count_from_angles`] as a sum, where it is one: for ZYZ
+    /// angles `(θ, φ, λ)` with this `θ`, the count is `base + [λ + dλ ≠ 0] +
+    /// [φ + dφ ≠ 0]` (each angle modulo 2π), returned as `(base, dλ, dφ)`.
+    /// None where the count is not of that form (θ = 0, where only `φ + λ`
+    /// matters; θ = π with an X gate, where only `φ − λ` does) or for a
+    /// basis whose count is not read off the angles.
+    ///
+    /// A run between two gates that let Z rotations pass is priced for
+    /// every pair of rotations put on its two sides (`pauli_pairs.rs`):
+    /// these change `λ` and `φ` only, so where the count is such a sum the
+    /// two sides can be chosen apart.
+    pub fn split_count(&self, theta: f64) -> Option<(usize, f64, f64)> {
+        if is_zero(theta) {
+            return None;
+        }
+        match self {
+            Basis1q::Zsx { x, .. } => {
+                if (theta - FRAC_PI_2).abs() < TOL {
+                    Some((1, -FRAC_PI_2, FRAC_PI_2))
+                } else if *x && (theta - PI).abs() < TOL {
+                    None
+                } else {
+                    Some((2 + nonzero(&[theta + PI]), 0.0, PI))
+                }
+            }
+            Basis1q::Zxz { .. } => Some((1, -FRAC_PI_2, FRAC_PI_2)),
+            Basis1q::Zyz { .. } => Some((1, 0.0, 0.0)),
+            Basis1q::U3(_) | Basis1q::Xyx => None,
+        }
+    }
+
     /// `self.emit(u).len()`, given the ZYZ angles of `u`, without building the sequence.
     pub fn count_from_angles(&self, u: &M2, angles: (f64, f64, f64)) -> usize {
         let (theta, phi, lam) = angles;
@@ -417,6 +448,51 @@ mod tests {
                 assert!(ops.iter().all(|op| set.contains(&op.name.as_str())));
             }
         }
+    }
+
+    #[test]
+    fn a_split_count_is_the_count_from_the_angles() {
+        // Every basis but U3 and Xyx, at θ of 0, π/2, π and random, and
+        // outer angles that make either term vanish or not.
+        let sets: [&[&str]; 5] = [
+            &["rz", "sx", "x"],
+            &["rz", "sx"],
+            &["rz", "rx"],
+            &["rz", "ry"],
+            &["p", "sx"],
+        ];
+        let mut rng = Rng::new(5);
+        let mut split = 0;
+        for set in sets {
+            let bases = bases_for(&native(set));
+            for basis in &bases {
+                for _ in 0..200 {
+                    let theta = match rng.below(4) {
+                        0 => 0.0,
+                        1 => FRAC_PI_2,
+                        2 => PI,
+                        _ => rng.range(0.0, PI),
+                    };
+                    let mut angle = |offsets: [f64; 2]| match rng.below(3) {
+                        0 => -offsets[0],
+                        1 => -offsets[1],
+                        _ => rng.range(-PI, PI),
+                    };
+                    let (phi, lam) = (angle([0.0, FRAC_PI_2]), angle([0.0, -FRAC_PI_2]));
+                    let angles = (theta, phi, lam);
+                    let u = matrix_1q("u3", &[theta, phi, lam]).unwrap();
+                    let expected = basis.count_from_angles(&u, angles);
+                    if let Some((base, d_lam, d_phi)) = basis.split_count(theta) {
+                        split += 1;
+                        let sum = base
+                            + usize::from(!is_zero(lam + d_lam))
+                            + usize::from(!is_zero(phi + d_phi));
+                        assert_eq!(sum, expected, "{set:?} {angles:?}");
+                    }
+                }
+            }
+        }
+        assert!(split > 500, "{split}");
     }
 
     #[test]

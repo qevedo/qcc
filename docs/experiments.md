@@ -49,11 +49,14 @@ In priority order. Replace this list at the end of each run.
    CNOTs (Qiskit 108 or 111 depending on its seed). Untried from
    LightSABRE (Zou et al., arXiv:2409.08368): its relative scoring;
    routing whole two-qubit blocks as one node.
-8. **Pauli pairs beyond Paulis** (2026-11-19). The same chain DP could
-   carry any single-qubit gate that commutes with each gate it crosses (a
-   Z rotation along CX controls and CZs, an X rotation along CX targets),
-   choosing a continuous angle per gate; `shift_through_blocks` does one
-   gate at a time. The Pauli version needs no angle search.
+8. **Rotation gains inside the keep rules** (2026-11-21). Rotation pairs
+   run only on final results because inside the pipeline the gathering
+   and carrying rules fell back (adder 181 → 196 CNOTs). With the rules
+   judged on Pauli-pair costs but rotations applied to both sides before
+   the final choice, some rows could gain two-qubit gates (chip CX
+   Hamiltonian-8 333 against 335 in the dropped variant). Also: the pass
+   twice found 4 more gates; the X-axis (matrix-path) pricing is the
+   pass's remaining cost (QFT-32 CX 9.4M instructions per call).
 9. **Pauli-network judging after carrying** (2026-11-15, not observed).
 
 ## Worked
@@ -62,6 +65,7 @@ Newest first. Details are in `improvement-log.md` under the same date.
 
 | Date | Version | Change | Effect |
 |---|---|---|---|
+| 2026-11-21 | 0.4.14 | Rotation pairs (`insert_rotation_pairs`, `pauli_pairs.rs`): at each gate a whole axis commutes with (Z on CX controls and CZs, X on CX targets), rotations at angles that remove an outer rotation of the 2 nearest runs each way, besides I and the Pauli; same exact per-wire DP; once on the final result (`with_rotation_pairs`, `passes.rs`), so every keep rule sees what it saw before; separable pricing between Z-axis gates (`Basis1q::split_count`) | All-to-all gates 0.866× → 0.863× of Qiskit (Clifford+T 1009 → 988, -16 484 → 476, Hamiltonian-32 1504 → 1499, QAOA-32 615 → 612); chip CX 0.813× → 0.811× (adder-16 402 → 395), CZ 0.829× (Clifford+T-16 2668 → 2664); plugin CX 0.842× → 0.839×. 67 of 234 compilations fewer gates (35 of 122 held out), none more, no 2q count changed. Time 1.03× all-to-all, 1.00× chip (paired) |
 | 2026-11-19 | 0.4.13 | Pauli pairs (`pauli_pairs.rs`): per wire, a P before and after each two-qubit gate P commutes with (X on CX targets, Z on CX controls and CZs), chosen by a DP over the wire's runs; at the end of final pipelines (so gathering is judged with it), and once after the CZ rounds | All-to-all CX: adder 40/105 → 37/104, 92/245 → 85/244, 196/525 → 181/524 (gathering now pays); Clifford+T-16 499 → 484 (pytket 495), -32 1030 → 1009; Heisenberg-32 1173 → 1143; QAOA-32 634 → 615; geometric mean 0.990× 2q, 0.990× gates over 0.4.12. Chip CX 0.996× gates, CZ 0.999×; plugin 0.998× / 0.994×. No row worse (80 + 32 compilations). Held-out 132: 6 fewer 2q (all adders, −7 to −8%), 65 fewer gates, none worse. Time (paired with 0.4.12, geometric means): 1.04× all-to-all, 1.03× chip CX, 0.98× chip CZ (noise) |
 | 2026-11-17 | 0.4.12 | One update of the Clifford map per gate in rotation merging and the network's extraction (`apply_all_to_map`, `pauli_network.rs`: √X, X, Y, CZ, SWAP and π/2-multiple Z rotations were 2–6 updates each); `read` returns its steps inline instead of a `Vec` | 220/220 outputs byte-identical (incl. 81 held-out). One CZ chip candidate of Hamiltonian-16: 15.30 → 14.74 G instructions, rotation merging 1.37 → 0.81 G. Paired: all-to-all 1.00× CX, 0.974× CZ; chip 1.001× CX, 0.983× CZ; CZ Hamiltonian-16 2.77 → 2.57 s |
 | 2026-11-15 | 0.4.11 | Carrying gates between blocks on the same pair (`carry_through`, `commuting_blocks.rs`): the end of a block (from one of its last 3 two-qubit gates) forward, or the start of one back, through single-qubit gates by conjugation (g D g†) and through blockers that commute exactly, where the two blocks then need fewer CX-like gates; only on final results, after resynthesis, kept only if no more of either; gathering judged on costs without carrying; CZ rounds plain first, then carrying (`Last` in `passes.rs`) | All-to-all Clifford+T 16 150/505 → 148/499 (pytket 148/495), 32 310/1034 → 308/1030; geometric mean 0.933×/0.875× → 0.932×/0.874×. Chip CX: QAOA-8 94 → 92, adder-16 148/405 → 146/402, Hamiltonian-8 345/648 → 335/639, -16 1336/2100 → 1321/2099; CZ: Clifford+T-16 692 → 691, Hamiltonian-8 310/1119 → 307/1103, -16 1256/4454 → 1231/4208; inside Qiskit 5 rows fewer 2q. Held-out 82: fewer 2q on 22, more on none. Time 1.05× all-to-all, 1.07× chip (CZ Hamiltonian-16 1.46 → 2.44 s) |
@@ -128,6 +132,16 @@ what new fact would justify another attempt.
 - **In every pipeline, also before routing and in the CX half of CZ compilation** (`Last::No`). Chip CX adder-16 146 / 402 → 151 / 456, Hamiltonian-16 1321 → 1339 CNOTs, CZ Hamiltonian-8 307 → 319, -16 1226 → 1289: it changes the circuit routing sees. All-to-all nothing changed with CX. Final results only.
 - **Ruled out while measuring**: a Python prototype (DP with run costs from a 1-qubit QCC compile of each run's u3) predicted 3 more gates saved on Hamiltonian-8 and 6 on Hamiltonian-32 than the Rust pass gets; the 1-qubit compile gave some unchanged runs a cost above their length, so the prototype's baseline was inflated. The Rust pass prices unchanged runs at their length, as `merged_cost` does.
 
+**Rotation pairs (`pauli_pairs.rs` `insert_rotation_pairs`, `passes.rs` `with_rotation_pairs`, 2026-11-21)**
+Counts below are over the 234-compilation set (benchmark circuits all-to-all, chip and plugin, CX and CZ, plus held-out sizes 6–24), against the shipped version unless stated.
+- **Rotations in place of Pauli pairs inside the pipeline** (in `tail`, so gathering, carrying and the candidate choice see them). 63 compilations cheaper but 12 with more two-qubit gates: all-to-all adder 37 / 104 → 40 / 102, 85 / 244 → 92 / 238, 181 / 524 → 196 / 510 (and the held-out adders the same way), chip CX Hamiltonian-16 1321 / 2091 → 1336 / 2087, all-to-all Hamiltonian-12 207 → 208, Clifford+T-10 81 → 83. The keep rules fell back (method lesson of 2026-11-15). Shipped: Pauli pairs inside, rotations once at the end. Retry only with keep rules judged on the costs without rotations *and* a way to let rotation gains flip a choice in the right direction (e.g. chip CX Hamiltonian-8 got 333 / 637 against 335 / 634 there).
+- **Window of 1 run each way** instead of 2: 4 rows 1 gate worse (all-to-all CX Clifford+T 8/10/12/20). **Window 4**: 1 gate better on one row (Clifford+T-32 988 → 987); kept 2, as the pricing grows with the square of the choices.
+- **The pass twice**: 4 more gates in all (Clifford+T-8 271 → 270, -32 988 → 987, Hamiltonian-16 781 → 780, chip CX Hamiltonian-6 339 → 338) for twice the pass's time. Not kept.
+- **Z rotations only**: loses nearly every CX row's gain (Clifford+T-32 back to 1009, chip adder-16 back to 402); **X rotations only**: 40 rows worse, mostly CZ. Both axes stay.
+- **Fewer offsets per outer angle** (λ, λ + π, λ − π/2 kept): without −π/2 14 rows worse, without +π 28, λ alone 48.
+- **Speed: predecessors tried cheapest first with a cut-off** (exact, same ties): slower, QFT-32 CX 282M → 404M instructions over 30 calls; the costs so far are too close for the cut to bite. Shipped instead: the separable count (`split_count`, QV-32 CZ 2.86G → 1.00G over 30 calls) and per-run Euler angles, flat buffers.
+- **Ruled out while timing**: a `maturin develop` build against a `maturin build` wheel read +10–20% on GHZ, which the pass cannot cost; compare wheel against wheel (old against old reads 1.002× in the same harness).
+
 **CZ devices (`passes.rs`, `until_fixed_point`)**
 - **Rounds without the last-pass single-qubit shift, then one final full pass ("mode 2")** (2026-11-03). Hamiltonian-16 4430 gates in 4896 ms against mode 1's 4572 in 4445 ms. But it was worse on Clifford+T-8 (229 vs 227), QAOA-16 (713 vs 704), QAOA-8 (363 vs 360), Hamiltonian-8 (1334 vs 1333) and slightly worse on CX rows. Mode 1 shipped.
 - **Per-CZ H-side orientation** (2026-11-03, Python prototype on device output plus one recompile). Choose which qubit of each CZ takes the H, scored by "neighbouring runs become diagonal" or by √X count. Gates against a plain second pass:
@@ -174,6 +188,9 @@ what new fact would justify another attempt.
 - **Qiskit's `Optimize1qGatesSimpleCommutation`** (read 2026-11-19, Qiskit docs). Moves single-qubit gates through two-qubit gates one commutation at a time, into runs that already exist, and documents that it does not handle several commutations in a row. Not used: Pauli pairs (0.4.13) solve the Pauli part of it exactly per wire, across any number of gates.
 - **Pauli frame pushing to the end of the circuit** (2026-11-19). Push every X to the circuit's end through CX targets and controls; through a control an X becomes two, so it can grow the gates. The per-wire DP over pairs never crosses a gate the Pauli does not commute with, and so is exact and never worse.
 
+- **Continuous angles at every gate** (2026-11-21, for rotation pairs). A DP over all angles needs a candidate set; the edges of the runs in reach (with the {rz, sx} form's shifts) found everything a window of 4 finds but one gate. A numeric search per wire was not tried: the count is a step function of the angles.
+- **External research, 2026-11-21.** Searched arXiv for 2025–26 peephole/commutation and SABRE work (e.g. arXiv:2601.20871 on pass effects at pulse level; SABRE-MS adding a makespan term; arXiv:2502.08839 optimal-SWAP benchmarks): nothing that beats a measured weakness here today; LightSABRE stays the routing candidate (Next).
+
 ## Method lessons
 
 - **Timing on the VM.**
@@ -200,3 +217,5 @@ what new fact would justify another attempt.
 - **Look at what a keep rule refuses, gate by gate** (2026-11-19): the adder's refused gathered circuits had exactly as many `x` gates as their excess (3, 7, 15 at 8/16/32 qubits); a count of gate names in the refused output pointed straight at the missing pass.
 - **A pass with a guaranteed no-worse result can still make the CZ rounds worse** (2026-11-19): it changes the rounds' trajectory. Put such passes after `until_fixed_point`, or compare both trajectories.
 - **Mutation-check new equivalence tests** (2026-11-17): reversing the order of a gate's Clifford steps went undetected because every gate's steps equal their reverse up to phase; dropping the inverses was caught. Pick a mutation that can matter.
+- **Mutation-check fast paths against the slow one** (2026-11-21): a sign error in the separable pricing kept every output equivalent and no costlier, so the equivalence and never-worse tests passed. A private switch (`insert_pairs(.., split)`) and a test that both paths give identical outputs caught it.
+- **Instruction counts for a pass's own cost** (2026-11-21): end-to-end paired medians moved ±15% per circuit on this VM; a throwaway `core/examples/` binary timing the pass on dumped final circuits (`name;qubits;params` lines from Qiskit's QASM reader) under callgrind gave stable numbers for each speed-up.

@@ -195,6 +195,28 @@ Hamiltonian from 1379 CZs and 5372 gates to 1292 and 4572.
    they reached. With it, gathering pays on the adder: 37 / 104, 85 / 244
    and 181 / 524 at 8, 16 and 32 qubits, against 40 / 105, 92 / 245 and
    196 / 525.
+   Since 0.4.14 the last pass of a compilation also offers rotations: a
+   whole axis commutes with a CX's target (X) and control (Z) and with a
+   CZ (Z), so G = D† G D for any rotation D about it, and the chain's
+   state at each gate can be such a rotation. The angles offered at a gate
+   are those that would remove an outer rotation (in that axis) of one of
+   the two nearest runs on either side that it reaches through gates of
+   the same axis, with their shifts by π and −π/2 (the other forms of the
+   {rz, sx} decomposition), besides the identity and the Pauli, so the
+   result is never costlier than with Paulis alone. A Z rotation can thus
+   leave the end of one generic run and join the start of another through
+   several CX controls or CZs, and an X rotation along CX targets. It runs
+   once, on the result no pipeline will see again (`with_rotation_pairs`
+   in `passes.rs`): inside the pipeline it changed the circuits that
+   gathering, carrying and the choice between candidates compare, and
+   their keep rules then fell back to circuits with more two-qubit gates
+   (the adder lost its gathered CNOTs). Run last, it leaves every choice
+   as it was: no two-qubit gate changes, and no circuit gets more gates.
+   Between two Z-axis gates a run's {rz, sx} count is a constant plus one
+   term for each side (`Basis1q::split_count`), so the cheapest choice
+   before is found once for all choices after it. On the benchmark's
+   32-qubit outputs the pass takes 0.2–0.8 ms, and 3–6 ms on Quantum
+   Volume's 9 000–11 000 gates (about 1.2–2.7× the Pauli pass).
 On the compilation benchmark (`benchmarks/compilation`: 24 circuits against
 Qiskit's level 3, pytket and UCC), QCC uses no more two-qubit gates than
 Qiskit on any circuit, and fewer on most; phase folding is most of the
