@@ -8,6 +8,86 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-23 — Pauli networks synthesized on the chip's pairs (0.4.15)
+
+**What.** `core/src/pauli_network.rs` gains `synthesize_on`: the same
+greedy network synthesis on the physical qubits of a coupling graph. Every
+CX that sets up a rotation is on a coupled pair; candidates are every
+coupled pair a first-layer rotation touches (also with a qubit outside its
+support, so a CX can grow a rotation towards its other qubits); a Pauli
+costs `tree_cost`, one more than the minimum spanning tree of its support
+under the chip's distances (its weight when connected), instead of its
+weight, with each Pauli's four possible costs per pair kept in a map by
+support; the Clifford left counts 0.2 (`DEVICE_TABLEAU_WEIGHT`, 0.1
+off a chip); after 32 gates without a rotation (`DEVICE_PATIENCE`, 4 per
+qubit off a chip) the first rotation is reduced by force, its two
+closest qubits by a CX if coupled, else one letter moved a step along a
+shortest path (two CXs). The final Clifford is synthesized as before and
+routed. `core/src/device.rs`: `networks_on_chip` runs the 12 usual network
+trials from every distinct initial layout of the routed candidates (48 on
+the benchmark Hamiltonians), cleans each (rotation merging, phase folding,
+commutative cancellation), routes it from the identity layout with SABRE,
+and passes the one with fewest CXs plus SWAP cost to the physical
+pipeline beside the other routed candidates; the cheapest is kept as
+before. `compile_with(.., on_chip)` lets the tests compare with and
+without. `pauli_exponentials` moved to `testing.rs` for the three test
+modules.
+
+Tests: `tree_cost` on a line and a grid; 24 networks on a line and a
+2 × 3 grid keep their unitary (up to the relabelling) with every CX before
+the last rotation on a coupled pair (a mutation allowing all pairs is
+caught); on an 8-qubit heavy-hex cell with tails, 8 Pauli-exponential
+circuits (CX and CZ) are never costlier with the new candidate, at least 4
+cheaper, all on coupled pairs and equivalent up to the layouts (a mutation
+in the final-layout composition is caught).
+
+**Why.** The largest measured weakness: the chip's Hamiltonians needed 3–4×
+their all-to-all CNOTs (16 qubits: 313 all-to-all, 1321 on the chip),
+because the network was synthesized as if all qubits were coupled and
+routed after, so the direct compilation won there. Architecture-aware
+synthesis of Pauli rotations is published (Paulihedral, Li et al., ASPLOS
+2022, arXiv:2109.03371; Tetris, Jin et al., ISCA 2024, arXiv:2309.01905,
+both along trees on the device); doing it inside QCC's existing network
+greedy keeps CX sharing between rotations and was verifiable end to end
+today, while the Next list's items 1–2 (incremental CZ rounds) are larger.
+
+**Measured** (4-vCPU Xeon VM; `device.py` full run, `check.py`).
+- Chip with CX: Hamiltonian 335 / 634 → 189 / 465 (8 qubits), 1321 / 2089
+  → 1078 / 1903 (16); with CZ 307 / 1099 → 184 / 742 and 1231 / 4201 →
+  1095 / 4198. Every other row of `device.csv` identical. Geometric means
+  over Qiskit level 3: CX 0.924× → 0.880× two-qubit, 0.811× → 0.790× all
+  gates; CZ 0.897× → 0.862×, 0.829× → 0.809×. All outputs verified.
+- Held out (random Hamiltonians as `circuits.hamiltonian`, seeds 100n+7
+  and 100n+8, n = 6–16, chip, CX and CZ): all 24 fewer two-qubit gates
+  (15–35%); CX 8145 / 13551 → 6004 / 12032, CZ 7471 / 26601 → 5799 /
+  22044; one row 14 gates more in all (CX n = 16 seed 7: 1273 / 1943 →
+  1015 / 1957). All verified.
+- All-to-all and inside Qiskit unchanged (`check.py` passes; the plugin
+  does not route).
+- Time, paired workers (0.4.14 wheel against this wheel, medians of 5):
+  Hamiltonian-16 0.49 → 1.39 s with CX, 2.05 → 3.00 s with CZ; -8 1.20×
+  and 1.16×; geometric mean over the chip rows 1.11× CX, 1.02× CZ, the
+  rest noise (0.68–1.28× on rows whose code path did not change).
+- Core 121 tests (fmt, clippy clean on Rust 1.100), Python 219; wasm builds.
+
+**Variants dropped** (details in experiments.md). Weight scoring with
+pairs restricted to coupled ones (3700+ CXs routed against 1412 for the
+direct one); spanning-tree scoring without neighbour pairs (1295–1321 at
+16 qubits); Clifford weight 0.1 / 0.15 / 0.25 / 0.3 / 0.5 / 1.0; patience
+4–16, 38, 48, 76; ranking trials on raw CX counts (the cleanup removes
+two thirds); trials from the first one or two layouts only.
+
+**Learned.** The greedy on a chip leaves about 3000 raw CXs for 1100 kept:
+rank its trials after a cheap cleanup, or the one optimized is a poor
+pick. Statevector checks of held-out Hamiltonians must use the decomposed
+(Trotterized) circuit, not the `PauliEvolutionGate`, whose `Statevector` is
+the exact exponential (all failed, and slowly, until fixed). Dense
+unitaries of 12 qubits in a unit test take minutes; 8 is the limit.
+
+**Next.** See experiments.md: a Clifford tail synthesized on the chip; a
+layout chosen for the network itself; the network on a chip for the
+logical-pipeline candidates of the plugin; CZ time.
+
 ## 2026-11-21 — Rotation pairs around two-qubit gates (0.4.14)
 
 **What.** `core/src/pauli_pairs.rs` gains `insert_rotation_pairs`, run once

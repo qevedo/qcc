@@ -12,8 +12,13 @@ use crate::gates::matrix_2q;
 use crate::ir::{Instruction, cost};
 use crate::linalg::{M2, equal_up_to_phase4, kron};
 use crate::lower::{Lowering, SynthesisCache};
-use crate::passes::{Last, merge_single_qubit_runs, on_the_same_pairs, with_and_without_network};
-use crate::routing::{CouplingGraph, SabreOptions, layout_and_route_and_first};
+use crate::passes::{
+    Last, commutative_cancellation, lowered_for_network, merge_single_qubit_runs, network_trials,
+    on_the_same_pairs, with_and_without_network,
+};
+use crate::pauli_network::{merge_rotations, synthesize_on};
+use crate::phase_folding::phase_folding;
+use crate::routing::{CouplingGraph, SabreOptions, layout_and_route_and_first, route};
 use crate::two_qubit::kak;
 use std::collections::HashSet;
 
@@ -72,6 +77,18 @@ pub fn compile_for_device(
     native: impl IntoIterator<Item = String>,
     device: &Device,
     options: &SabreOptions,
+) -> Result<DeviceCircuit, String> {
+    compile_with(instructions, native, device, options, true)
+}
+
+/// [`compile_for_device`], with or without the Pauli networks synthesized
+/// on the chip (`on_chip`; the tests compare the two).
+fn compile_with(
+    instructions: Vec<Instruction>,
+    native: impl IntoIterator<Item = String>,
+    device: &Device,
+    options: &SabreOptions,
+    on_chip: bool,
 ) -> Result<DeviceCircuit, String> {
     let native: Vec<String> = native.into_iter().collect();
     let graph = CouplingGraph::new(device.qubits, device.edges)?;
@@ -132,20 +149,41 @@ pub fn compile_for_device(
         .into_iter()
         .flatten()
         .collect();
+    // What each routing leaves: the routed circuit, its initial layout and
+    // where each logical qubit's state ends.
+    let mut jobs: Vec<DeviceCircuit> = routings
+        .iter()
+        .map(|(i, routed)| {
+            let (_, moved) = &logical_candidates[*i];
+            let final_layout: Vec<usize> = (0..logical)
+                .map(|q| routed.final_layout[moved.get(q).copied().unwrap_or(q)])
+                .collect();
+            DeviceCircuit {
+                instructions: routed.instructions.clone(),
+                initial_layout: routed.initial_layout.clone(),
+                final_layout,
+            }
+        })
+        .collect();
+    // A circuit of Pauli rotations is also synthesized again on the chip's
+    // own pairs, from the layouts the routings found, and routed as one more
+    // candidate (see `networks_on_chip`).
+    let lowered = on_chip
+        .then(|| lowered_for_network(&instructions, &native))
+        .flatten();
+    if let Some(lowered) = lowered {
+        jobs.extend(networks_on_chip(&lowered, logical, &jobs, &graph, options));
+    }
     // Each routing is then optimized on the chip's qubits on its own thread
     // (the rounds of `until_fixed_point` make that most of the time for CZ),
     // and the cheapest kept: the first on ties, as in a loop.
-    let routed = crate::parallel::map_ordered(routings.len(), |j| {
-        let (i, routed) = &routings[j];
-        let (_, moved) = &logical_candidates[*i];
-        let final_layout: Vec<usize> = (0..logical)
-            .map(|q| routed.final_layout[moved.get(q).copied().unwrap_or(q)])
-            .collect();
-        let out = on_physical_qubits(&routed.instructions, &native, device, &cache)?;
+    let routed = crate::parallel::map_ordered(jobs.len(), |j| {
+        let job = &jobs[j];
+        let out = on_physical_qubits(&job.instructions, &native, device, &cache)?;
         Ok::<_, String>(DeviceCircuit {
             instructions: out,
-            initial_layout: routed.initial_layout.clone(),
-            final_layout,
+            initial_layout: job.initial_layout.clone(),
+            final_layout: job.final_layout.clone(),
         })
     });
     let mut best: Option<DeviceCircuit> = None;
@@ -159,6 +197,73 @@ pub fn compile_for_device(
         }
     }
     Ok(best.expect("a candidate"))
+}
+
+/// A Pauli network synthesized on the chip's pairs, as a routed candidate:
+/// for each initial layout of `routed` (the routings of the other
+/// candidates) and each of the pipeline's network trials, the rotations of
+/// `lowered` placed by that layout and synthesized again with every CX that
+/// sets them up on a coupled pair (`synthesize_on` in `pauli_network.rs`);
+/// the Clifford left at the end, which is not, is routed from there. Of
+/// these, the one needing fewest CXs and SWAPs once its cancelling CXs and
+/// mergeable rotations are gone, which is then optimized like the others.
+///
+/// Synthesized off the chip and routed, a network's CXs land on pairs far
+/// apart: the 16-qubit benchmark Hamiltonian needs 313 CXs on all pairs and
+/// 1321 routed on the heavy-hex chip. The greedy synthesis on the chip
+/// leaves many CXs that cancel (about 3000 raw for the same Hamiltonian),
+/// so the candidates are ranked after a light cleanup: ranked on raw
+/// counts, the one optimized was rarely the best.
+fn networks_on_chip(
+    lowered: &[Instruction],
+    logical: usize,
+    routed: &[DeviceCircuit],
+    graph: &CouplingGraph,
+    options: &SabreOptions,
+) -> Vec<DeviceCircuit> {
+    let mut layouts: Vec<&Vec<usize>> = Vec::new();
+    for r in routed {
+        if !layouts.contains(&&r.initial_layout) {
+            layouts.push(&r.initial_layout);
+        }
+    }
+    let n = graph.qubits();
+    let identity: Vec<usize> = (0..n).collect();
+    let trials: Vec<(&Vec<usize>, (u64, f64))> = layouts
+        .iter()
+        .flat_map(|&layout| network_trials().map(move |trial| (layout, trial)))
+        .collect();
+    let candidates = crate::parallel::map_ordered(trials.len(), |t| {
+        let (layout, (seed, penalty)) = trials[t];
+        let placed: Vec<Instruction> = lowered.iter().map(|i| i.relabel(layout)).collect();
+        let (network, wires) = synthesize_on(&placed, graph, seed, penalty)?;
+        let network = commutative_cancellation(phase_folding(merge_rotations(network)));
+        let routed = route(&network, n, graph, &identity, options).ok()?;
+        let cxs = routed
+            .instructions
+            .iter()
+            .filter(|i| i.name == "cx")
+            .count();
+        // Logical qubit q starts on layout[q], the network leaves that
+        // state on wires[layout[q]], and routing moves it from there.
+        let final_layout = (0..logical)
+            .map(|q| routed.final_layout[wires[layout[q]]])
+            .collect();
+        let circuit = DeviceCircuit {
+            instructions: routed.instructions,
+            initial_layout: layout.clone(),
+            final_layout,
+        };
+        Some((cxs + routed.swap_cost, circuit))
+    });
+    // The first of the cheapest, as in a loop.
+    let mut best: Option<(usize, DeviceCircuit)> = None;
+    for candidate in candidates.into_iter().flatten() {
+        if best.as_ref().is_none_or(|(b, _)| candidate.0 < *b) {
+            best = Some(candidate);
+        }
+    }
+    best.map(|(_, circuit)| circuit).into_iter().collect()
 }
 
 /// The pipeline on physical qubits: no relabelling, every pass keeps the
@@ -376,6 +481,82 @@ mod tests {
             }
         }
         assert!(cheaper > 0 && dearer == 0, "{cheaper} {dearer}");
+    }
+
+    #[test]
+    fn networks_on_the_chip_are_never_worse_and_keep_the_circuit() {
+        // A heavy-hex cell (a ring of 6) with two tails: degree 3 at most.
+        let edges = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (5, 0),
+            (1, 6),
+            (4, 7),
+        ];
+        let device = Device {
+            qubits: 8,
+            edges: &edges,
+            directed: false,
+        };
+        let options = SabreOptions {
+            trials: 4,
+            ..routing_options()
+        };
+        let mut rng = Rng::new(41);
+        let mut cheaper = 0;
+        for native in [["rz", "sx", "x", "cx"], ["rz", "sx", "x", "cz"]] {
+            let native: Vec<String> = native.iter().map(|g| g.to_string()).collect();
+            for k in 0..4 {
+                let n = 6 + k % 3;
+                let circuit = crate::testing::pauli_exponentials(&mut rng, n, 3 * n);
+                let compile = |on_chip| {
+                    compile_with(circuit.clone(), native.clone(), &device, &options, on_chip)
+                        .unwrap()
+                };
+                let (with, without) = (compile(true), compile(false));
+                let (w, wo) = (cost(&with.instructions), cost(&without.instructions));
+                assert!(w <= wo, "{w:?} > {wo:?}");
+                cheaper += usize::from(w.0 < wo.0);
+                for inst in with.instructions.iter().filter(|i| i.qubits.len() == 2) {
+                    let (a, b) = (inst.qubits[0], inst.qubits[1]);
+                    assert!(
+                        edges.contains(&(a, b)) || edges.contains(&(b, a)),
+                        "{inst:?}"
+                    );
+                }
+                // The input placed by the initial layout equals the output
+                // with every state moved back to where it started.
+                let placed: Vec<Instruction> = circuit
+                    .iter()
+                    .map(|i| i.relabel(&with.initial_layout))
+                    .collect();
+                let mut from: Vec<usize> = (0..device.qubits).collect();
+                let mut used = vec![false; device.qubits];
+                for q in 0..n {
+                    from[with.initial_layout[q]] = with.final_layout[q];
+                    used[with.final_layout[q]] = true;
+                }
+                // Qubits the circuit does not use start in |0⟩ and may be
+                // left anywhere; give them the free places in order.
+                let mut free = (0..device.qubits).filter(|&p| !used[p]);
+                for p in 0..device.qubits {
+                    if !with.initial_layout[..n].contains(&p) {
+                        from[p] = free.next().expect("a free qubit");
+                    }
+                }
+                assert!(dense_equal_up_to_phase(
+                    &circuit_unitary(&moved_back(with.instructions.clone(), &from), 8),
+                    &circuit_unitary(&placed, 8),
+                    1e-7
+                ));
+            }
+        }
+        // Pauli exponentials on random qubits are the kind of circuit the
+        // chip's own networks are for: most get fewer two-qubit gates.
+        assert!(cheaper >= 4, "{cheaper}");
     }
 
     #[test]

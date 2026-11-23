@@ -145,3 +145,44 @@ pub fn dense_equal_up_to_phase(a: &[Vec<C>], b: &[Vec<C>], tol: f64) -> bool {
             .all(|(x, y)| (x - y * phase).norm() <= tol)
     })
 }
+
+/// Exponentials of random Pauli strings of weight 2 to 4 on `n` qubits,
+/// each as basis changes around a ladder of CXs, as Qiskit writes them.
+pub fn pauli_exponentials(rng: &mut Rng, n: usize, terms: usize) -> Vec<crate::ir::Instruction> {
+    let g = |name: &str, q: &[usize], params: Vec<f64>| {
+        crate::ir::Instruction::gate(name, q.to_vec(), params)
+    };
+    let mut circuit = Vec::new();
+    for _ in 0..terms {
+        let mut qubits: Vec<usize> = (0..n).collect();
+        for i in 0..n {
+            qubits.swap(i, i + rng.below(n - i));
+        }
+        qubits.truncate(2 + rng.below(3));
+        let letters: Vec<usize> = qubits.iter().map(|_| rng.below(3)).collect();
+        let into: Vec<crate::ir::Instruction> = qubits
+            .iter()
+            .zip(&letters)
+            .flat_map(|(&q, &letter)| match letter {
+                0 => vec![g("h", &[q], vec![])],
+                1 => vec![g("sdg", &[q], vec![]), g("h", &[q], vec![])],
+                _ => vec![],
+            })
+            .collect();
+        let ladder: Vec<crate::ir::Instruction> = qubits
+            .windows(2)
+            .map(|w| g("cx", &[w[0], w[1]], vec![]))
+            .collect();
+        let back = |inst: &crate::ir::Instruction| match inst.name.as_str() {
+            "sdg" => g("s", &inst.qubits, vec![]),
+            _ => inst.clone(),
+        };
+        circuit.extend(into.iter().cloned());
+        circuit.extend(ladder.iter().cloned());
+        let last = *qubits.last().expect("a qubit");
+        circuit.push(g("rz", &[last], vec![rng.range(-3.0, 3.0)]));
+        circuit.extend(ladder.iter().rev().cloned());
+        circuit.extend(into.iter().rev().map(back));
+    }
+    circuit
+}

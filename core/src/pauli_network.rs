@@ -36,6 +36,7 @@
 
 use crate::ir::Instruction;
 use crate::rng::Rng;
+use crate::routing::CouplingGraph;
 use std::f64::consts::FRAC_PI_2;
 
 /// Circuits up to this many qubits (bits of the Pauli bitsets).
@@ -486,6 +487,63 @@ const MAX_PAIRS: usize = 64;
 /// do about as well, which is where the greedy synthesis is blind; the seeds
 /// spread from gentle to bolder reorderings.
 const NOISE: f64 = 0.05;
+/// On a device ([`synthesize_on`]): how much the Clifford left counts, in
+/// place of [`TABLEAU_WEIGHT`]. There each CX of the network also scatters
+/// the frame over the chip, and the rotations still to come are read in it,
+/// so a frame kept close to the qubits' own pays for itself. On 12 random
+/// Hamiltonians of 6–16 qubits on the heavy-hex chip, with CX: 0.15 left
+/// 6298 CXs in all, 0.2 6004, 0.25 6282 (gates 12756, 12032, 11674).
+const DEVICE_TABLEAU_WEIGHT: f64 = 0.2;
+/// On a device: the gates [`State::best_gate`] may place without a rotation
+/// coming out before the first rotation is reduced by force, in place of
+/// four per qubit. Wandering costs more on a chip, where moves are long:
+/// on the same 12 Hamiltonians, 16 left 6105 CXs, 24 6149, 32 6004, 38
+/// (two per qubit of the chip) 6097, and 76 (four per qubit) 6105 with
+/// more gates in all.
+const DEVICE_PATIENCE: usize = 32;
+
+/// What a Pauli whose qubits are `support` costs on a device: one more than
+/// the weight of a minimum spanning tree of `support` under `g`'s distances
+/// (its weight, when its qubits are connected on the chip), and at least 1,
+/// as the weight is counted at least 1 off a device. Reducing it to one
+/// qubit with CXs on coupled pairs takes about that many CXs: a ladder over
+/// a Steiner tree of the support would take its edges, which the spanning
+/// tree of the support's distances overestimates by at most twice.
+fn tree_cost(g: &CouplingGraph, support: u128) -> u32 {
+    let mut qubits = [0usize; MAX_QUBITS];
+    let mut count = 0;
+    let mut rest = support;
+    while rest != 0 {
+        qubits[count] = rest.trailing_zeros() as usize;
+        rest &= rest - 1;
+        count += 1;
+    }
+    if count <= 1 {
+        return 1;
+    }
+    // Prim's algorithm on the complete graph of the support.
+    let mut best = [u32::MAX; MAX_QUBITS];
+    let mut done = [false; MAX_QUBITS];
+    let mut total = 0;
+    let mut current = 0;
+    done[0] = true;
+    for _ in 1..count {
+        let mut next = usize::MAX;
+        for k in 0..count {
+            if done[k] {
+                continue;
+            }
+            best[k] = best[k].min(g.distance(qubits[current], qubits[k]));
+            if next == usize::MAX || best[k] < best[next] {
+                next = k;
+            }
+        }
+        total += best[next];
+        done[next] = true;
+        current = next;
+    }
+    1 + total
+}
 
 /// Local Cliffords on `q` taking `letter` (1 = X, 2 = Z, 3 = Y) to Z.
 fn to_z(q: usize, letter: u8) -> Vec<Gate> {
@@ -528,11 +586,47 @@ pub fn synthesize_seeded(
     seed: u64,
     local_penalty: f64,
 ) -> Option<(Vec<Instruction>, Vec<usize>)> {
-    let n = instructions
+    synthesize_with(instructions, permute, seed, local_penalty, None)
+}
+
+/// [`synthesize_seeded`] for a device, with relabelling: `instructions` on
+/// the physical qubits of `graph`, and every CX that sets up a rotation on a
+/// coupled pair. The CXs are chosen by what they do to the rotations'
+/// spanning trees on the chip ([`tree_cost`]) rather than their weights, on
+/// every coupled pair a rotation of the first layer touches (a CX that
+/// grows a rotation towards another qubit of it can lower other rotations'
+/// trees), and a rotation whose qubits are apart is reduced by force by
+/// moving one of its letters along a shortest path. The Clifford left at
+/// the end is synthesized as off a device, and routed after.
+///
+/// Off a device the network is synthesized on logical qubits and then
+/// routed, and routing the scattered CXs of a network costs more than the
+/// network saves: the 16-qubit benchmark Hamiltonian needs 313 CXs on all
+/// pairs, but routed on the heavy-hex chip 1321 (and the direct compilation
+/// is kept there). Synthesized on the chip's pairs it needs 1078.
+pub fn synthesize_on(
+    instructions: &[Instruction],
+    graph: &CouplingGraph,
+    seed: u64,
+    local_penalty: f64,
+) -> Option<(Vec<Instruction>, Vec<usize>)> {
+    synthesize_with(instructions, true, seed, local_penalty, Some(graph))
+}
+
+/// [`synthesize_seeded`], on `graph`'s pairs if given ([`synthesize_on`]).
+fn synthesize_with(
+    instructions: &[Instruction],
+    permute: bool,
+    seed: u64,
+    local_penalty: f64,
+    graph: Option<&CouplingGraph>,
+) -> Option<(Vec<Instruction>, Vec<usize>)> {
+    let used = instructions
         .iter()
         .flat_map(|i| i.qubits.iter().map(|&q| q + 1))
         .max()
         .unwrap_or(0);
+    let n = used.max(graph.map_or(0, |g| g.qubits()));
     let (rotations, rows) = extract(instructions, n)?;
 
     let mut state = State {
@@ -545,13 +639,15 @@ pub fn synthesize_seeded(
         local_penalty,
         tables: candidate_tables(),
         scored_buffer: Vec::new(),
+        graph,
+        trees: Default::default(),
     };
     state.rotations();
     let wires = state.clifford(permute);
     Some((state.out, wires))
 }
 
-struct State {
+struct State<'g> {
     /// The rotations still to emit, in the current frame.
     pending: Vec<Rotation>,
     /// The Clifford still to emit, inverted: `rows[2q] = E X_q E†`, …
@@ -569,6 +665,10 @@ struct State {
     tables: [[Candidate; 3]; 3],
     /// Reused by [`State::best_gate`] for [`State::scored`]'s Paulis.
     scored_buffer: Vec<Scored>,
+    /// The device, if every CX must be on one of its coupled pairs.
+    graph: Option<&'g CouplingGraph>,
+    /// [`tree_cost`] of each support met so far.
+    trees: crate::hashing::FastMap<u128, u32>,
 }
 
 /// A Pauli [`State::best_gate`] scores candidates on: how much it counts,
@@ -587,6 +687,8 @@ struct Scored {
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
     letters_after: [u32; 16],
+    /// The letters on the two qubits after it, as `letter(a) | letter(b) << 2`.
+    pairs_after: [u8; 16],
     locals: usize,
 }
 
@@ -599,6 +701,7 @@ struct Candidate {
 fn candidate_tables() -> [[Candidate; 3]; 3] {
     let mut tables = [[Candidate {
         letters_after: [0; 16],
+        pairs_after: [0; 16],
         locals: 0,
     }; 3]; 3];
     for sigma in 1..=3u8 {
@@ -614,13 +717,14 @@ fn candidate_tables() -> [[Candidate; 3]; 3] {
                 };
                 gates.iter().for_each(|g| g.conjugate(&mut p));
                 *after = p.weight();
+                table.pairs_after[pair] = p.letter(0) | (p.letter(1) << 2);
             }
         }
     }
     tables
 }
 
-impl State {
+impl State<'_> {
     /// Emit `g` first: every rotation still to come, and the rest, move
     /// through it.
     fn emit(&mut self, g: Gate) {
@@ -675,7 +779,11 @@ impl State {
                 stuck = 0;
                 continue;
             }
-            let gates = match stuck < 4 * self.n {
+            let patience = match self.graph {
+                Some(_) => DEVICE_PATIENCE,
+                None => 4 * self.n,
+            };
+            let gates = match stuck < patience {
                 true => self.best_gate(&layers),
                 false => None,
             }
@@ -701,7 +809,11 @@ impl State {
             .iter()
             .enumerate()
             .map(|(i, &layer)| (DISCOUNT.powi(layer as i32), &self.pending[i].0));
-        let images = self.rows.iter().map(|p| (TABLEAU_WEIGHT, p));
+        let weight = match self.graph {
+            Some(_) => DEVICE_TABLEAU_WEIGHT,
+            None => TABLEAU_WEIGHT,
+        };
+        let images = self.rows.iter().map(|p| (weight, p));
         out.clear();
         out.extend(rotations.chain(images).map(|(count, p)| Scored {
             count,
@@ -738,6 +850,55 @@ impl State {
         sums
     }
 
+    /// [`State::changes`] on a device, where a Pauli costs its [`tree_cost`]
+    /// instead of its weight. A candidate changes only the letters on `a`
+    /// and `b`, so of each Pauli's support only whether `a` and `b` are in
+    /// it can change: its four costs are worked out once (and kept in
+    /// `trees` by support, as the same supports come back step after step:
+    /// on the 16-qubit Hamiltonian this made the synthesis about 6× faster)
+    /// and each candidate's table says which applies after it.
+    fn changes_on(
+        g: &CouplingGraph,
+        tables: &[[Candidate; 3]; 3],
+        scored: &[Scored],
+        a: usize,
+        b: usize,
+        trees: &mut crate::hashing::FastMap<u128, u32>,
+    ) -> [f64; 9] {
+        let mask = (1u128 << a) | (1u128 << b);
+        let letter = |p: &Scored, q: usize| (((p.x >> q) & 1) | (((p.z >> q) & 1) << 1)) as usize;
+        // Which of a and b a pair of letters occupies, as two bits.
+        let occupancy =
+            |pair: usize| usize::from(pair & 3 != 0) | (usize::from(pair >> 2 != 0) << 1);
+        let mut sums = [-0.0; 9];
+        for p in scored.iter().filter(|p| (p.x | p.z) & mask != 0) {
+            let pair = letter(p, a) | (letter(p, b) << 2);
+            let rest = (p.x | p.z) & !mask;
+            // The cost for each occupancy of a and b.
+            let mut by_occupancy = [0.0; 4];
+            for (k, c) in by_occupancy.iter_mut().enumerate() {
+                let mut support = rest;
+                if k & 1 != 0 {
+                    support |= 1 << a;
+                }
+                if k & 2 != 0 {
+                    support |= 1 << b;
+                }
+                *c = f64::from(
+                    *trees
+                        .entry(support)
+                        .or_insert_with(|| tree_cost(g, support)),
+                );
+            }
+            let before = by_occupancy[occupancy(pair)];
+            for (sum, table) in sums.iter_mut().zip(tables.iter().flatten()) {
+                let after = by_occupancy[occupancy(usize::from(table.pairs_after[pair]))];
+                *sum += p.count * (after - before);
+            }
+        }
+        sums
+    }
+
     /// The controlled-Pauli gate, σ on `a` controlling τ on `b`, as local
     /// Cliffords then a CX (which is Z controlling X), whichever way round
     /// needs fewer local Cliffords. The local Cliffords are not undone after
@@ -768,6 +929,21 @@ impl State {
         for i in (0..layers.len()).filter(|&i| layers[i] == 0) {
             let p = self.pending[i].0;
             let qubits: Vec<usize> = (0..self.n).filter(|&q| p.letter(q) != 0).collect();
+            // On a device, every coupled pair the rotation touches.
+            if let Some(g) = self.graph {
+                for &a in &qubits {
+                    for &b in g.neighbours(a) {
+                        let pair = (a.min(b), a.max(b));
+                        if !pairs.contains(&pair) {
+                            pairs.push(pair);
+                        }
+                    }
+                }
+                if pairs.len() >= MAX_PAIRS {
+                    break;
+                }
+                continue;
+            }
             for (k, &a) in qubits.iter().enumerate() {
                 for &b in &qubits[k + 1..] {
                     if !pairs.contains(&(a, b)) {
@@ -786,7 +962,10 @@ impl State {
         let mut scored = std::mem::take(&mut self.scored_buffer);
         self.scored(layers, &mut scored);
         for &(a, b) in &pairs {
-            let changes = State::changes(&self.tables, &scored, a, b);
+            let changes = match self.graph {
+                Some(g) => State::changes_on(g, &self.tables, &scored, a, b, &mut self.trees),
+                None => State::changes(&self.tables, &scored, a, b),
+            };
             for sigma in 1..=3 {
                 for tau in 1..=3 {
                     let index = 3 * usize::from(sigma - 1) + usize::from(tau - 1);
@@ -809,13 +988,39 @@ impl State {
             .map(|(_, _, (sigma, tau, a, b))| State::controlled_pauli(sigma, tau, a, b))
     }
 
-    /// Lower the weight of rotation `i` by one, whatever it does to the others.
+    /// Lower the weight of rotation `i` by one, whatever it does to the
+    /// others; on a device, or bring two of its qubits closer.
     fn reduce_first(&self, i: usize) -> Vec<Gate> {
         let p = self.pending[i].0;
+        if let Some(g) = self.graph {
+            return State::reduce_on(&p, g);
+        }
         let support = p.support();
         let c = support.trailing_zeros() as usize;
         let t = (support & !(1 << c)).trailing_zeros() as usize;
         State::reduction(&p, c, t)
+    }
+
+    /// On a device: the closest two qubits of `p`'s support, if coupled,
+    /// reduced as [`State::reduction`] does; otherwise the letter of one moved
+    /// a step towards the other (Z on `a` and I on `next` becoming I and Z,
+    /// two CXs), so that the next call is a step closer.
+    fn reduce_on(p: &Pauli, g: &CouplingGraph) -> Vec<Gate> {
+        let support: Vec<usize> = (0..g.qubits()).filter(|&q| p.letter(q) != 0).collect();
+        let mut closest = (u32::MAX, 0, 0);
+        for (k, &a) in support.iter().enumerate() {
+            for &b in &support[k + 1..] {
+                closest = closest.min((g.distance(a, b), a, b));
+            }
+        }
+        let (d, a, b) = closest;
+        if d == 1 {
+            return State::reduction(p, a, b);
+        }
+        let next = g.path(a, b)[1];
+        let mut gates = to_z(a, p.letter(a));
+        gates.extend([Gate::Cx(next, a), Gate::Cx(a, next)]);
+        gates
     }
 
     /// The gates (local Cliffords, then a CX) that turn the letters on
@@ -1137,6 +1342,67 @@ mod tests {
                         "{circuit:?}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_costs_are_spanning_trees_on_the_chip() {
+        // 0 – 1 – 2 – 3 – 4 – 5, a line.
+        let line = CouplingGraph::line(6);
+        let support = |qubits: &[usize]| qubits.iter().fold(0u128, |s, &q| s | 1 << q);
+        assert_eq!(tree_cost(&line, 0), 1);
+        assert_eq!(tree_cost(&line, support(&[3])), 1);
+        // Neighbours: the weight.
+        assert_eq!(tree_cost(&line, support(&[1, 2, 3])), 3);
+        // Apart: one more for each qubit between.
+        assert_eq!(tree_cost(&line, support(&[0, 5])), 6);
+        assert_eq!(tree_cost(&line, support(&[0, 2, 5])), 6);
+        // A 2 × 3 grid, 0 1 2 over 3 4 5: 0, 2 and 4 are 2 apart in pairs,
+        // so the spanning tree weighs 4 (a Steiner tree through 1 would
+        // weigh 3: the cost overestimates, by at most twice).
+        let grid = CouplingGraph::grid(2, 3);
+        assert_eq!(tree_cost(&grid, support(&[0, 2, 4])), 5);
+        assert_eq!(tree_cost(&grid, support(&[0, 1, 2, 4])), 4);
+    }
+
+    #[test]
+    fn networks_on_a_chip_keep_their_unitary_and_set_up_rotations_on_its_pairs() {
+        let mut rng = Rng::new(12);
+        let graphs = [CouplingGraph::line(5), CouplingGraph::grid(2, 3)];
+        for graph in &graphs {
+            let n = graph.qubits();
+            for k in 0..12 {
+                // Pauli exponentials on the first qubits, idle ones beyond.
+                let circuit = crate::testing::pauli_exponentials(&mut rng, n - k % 2, 6);
+                let seed = (k % 3) as u64;
+                let penalty = [LOCAL_PENALTY, FRUGAL_LOCAL_PENALTY][k % 2];
+                let (mut out, wires) =
+                    synthesize_on(&circuit, graph, seed, penalty).expect("a network");
+                // Every CX up to the last rotation is on a coupled pair; only
+                // the Clifford left at the end may not be.
+                let last = out
+                    .iter()
+                    .rposition(|i| i.name == "rz")
+                    .expect("a rotation");
+                for inst in out[..last].iter().filter(|i| i.name == "cx") {
+                    assert!(graph.coupled(inst.qubits[0], inst.qubits[1]), "{inst:?}");
+                }
+                let mut at = wires.clone();
+                for q in 0..n {
+                    let w = at[q];
+                    if w != q {
+                        out.push(Instruction::gate("swap", [w, q], []));
+                        let p = at.iter().position(|&x| x == q).expect("a permutation");
+                        at[p] = w;
+                        at[q] = q;
+                    }
+                }
+                assert!(dense_equal_up_to_phase(
+                    &circuit_unitary(&out, n),
+                    &circuit_unitary(&circuit, n),
+                    1e-8
+                ));
             }
         }
     }

@@ -296,18 +296,18 @@ heavy-hex chip with QCC alone (`compile_circuit` with the chip's couplings:
 it optimizes, lays out, routes and optimizes again; see
 `docs/ARCHITECTURE.md`), with Qiskit at level 3, and with Qiskit using QCC as
 its optimization stage, and checks every output's state
-(`results/device.csv`; last run for 0.4.14, on a 4-vCPU Xeon VM). Geometric means over
+(`results/device.csv`; last run for 0.4.15, on a 4-vCPU Xeon VM). Geometric means over
 Qiskit's level 3:
 
 | gates | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|---|
-| {rz, sx, x, cx} | QCC | 0.924× | 0.811× | 20 ms |
-|  | Qiskit + QCC | 0.969× | 0.839× | 31 ms |
-| {rz, sx, x, cz} | QCC | 0.897× | 0.829× | 78 ms |
+| {rz, sx, x, cx} | QCC | 0.880× | 0.790× | 23 ms |
+|  | Qiskit + QCC | 0.969× | 0.839× | 35 ms |
+| {rz, sx, x, cz} | QCC | 0.862× | 0.809× | 77 ms |
 |  | Qiskit + QCC | 0.929× | 0.830× | 91 ms |
 
-Qiskit's own median in the same run: 32 ms with CX, 34 ms with CZ (37 and
-33 ms in the 0.4.13 run: medians of single compilations move this much
+Qiskit's own median in the same run: 30 ms with CX, 33 ms with CZ (32 and
+34 ms in the 0.4.14 run: medians of single compilations move this much
 between runs on this VM).
 
 Two-qubit gates / all gates with CX:
@@ -328,8 +328,8 @@ Two-qubit gates / all gates with CX:
 |  | 16 | 146 / 395 | 180 / 452 | 157 / 398 |
 | Clifford+T | 8 | 236 / 506 | 249 / 546 | 249 / 475 |
 |  | 16 | 733 / 1206 | 774 / 1394 | 772 / 1200 |
-| Hamiltonian | 8 | 335 / 634 | 425 / 867 | 425 / 682 |
-|  | 16 | 1321 / 2089 | 1463 / 2348 | 1463 / 1982 |
+| Hamiltonian | 8 | 189 / 465 | 425 / 867 | 425 / 682 |
+|  | 16 | 1078 / 1903 | 1463 / 2348 | 1463 / 1982 |
 
 - QCC's own layout and routing do better than Qiskit's on the adder (146
   CNOTs against 180) and Clifford+T, and as well on the rest, give or take a
@@ -411,6 +411,42 @@ Two-qubit gates / all gates with CX:
   1202 → 1200, QAOA-16 404 → 402; with CZ: the Hamiltonian 1286 → 1283 and
   4421 → 4415, Quantum Volume 16 4266 → 4259. No two-qubit gate count
   changed and no row got costlier.
+- 0.4.15 synthesizes Pauli networks on the chip's own pairs. Until then
+  a network was synthesized on logical qubits, as if all were coupled, and
+  routed after; its CXs land on pairs far apart, and on the 16-qubit
+  Hamiltonian the network that needs 313 CNOTs all-to-all needed far more
+  routed than the direct compilation's 1321, which was kept. Now, from
+  each initial layout the routings found, the rotations are placed on the
+  physical qubits and synthesized again by the same greedy method, with
+  every CX that sets up a rotation on a coupled pair, chosen by what it
+  does to each rotation's spanning tree on the chip (the minimum spanning
+  tree of its qubits under the chip's distances) rather than to its
+  weight, and with the Clifford left at the end routed after
+  (`synthesize_on` in `core/src/pauli_network.rs`, `networks_on_chip` in
+  `core/src/device.rs`); after a light cleanup, the trial needing fewest
+  CXs and SWAPs is optimized as one more routed candidate, and kept only
+  if cheapest. Architecture-aware synthesis of Pauli rotations is
+  published work: Paulihedral (Li et al., ASPLOS 2022, arXiv:2109.03371)
+  and Tetris (Jin et al., ISCA 2024, arXiv:2309.01905) synthesize each
+  block along trees on the device; here the network's CXs are shared
+  between rotations as in Rustiq, with the trees only scoring them. With
+  CX the Hamiltonian goes 335 / 634 → 189 / 465 at 8 qubits and 1321 /
+  2089 → 1078 / 1903 at 16 (Qiskit 425 / 867 and 1463 / 2348); with CZ
+  307 / 1099 → 184 / 742 and 1231 / 4201 → 1095 / 4198 (Qiskit 427 /
+  1720 and 1477 / 5357). No other row changed (only circuits of Pauli
+  rotations are tried, as all-to-all). On 24 random Hamiltonians not used
+  for tuning (6–16 qubits, two seeds each, on the chip with CX and CZ),
+  every one got 15–35% fewer two-qubit gates (CX 8145 → 6004 CNOTs in all,
+  CZ 7471 → 5799 CZs) and 22 of the 24 fewer gates in all (13551 → 12032
+  and 26601 → 22044); one has 1015 / 1957 against 1273 / 1943, 14 gates
+  more in all for 258 fewer CNOTs, as QCC's cost ordering puts two-qubit
+  gates first. It costs time on those circuits: paired against 0.4.14
+  (medians of five), the 16-qubit Hamiltonian 0.49 → 1.39 s with CX and
+  2.05 → 3.00 s with CZ (Qiskit 0.1 s), the 8-qubit one 1.20× and 1.16×;
+  48 syntheses (12 trials from each of four layouts) on 19 qubits, each
+  with a spanning tree per Pauli and candidate pair. Trials from the first
+  layout alone saved a fifth of that time but left 6562 CNOTs on the 24
+  held-out circuits against 6004.
 - For CZ the pipeline is not a fixed point, as it nearly is for CX: it
   reads the circuit through CX (each CZ as H·CX·H) so that phase folding
   sees parities, then translates it back, and each translation leaves the

@@ -1092,7 +1092,7 @@ fn through_pauli_network(
 /// trials found (the larger ones only add candidates), so no circuit can
 /// get worse; more trials with the larger penalty found little more (see
 /// `docs/improvement-log.md`, 2026-11-07).
-fn network_trials() -> impl Iterator<Item = (u64, f64)> {
+pub(crate) fn network_trials() -> impl Iterator<Item = (u64, f64)> {
     use crate::pauli_network::{FRUGAL_LOCAL_PENALTY, LOCAL_PENALTY};
     let usual = (0..8).map(|seed| (seed, LOCAL_PENALTY));
     let frugal = (0..4).map(|seed| (seed, FRUGAL_LOCAL_PENALTY));
@@ -1100,7 +1100,7 @@ fn network_trials() -> impl Iterator<Item = (u64, f64)> {
 }
 
 /// The circuit lowered to CX, if the Pauli network is worth trying on it.
-fn lowered_for_network(
+pub(crate) fn lowered_for_network(
     instructions: &[Instruction],
     native: &[String],
 ) -> Option<Vec<Instruction>> {
@@ -1230,7 +1230,7 @@ fn no_costlier((two, all): (usize, usize), (b_two, b_all): (usize, usize)) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{Rng, circuit_unitary, dense_equal_up_to_phase};
+    use crate::testing::{Rng, circuit_unitary, dense_equal_up_to_phase, pauli_exponentials};
 
     const INPUT: [&str; 33] = [
         "id", "x", "y", "z", "h", "s", "sdg", "t", "tdg", "sx", "sxdg", "rx", "ry", "rz", "p",
@@ -1512,46 +1512,6 @@ mod tests {
         let (unmeasured, wires) =
             compile_relabelling(circuit, native, Relabel::IfMeasured).unwrap();
         assert_eq!((cost(&unmeasured).0, wires), (2, vec![0, 1]));
-    }
-
-    /// Exponentials of random Pauli strings of weight 2 to 4 on `n` qubits,
-    /// each as basis changes around a ladder of CXs, as Qiskit writes them.
-    fn pauli_exponentials(rng: &mut Rng, n: usize, terms: usize) -> Vec<Instruction> {
-        let g =
-            |name: &str, q: &[usize], params: Vec<f64>| Instruction::gate(name, q.to_vec(), params);
-        let mut circuit = Vec::new();
-        for _ in 0..terms {
-            let mut qubits: Vec<usize> = (0..n).collect();
-            for i in 0..n {
-                qubits.swap(i, i + rng.below(n - i));
-            }
-            qubits.truncate(2 + rng.below(3));
-            let letters: Vec<usize> = qubits.iter().map(|_| rng.below(3)).collect();
-            let into: Vec<Instruction> = qubits
-                .iter()
-                .zip(&letters)
-                .flat_map(|(&q, &letter)| match letter {
-                    0 => vec![g("h", &[q], vec![])],
-                    1 => vec![g("sdg", &[q], vec![]), g("h", &[q], vec![])],
-                    _ => vec![],
-                })
-                .collect();
-            let ladder: Vec<Instruction> = qubits
-                .windows(2)
-                .map(|w| g("cx", &[w[0], w[1]], vec![]))
-                .collect();
-            let back = |inst: &Instruction| match inst.name.as_str() {
-                "sdg" => g("s", &inst.qubits, vec![]),
-                _ => inst.clone(),
-            };
-            circuit.extend(into.iter().cloned());
-            circuit.extend(ladder.iter().cloned());
-            let last = *qubits.last().expect("a qubit");
-            circuit.push(g("rz", &[last], vec![rng.range(-3.0, 3.0)]));
-            circuit.extend(ladder.iter().rev().cloned());
-            circuit.extend(into.iter().rev().map(back));
-        }
-        circuit
     }
 
     #[test]
