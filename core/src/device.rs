@@ -203,10 +203,15 @@ fn compile_with(
 /// for each initial layout of `routed` (the routings of the other
 /// candidates) and each of the pipeline's network trials, the rotations of
 /// `lowered` placed by that layout and synthesized again with every CX that
-/// sets them up on a coupled pair (`synthesize_on` in `pauli_network.rs`);
-/// the Clifford left at the end, which is not, is routed from there. Of
-/// these, the one needing fewest CXs and SWAPs once its cancelling CXs and
-/// mergeable rotations are gone, which is then optimized like the others.
+/// sets them up on a coupled pair (`synthesize_on` in `pauli_network.rs`),
+/// each with two endings: the Clifford left at the end synthesized on the
+/// chip's pairs too, or synthesized as off a device, whose CXs are not, and
+/// routed from there. Of each ending, the trial needing fewest CXs and
+/// SWAPs once its cancelling CXs and mergeable rotations are gone, which is
+/// then optimized like the others. The Clifford on the chip wins the
+/// ranking on nearly every trial, but not every optimized result: with it
+/// alone (in a first version, which gathered each pair's X image first),
+/// the 8-qubit benchmark Hamiltonian got 191 CNOTs instead of 0.4.15's 189.
 ///
 /// Synthesized off the chip and routed, a network's CXs land on pairs far
 /// apart: the 16-qubit benchmark Hamiltonian needs 313 CXs on all pairs and
@@ -236,34 +241,48 @@ fn networks_on_chip(
     let candidates = crate::parallel::map_ordered(trials.len(), |t| {
         let (layout, (seed, penalty)) = trials[t];
         let placed: Vec<Instruction> = lowered.iter().map(|i| i.relabel(layout)).collect();
-        let (network, wires) = synthesize_on(&placed, graph, seed, penalty)?;
-        let network = commutative_cancellation(phase_folding(merge_rotations(network)));
-        let routed = route(&network, n, graph, &identity, options).ok()?;
-        let cxs = routed
-            .instructions
-            .iter()
-            .filter(|i| i.name == "cx")
-            .count();
-        // Logical qubit q starts on layout[q], the network leaves that
-        // state on wires[layout[q]], and routing moves it from there.
-        let final_layout = (0..logical)
-            .map(|q| routed.final_layout[wires[layout[q]]])
-            .collect();
-        let circuit = DeviceCircuit {
-            instructions: routed.instructions,
-            initial_layout: layout.clone(),
-            final_layout,
-        };
-        Some((cxs + routed.swap_cost, circuit))
+        let networks = synthesize_on(&placed, graph, seed, penalty)?;
+        let mut kinds = Vec::new();
+        for (network, wires) in networks {
+            let network = commutative_cancellation(phase_folding(merge_rotations(network)));
+            let Ok(routed) = route(&network, n, graph, &identity, options) else {
+                kinds.push(None);
+                continue;
+            };
+            let cxs = routed
+                .instructions
+                .iter()
+                .filter(|i| i.name == "cx")
+                .count();
+            // Logical qubit q starts on layout[q], the network leaves that
+            // state on wires[layout[q]], and routing moves it from there.
+            let final_layout = (0..logical)
+                .map(|q| routed.final_layout[wires[layout[q]]])
+                .collect();
+            let circuit = DeviceCircuit {
+                instructions: routed.instructions,
+                initial_layout: layout.clone(),
+                final_layout,
+            };
+            kinds.push(Some((cxs + routed.swap_cost, circuit)));
+        }
+        Some(kinds)
     });
-    // The first of the cheapest, as in a loop.
-    let mut best: Option<(usize, DeviceCircuit)> = None;
-    for candidate in candidates.into_iter().flatten() {
-        if best.as_ref().is_none_or(|(b, _)| candidate.0 < *b) {
-            best = Some(candidate);
+    // Of each kind of tail, the first of the cheapest, as in a loop.
+    let mut best: Vec<Option<(usize, DeviceCircuit)>> = Vec::new();
+    for kinds in candidates.into_iter().flatten() {
+        best.resize_with(best.len().max(kinds.len()), || None);
+        for (b, candidate) in best.iter_mut().zip(kinds) {
+            let Some(candidate) = candidate else { continue };
+            if b.as_ref().is_none_or(|(c, _)| candidate.0 < *c) {
+                *b = Some(candidate);
+            }
         }
     }
-    best.map(|(_, circuit)| circuit).into_iter().collect()
+    best.into_iter()
+        .flatten()
+        .map(|(_, circuit)| circuit)
+        .collect()
 }
 
 /// The pipeline on physical qubits: no relabelling, every pass keeps the

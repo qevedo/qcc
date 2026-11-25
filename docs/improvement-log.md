@@ -8,6 +8,93 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-25 — The chip network's final Clifford, synthesized on the chip (0.4.16)
+
+**What.** `core/src/pauli_network.rs` gains `State::clifford_on`: on a
+device, the Clifford a network leaves at the end is synthesized with
+every CX on a coupled pair. Row by row of its tableau, the row's two
+images are gathered onto one free qubit `t` (`pair_on`, `pair_from`):
+the first along a Steiner tree of the free qubits rooted at `t`
+(`steiner_tree`: the shortest path to the closest terminal, again and
+again, the Takahashi–Matsuyama heuristic; `gather` clears a letter whose
+parent has one with one CX, moves one into an empty parent with two),
+made X (or Z); the second, which then anticommutes with it on `t`, along
+a tree of the free qubits without `t` onto the neighbour of `t` needing
+fewest CXs, cleared by one CX that keeps `t`'s letter. Both orders (X
+image first, Z image first) are priced and the cheaper kept. Of every row
+and every free `t` that is not a cut vertex of the free qubits (so the
+rows left stay on one connected piece of the chip), the one needing
+fewest CXs, then fewest gates, goes first; signs are fixed at the end as
+before (`fix_signs`, shared with `clifford`). This follows the
+architecture-aware synthesis of Clifford tableaus of Winderl et al.
+("Architecture-Aware Synthesis of Stabilizer Circuits from Clifford
+Tableaus", arXiv:2309.08972). `synthesize_on` now returns both endings
+of a trial (the Clifford on the chip, and as before synthesized off the
+device), sharing all the rotations before; `networks_on_chip`
+(`core/src/device.rs`) cleans and routes both, and passes the best trial
+of each ending to the physical pipeline beside the other candidates, so
+the candidates of 0.4.15 are all still there and no result can be
+costlier.
+
+Tests: the chip-network test checks both endings on a line, a 2 × 3 grid
+and a 7-qubit tree whose inner qubits are all cut vertices, with Clifford
+circuits on any pairs among the Pauli exponentials, every CX of the
+on-chip ending on a coupled pair and every output equivalent; random
+Clifford circuits alone on the same chips, all CXs coupled, equivalent,
+and fewer CXs than the off-device Clifford routed on more than 30 of 60;
+Steiner trees through allowed qubits only, parents before children, and
+None when cut off; `connected`. Mutations caught: dropping the cut-vertex
+rule; dropping the second CX of a move into an empty parent.
+
+**Why.** Next item 1, measured first: with the final Clifford dropped
+altogether (a throwaway switch, not equivalent), 22 random Hamiltonians
+of 6–16 qubits on the chip needed 9601 CNOTs instead of 10874 (−11.7%),
+Hamiltonian-16 1008 instead of 1078: the routed Clifford tail was about a
+tenth of the chip network's cost, more than any other single item on the
+Next list could show with a measurement today. Architecture-aware
+Clifford synthesis is published and exact, and could be verified end to
+end in a run.
+
+**Measured** (4-vCPU Xeon VM; `device.py` full run, all outputs
+verified; `check.py` passes; held-out script in the run's scratch space).
+- Chip with CX: Hamiltonian 189 / 465 → 187 / 443 (8 qubits), 1078 /
+  1903 → 1063 / 1894 (16); with CZ 184 / 742 → 181 / 730 and 1095 / 4198
+  → 1030 / 3952. Every other row of `device.csv` identical. Geometric
+  means over Qiskit level 3: CX 0.880× → 0.879× two-qubit, 0.790× →
+  0.788× all gates; CZ 0.862× → 0.858×, 0.809× → 0.805×.
+- Held out (random Hamiltonians built as `circuits.hamiltonian`, seeds
+  100n + 7 and 100n + 8, n = 6–16, on the chip): CX 10874 / 21675 →
+  10463 / 21300 (−3.8% CNOTs), CZ 10589 / 40489 → 10214 / 39643 (−3.5%);
+  none more two-qubit gates (21 of 22 fewer with CX, 19 with CZ); 5 and 5
+  with more gates in all, at most 56 (n = 14 seed 1408 with CX, 706 / 1373
+  → 677 / 1429). All 48 outputs (with the two benchmark Hamiltonians)
+  verified by state.
+- All-to-all and inside Qiskit unchanged (the plugin does not route;
+  `check.py` passes).
+- Time, paired workers (0.4.15 wheel from PyPI against this wheel,
+  medians of five): Hamiltonian-8 170 → 235 ms with CX, 476 → 640 ms with
+  CZ; -16 1.45 → 1.67 s and 3.60 → 3.96 s (Qiskit about 0.1 s); other
+  rows 0.84–1.14× (noise on unchanged paths), geometric means 1.07× CX,
+  1.03× CZ.
+- Core 123 tests (fmt and clippy clean on Rust 1.100), Python 219
+  passed; wasm builds.
+
+**Variants dropped** (details in experiments.md). The chip Clifford
+alone, X image first (held-out 10488, but Hamiltonian-8 189 → 191); both
+endings ranked together with one optimized (10488 again: the chip ending
+wins the ranking nearly always, not the optimized result); the Steiner
+search weighted by what `gather` pays (1 per terminal, 2 per other qubit:
+identical counts, 1.2× slower).
+
+**Learned.** Dropping a stage to measure its bound took one run and
+picked the item; the gap left to it (10463 against 9601) says the tail's
+greedy order is now the limit, not the trees. `debug_assert!` does not
+run under `cargo test --release`: run new tableau code's tests once in
+debug.
+
+**Next.** See experiments.md: a layout chosen for the network itself; the
+tail's row order with a lookahead; chip network time.
+
 ## 2026-11-23 — Pauli networks synthesized on the chip's pairs (0.4.15)
 
 **What.** `core/src/pauli_network.rs` gains `synthesize_on`: the same

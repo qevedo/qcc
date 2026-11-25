@@ -260,7 +260,8 @@ are, the Rust core also synthesizes the circuit again from scratch
    half the network's single-qubit gates off.
 3. The Clifford left is synthesized one qubit at a time, as in the greedy
    synthesis of Bravyi et al. (2021); where qubits may be relabelled, it
-   may end as a permutation.
+   may end as a permutation. On a chip it can also be synthesized on the
+   coupled pairs alone (see "Compiling for a device", step 5).
 4. The greedy choice is blind between gates that do about as well, so eight
    syntheses run side by side (one thread each), seven of them breaking
    those ties with seeded noise, as pytket's GreedyPauliSimp does with
@@ -326,18 +327,22 @@ qubits (`core/src/device.rs`):
    step 3, the rotations placed on the physical qubits and synthesized
    again with every CX that sets one up on a coupled pair, scored by each
    rotation's spanning tree on the chip (`synthesize_on` in
-   `core/src/pauli_network.rs`), the Clifford left at the end routed
-   after; the trial with fewest CXs and SWAPs after a light cleanup goes
-   through step 4 beside the others (`networks_on_chip` in
-   `core/src/device.rs`). The 16-qubit Hamiltonian on the heavy-hex chip:
-   1321 → 1078 CNOTs (0.4.15).
+   `core/src/pauli_network.rs`). The Clifford left at the end is
+   synthesized two ways: on the chip too, each row of its tableau gathered
+   onto a free qubit along a Steiner tree of the free qubits, never one
+   whose removal would split them (`clifford_on`, after Winderl et al.,
+   arXiv:2309.08972), or as off a device and routed. Of each, the trial
+   with fewest CXs and SWAPs after a light cleanup goes through step 4
+   beside the others (`networks_on_chip` in `core/src/device.rs`). The
+   16-qubit Hamiltonian on the heavy-hex chip: 1321 → 1078 CNOTs (0.4.15),
+   1063 (0.4.16).
 
 The result is a circuit on a register `q` of the device's qubits;
 `Circuit.initial_layout` and `Circuit.output_permutation` say on which
 physical qubit each logical qubit starts and ends. A circuit whose two-qubit
 gates already act on coupled pairs keeps its layout. On a 19-qubit
 heavy-hex chip (`benchmarks/compilation/device.py`) this uses 12–14% fewer
-two-qubit gates than Qiskit's level 3 (0.880× with CX, 0.862× with CZ), and
+two-qubit gates than Qiskit's level 3 (0.879× with CX, 0.858× with CZ), and
 19–21% fewer gates in all.
 
 Still to come: technology-specific constraints from `DeviceSpec.gate_rules`,

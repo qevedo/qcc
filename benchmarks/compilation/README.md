@@ -296,18 +296,18 @@ heavy-hex chip with QCC alone (`compile_circuit` with the chip's couplings:
 it optimizes, lays out, routes and optimizes again; see
 `docs/ARCHITECTURE.md`), with Qiskit at level 3, and with Qiskit using QCC as
 its optimization stage, and checks every output's state
-(`results/device.csv`; last run for 0.4.15, on a 4-vCPU Xeon VM). Geometric means over
+(`results/device.csv`; last run for 0.4.16, on a 4-vCPU Xeon VM). Geometric means over
 Qiskit's level 3:
 
 | gates | compiler | two-qubit gates | all gates | median time |
 |---|---|---|---|---|
-| {rz, sx, x, cx} | QCC | 0.880× | 0.790× | 23 ms |
-|  | Qiskit + QCC | 0.969× | 0.839× | 35 ms |
-| {rz, sx, x, cz} | QCC | 0.862× | 0.809× | 77 ms |
-|  | Qiskit + QCC | 0.929× | 0.830× | 91 ms |
+| {rz, sx, x, cx} | QCC | 0.879× | 0.788× | 26 ms |
+|  | Qiskit + QCC | 0.969× | 0.839× | 30 ms |
+| {rz, sx, x, cz} | QCC | 0.858× | 0.805× | 71 ms |
+|  | Qiskit + QCC | 0.929× | 0.830× | 107 ms |
 
-Qiskit's own median in the same run: 30 ms with CX, 33 ms with CZ (32 and
-34 ms in the 0.4.14 run: medians of single compilations move this much
+Qiskit's own median in the same run: 31 ms with CX, 40 ms with CZ (30 and
+33 ms in the 0.4.15 run: medians of single compilations move this much
 between runs on this VM).
 
 Two-qubit gates / all gates with CX:
@@ -328,8 +328,8 @@ Two-qubit gates / all gates with CX:
 |  | 16 | 146 / 395 | 180 / 452 | 157 / 398 |
 | Clifford+T | 8 | 236 / 506 | 249 / 546 | 249 / 475 |
 |  | 16 | 733 / 1206 | 774 / 1394 | 772 / 1200 |
-| Hamiltonian | 8 | 189 / 465 | 425 / 867 | 425 / 682 |
-|  | 16 | 1078 / 1903 | 1463 / 2348 | 1463 / 1982 |
+| Hamiltonian | 8 | 187 / 443 | 425 / 867 | 425 / 682 |
+|  | 16 | 1063 / 1894 | 1463 / 2348 | 1463 / 1982 |
 
 - QCC's own layout and routing do better than Qiskit's on the adder (146
   CNOTs against 180) and Clifford+T, and as well on the rest, give or take a
@@ -447,6 +447,35 @@ Two-qubit gates / all gates with CX:
   with a spanning tree per Pauli and candidate pair. Trials from the first
   layout alone saved a fifth of that time but left 6562 CNOTs on the 24
   held-out circuits against 6004.
+- 0.4.16 synthesizes the Clifford those networks leave at the end on the
+  chip too. In 0.4.15 it was synthesized as if all qubits were coupled
+  and routed: with it dropped altogether (not equivalent, a bound), 22
+  random Hamiltonians of 6–16 qubits on the chip needed 9601 CNOTs
+  instead of 10874, so it cost about a tenth. Now each row of the
+  Clifford's tableau is decoupled in turn with CXs on coupled pairs only,
+  its two images gathered onto one qubit along a Steiner tree of the
+  qubits still free (the X image first or the Z image first, whichever
+  needs fewer CXs), on the row and qubit needing fewest CXs, never a qubit
+  whose removal would split the free ones (after Winderl et al.,
+  "Architecture-Aware Synthesis of Stabilizer Circuits from Clifford
+  Tableaus", arXiv:2309.08972; `clifford_on` in
+  `core/src/pauli_network.rs`). Both endings are kept per trial and the
+  best of each is optimized, so no circuit can get costlier. With CX the
+  Hamiltonian goes 189 / 465 → 187 / 443 at 8 qubits and 1078 / 1903 →
+  1063 / 1894 at 16; with CZ 184 / 742 → 181 / 730 and 1095 / 4198 →
+  1030 / 3952. No other row changed. On the 22 held-out Hamiltonians
+  (seeds 100n + 7 and 100n + 8, n = 6–16, not used for tuning): CX 10874
+  / 21675 → 10463 / 21300, CZ 10589 / 40489 → 10214 / 39643 (−3.8% and
+  −3.5% two-qubit gates); none got more two-qubit gates, 21 of 22 fewer
+  with CX and 19 of 22 with CZ, while 5 with CX and 5 with CZ got more
+  gates in all (at most 56 more, 1373 → 1429 for 29 fewer CNOTs, as QCC's
+  cost ordering puts two-qubit gates first). It costs time on those
+  circuits, a second Clifford synthesis and routing per trial and one more
+  candidate optimized: paired against 0.4.15 (medians of five), the
+  Hamiltonian 170 → 235 ms at 8 qubits and 1.45 → 1.67 s at 16 with CX,
+  476 → 640 ms and 3.60 → 3.96 s with CZ; other rows within this VM's
+  noise (0.84–1.14×), geometric means over the chip rows 1.07× with CX
+  and 1.03× with CZ.
 - For CZ the pipeline is not a fixed point, as it nearly is for CX: it
   reads the circuit through CX (each CZ as H·CX·H) so that phase folding
   sees parities, then translates it back, and each translation leaves the

@@ -12,7 +12,10 @@
 //! Clifford left at the end is synthesized by decoupling one qubit at a time,
 //! as in the greedy synthesis of Bravyi, Shaydulin, Hu and Maslov
 //! ("Clifford circuit optimization with templates and symbolic Pauli
-//! gates", 2021).
+//! gates", 2021); on a device, also with every CX on a coupled pair, each
+//! qubit's pair of images gathered along a Steiner tree of the chip, as in
+//! Winderl et al. ("Architecture-Aware Synthesis of Stabilizer Circuits
+//! from Clifford Tableaus", arXiv:2309.08972).
 //!
 //! Single-qubit gates are most of what such networks cost, so three choices
 //! keep them few:
@@ -545,6 +548,129 @@ fn tree_cost(g: &CouplingGraph, support: u128) -> u32 {
     1 + total
 }
 
+/// Whether the qubits of `set` are connected on `g` through qubits of `set`.
+fn connected(g: &CouplingGraph, set: u128) -> bool {
+    let start = set.trailing_zeros() as usize;
+    let mut seen: u128 = 1 << start;
+    let mut stack = vec![start];
+    while let Some(u) = stack.pop() {
+        for &v in g.neighbours(u) {
+            if set >> v & 1 == 1 && seen >> v & 1 == 0 {
+                seen |= 1 << v;
+                stack.push(v);
+            }
+        }
+    }
+    seen == set
+}
+
+/// A tree of `g` through qubits of `allowed` only, joining `root` to every
+/// qubit of `terminals` (all in `allowed`): each qubit's parent
+/// (`usize::MAX` for the root and the qubits outside), and the tree's
+/// qubits, each after its parent. Grown from the root by the shortest path
+/// to the closest terminal not yet in it, again and again (the heuristic of
+/// Takahashi and Matsuyama for Steiner trees, within twice the optimum).
+/// None if `allowed` does not connect them.
+fn steiner_tree(
+    g: &CouplingGraph,
+    allowed: u128,
+    root: usize,
+    terminals: u128,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let n = g.qubits();
+    let mut parent = vec![usize::MAX; n];
+    let mut previous = vec![usize::MAX; n];
+    let mut order = vec![root];
+    let mut tree: u128 = 1 << root;
+    let mut queue = Vec::with_capacity(n);
+    let mut path = Vec::new();
+    while terminals & !tree != 0 {
+        // Breadth first from the whole tree, to the first terminal met.
+        queue.clear();
+        queue.extend_from_slice(&order);
+        let mut seen = tree;
+        let mut found = None;
+        let mut head = 0;
+        'search: while head < queue.len() {
+            let u = queue[head];
+            head += 1;
+            for &v in g.neighbours(u) {
+                if seen >> v & 1 == 1 || allowed >> v & 1 == 0 {
+                    continue;
+                }
+                seen |= 1 << v;
+                previous[v] = u;
+                queue.push(v);
+                if terminals >> v & 1 == 1 {
+                    found = Some(v);
+                    break 'search;
+                }
+            }
+        }
+        let mut v = found?;
+        path.clear();
+        while tree >> v & 1 == 0 {
+            path.push(v);
+            v = previous[v];
+        }
+        for &v in path.iter().rev() {
+            parent[v] = previous[v];
+            tree |= 1 << v;
+            order.push(v);
+        }
+    }
+    Some((parent, order))
+}
+
+/// `gate` applied to both Paulis of `ps`, and appended to `gates`.
+fn apply(gate: Gate, ps: &mut [Pauli; 2], gates: &mut Vec<Gate>) {
+    gate.conjugate(&mut ps[0]);
+    gate.conjugate(&mut ps[1]);
+    gates.push(gate);
+}
+
+/// Gather the letters of `ps[which]` (on the qubits of the tree `parent`,
+/// `order` from [`steiner_tree`]) onto the tree's root, children before
+/// parents: a letter whose parent has one is cleared by a CX between them
+/// once both are Z (Z on the control and the target becomes Z on the
+/// target); one whose parent has none is moved there by two (X on the
+/// control becomes X on both, and X on both X on the control's partner).
+/// So a qubit of the tree outside the Pauli costs two CXs, one in it one.
+fn gather(
+    ps: &mut [Pauli; 2],
+    which: usize,
+    parent: &[usize],
+    order: &[usize],
+    gates: &mut Vec<Gate>,
+) {
+    for &v in order[1..].iter().rev() {
+        let letter = ps[which].letter(v);
+        if letter == 0 {
+            continue;
+        }
+        let p = parent[v];
+        if ps[which].letter(p) == 0 {
+            for gate in to_x(v, letter) {
+                apply(gate, ps, gates);
+            }
+            apply(Gate::Cx(v, p), ps, gates);
+            apply(Gate::Cx(p, v), ps, gates);
+        } else {
+            for gate in to_z(v, letter) {
+                apply(gate, ps, gates);
+            }
+            for gate in to_z(p, ps[which].letter(p)) {
+                apply(gate, ps, gates);
+            }
+            apply(Gate::Cx(v, p), ps, gates);
+        }
+        debug_assert_eq!(ps[which].letter(v), 0);
+    }
+}
+
+/// [`to_z`] or [`to_x`].
+type LocalTo = fn(usize, u8) -> Vec<Gate>;
+
 /// Local Cliffords on `q` taking `letter` (1 = X, 2 = Z, 3 = Y) to Z.
 fn to_z(q: usize, letter: u8) -> Vec<Gate> {
     match letter {
@@ -587,6 +713,7 @@ pub fn synthesize_seeded(
     local_penalty: f64,
 ) -> Option<(Vec<Instruction>, Vec<usize>)> {
     synthesize_with(instructions, permute, seed, local_penalty, None)
+        .map(|mut out| out.swap_remove(0))
 }
 
 /// [`synthesize_seeded`] for a device, with relabelling: `instructions` on
@@ -597,19 +724,22 @@ pub fn synthesize_seeded(
 /// grows a rotation towards another qubit of it can lower other rotations'
 /// trees), and a rotation whose qubits are apart is reduced by force by
 /// moving one of its letters along a shortest path. The Clifford left at
-/// the end is synthesized as off a device, and routed after.
+/// the end is synthesized on the chip's pairs too ([`State::clifford_on`]);
+/// and, as a second network sharing everything before it, as off a device,
+/// to be routed after: of the two, neither needs fewer CXs everywhere.
 ///
 /// Off a device the network is synthesized on logical qubits and then
 /// routed, and routing the scattered CXs of a network costs more than the
 /// network saves: the 16-qubit benchmark Hamiltonian needs 313 CXs on all
 /// pairs, but routed on the heavy-hex chip 1321 (and the direct compilation
-/// is kept there). Synthesized on the chip's pairs it needs 1078.
+/// is kept there). Synthesized on the chip's pairs it needed 1078 with the
+/// Clifford routed after (0.4.15), and 1063 with the choice of either.
 pub fn synthesize_on(
     instructions: &[Instruction],
     graph: &CouplingGraph,
     seed: u64,
     local_penalty: f64,
-) -> Option<(Vec<Instruction>, Vec<usize>)> {
+) -> Option<Vec<(Vec<Instruction>, Vec<usize>)>> {
     synthesize_with(instructions, true, seed, local_penalty, Some(graph))
 }
 
@@ -620,7 +750,7 @@ fn synthesize_with(
     seed: u64,
     local_penalty: f64,
     graph: Option<&CouplingGraph>,
-) -> Option<(Vec<Instruction>, Vec<usize>)> {
+) -> Option<Vec<(Vec<Instruction>, Vec<usize>)>> {
     let used = instructions
         .iter()
         .flat_map(|i| i.qubits.iter().map(|&q| q + 1))
@@ -643,8 +773,16 @@ fn synthesize_with(
         trees: Default::default(),
     };
     state.rotations();
+    let mut out = Vec::new();
+    if let Some(g) = graph.filter(|g| permute && n == g.qubits()) {
+        let (rows, network) = (state.rows.clone(), state.out.clone());
+        let wires = state.clifford_on(g);
+        out.push((std::mem::replace(&mut state.out, network), wires));
+        state.rows = rows;
+    }
     let wires = state.clifford(permute);
-    Some((state.out, wires))
+    out.push((state.out, wires));
+    Some(out)
 }
 
 struct State<'g> {
@@ -1055,6 +1193,13 @@ impl State<'_> {
             free.retain(|&p| p != target);
             wires[q] = target;
         }
+        self.fix_signs(&wires);
+        wires
+    }
+
+    /// Make each row's pair `+X_w` and `+Z_w` where it is `±X_w` and `±Z_w`
+    /// (`w = wires[q]`), with Paulis on `w`.
+    fn fix_signs(&mut self, wires: &[usize]) {
         for q in 0..self.n {
             // rows[2q] = ±X_w, rows[2q+1] = ±Z_w now: fix the signs.
             let w = wires[q];
@@ -1070,7 +1215,148 @@ impl State<'_> {
                 }
             }
         }
+    }
+
+    /// [`State::clifford`] on a device, with every CX on a coupled pair, after
+    /// the architecture-aware synthesis of Clifford tableaus (Winderl et al.,
+    /// "Architecture-Aware Synthesis of Stabilizer Circuits from Clifford
+    /// Tableaus", arXiv:2309.08972): one row at a time, its pair of images
+    /// gathered onto a free qubit `t` along a Steiner tree of the free qubits,
+    /// and `t` then taken out of them. `t` is never one whose removal would
+    /// split the free qubits, so the rows left stay within one connected
+    /// piece of the chip. Of every row and every such `t`, the pair needing
+    /// fewest CXs is decoupled first (then fewest gates in all, then the
+    /// first). Returns where each row's pair ends.
+    ///
+    /// The Clifford is what the network leaves of the rotations' frame, on
+    /// any qubits; synthesized as off a device and routed, it took about a
+    /// tenth of the network's CXs on the chip's Hamiltonians.
+    fn clifford_on(&mut self, g: &CouplingGraph) -> Vec<usize> {
+        let n = self.n;
+        let mut rows: Vec<usize> = (0..n).collect();
+        let mut free: u128 = if n == MAX_QUBITS {
+            u128::MAX
+        } else {
+            (1 << n) - 1
+        };
+        let mut wires = vec![0; n];
+        while !rows.is_empty() {
+            // (CXs, gates, which row, t, the gates).
+            let mut best: Option<(usize, usize, usize, usize, Vec<Gate>)> = None;
+            for t in (0..n).filter(|&t| free >> t & 1 == 1) {
+                let rest = free & !(1 << t);
+                if rest != 0 && !connected(g, rest) {
+                    continue;
+                }
+                for (k, &q) in rows.iter().enumerate() {
+                    let pair = [self.rows[2 * q], self.rows[2 * q + 1]];
+                    let Some(gates) = State::pair_on(g, pair, t, free) else {
+                        continue;
+                    };
+                    let cxs = gates.iter().filter(|g| matches!(g, Gate::Cx(..))).count();
+                    if best
+                        .as_ref()
+                        .is_none_or(|b| (cxs, gates.len()) < (b.0, b.1))
+                    {
+                        best = Some((cxs, gates.len(), k, t, gates));
+                    }
+                }
+            }
+            let (_, _, k, t, gates) = best.expect("a free qubit that keeps the rest connected");
+            for gate in gates {
+                self.emit(gate);
+            }
+            let q = rows.remove(k);
+            free &= !(1 << t);
+            wires[q] = t;
+        }
+        self.fix_signs(&wires);
         wires
+    }
+
+    /// The gates, CXs on coupled pairs of `free` qubits only, that make
+    /// `pair` (a row's images, which anticommute and act on `free` only)
+    /// `±X_t` and `±Z_t`, or None if `free` cannot connect them: the cheaper
+    /// of [`State::pair_from`] from either image (fewer CXs, then gates).
+    fn pair_on(g: &CouplingGraph, pair: [Pauli; 2], t: usize, free: u128) -> Option<Vec<Gate>> {
+        let key = |gates: &Vec<Gate>| {
+            let cxs = gates.iter().filter(|g| matches!(g, Gate::Cx(..))).count();
+            (cxs, gates.len())
+        };
+        match (
+            State::pair_from(g, pair, 0, t, free),
+            State::pair_from(g, pair, 1, t, free),
+        ) {
+            (Some(a), Some(b)) => Some(if key(&b) < key(&a) { b } else { a }),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// [`State::pair_on`], gathering `pair[first]` first: onto `t` along a
+    /// Steiner tree of `free`, where it is made X (Z if `first` is 1); then
+    /// the other, which now anticommutes with it on `t`, along a tree of
+    /// `free` without `t` onto a neighbour `k` of `t` (the one needing
+    /// fewest CXs), from which one CX clears it, keeping `t`'s letter:
+    /// CX(k, t) clears Z on `k` and keeps X on `t`, CX(t, k) clears X on
+    /// `k` and keeps Z on `t`.
+    fn pair_from(
+        g: &CouplingGraph,
+        pair: [Pauli; 2],
+        first: usize,
+        t: usize,
+        free: u128,
+    ) -> Option<Vec<Gate>> {
+        let (second, to_first, to_second): (usize, LocalTo, LocalTo) = if first == 0 {
+            (1, to_x, to_z)
+        } else {
+            (0, to_z, to_x)
+        };
+        let mut ps = pair;
+        let mut gates = Vec::new();
+        let (parent, order) = steiner_tree(g, free, t, ps[first].support())?;
+        gather(&mut ps, first, &parent, &order, &mut gates);
+        for gate in to_first(t, ps[first].letter(t)) {
+            apply(gate, &mut ps, &mut gates);
+        }
+        let rest = ps[second].support() & !(1 << t);
+        if rest != 0 {
+            let allowed = free & !(1 << t);
+            let mut best: Option<(usize, [Pauli; 2], Vec<Gate>)> = None;
+            for &k in g.neighbours(t).iter().filter(|&&k| allowed >> k & 1 == 1) {
+                let Some((parent, order)) = steiner_tree(g, allowed, k, rest) else {
+                    continue;
+                };
+                let (mut ps_k, mut gates_k) = (ps, Vec::new());
+                gather(&mut ps_k, second, &parent, &order, &mut gates_k);
+                // The letter on k as the second's on t would be cleared by
+                // the CX: Z for X on t (CX(k, t)), X for Z on t (CX(t, k)).
+                let clearing = if first == 0 { to_z } else { to_x };
+                for gate in clearing(k, ps_k[second].letter(k)) {
+                    apply(gate, &mut ps_k, &mut gates_k);
+                }
+                let cx = if first == 0 {
+                    Gate::Cx(k, t)
+                } else {
+                    Gate::Cx(t, k)
+                };
+                apply(cx, &mut ps_k, &mut gates_k);
+                let cxs = gates_k.iter().filter(|g| matches!(g, Gate::Cx(..))).count();
+                if best.as_ref().is_none_or(|b| cxs < b.0) {
+                    best = Some((cxs, ps_k, gates_k));
+                }
+            }
+            let (_, ps_k, gates_k) = best?;
+            ps = ps_k;
+            gates.extend(gates_k);
+        }
+        // The second's letter on t, which anticommutes with the first's, to
+        // its own: √X takes Y to Z and keeps X; S† takes Y to X and keeps Z.
+        for gate in to_second(t, ps[second].letter(t)) {
+            apply(gate, &mut ps, &mut gates);
+        }
+        debug_assert_eq!((ps[0].x, ps[0].z), (1 << t, 0));
+        debug_assert_eq!((ps[1].x, ps[1].z), (0, 1 << t));
+        Some(gates)
     }
 
     /// Roughly the CXs decoupling row `q` costs: the free qubits its pair of
@@ -1366,45 +1652,142 @@ mod tests {
         assert_eq!(tree_cost(&grid, support(&[0, 1, 2, 4])), 4);
     }
 
+    /// `out` followed by SWAPs moving each state from `wires[q]` back to `q`.
+    fn unpermuted(mut out: Vec<Instruction>, wires: &[usize]) -> Vec<Instruction> {
+        let mut at = wires.to_vec();
+        for q in 0..at.len() {
+            let w = at[q];
+            if w != q {
+                out.push(Instruction::gate("swap", [w, q], []));
+                let p = at.iter().position(|&x| x == q).expect("a permutation");
+                at[p] = w;
+                at[q] = q;
+            }
+        }
+        out
+    }
+
+    /// A line, a 2 × 3 grid, and a tree with cut vertices everywhere but its
+    /// leaves (0 – 1 – 3 – 4 – 5, with 2 on 1 and 6 on 4), where the Clifford
+    /// on the chip must end its rows on leaves first.
+    fn small_chips() -> [CouplingGraph; 3] {
+        let tree = [(0, 1), (1, 2), (1, 3), (3, 4), (4, 5), (4, 6)];
+        [
+            CouplingGraph::line(5),
+            CouplingGraph::grid(2, 3),
+            CouplingGraph::new(7, &tree).expect("a tree"),
+        ]
+    }
+
     #[test]
     fn networks_on_a_chip_keep_their_unitary_and_set_up_rotations_on_its_pairs() {
         let mut rng = Rng::new(12);
-        let graphs = [CouplingGraph::line(5), CouplingGraph::grid(2, 3)];
-        for graph in &graphs {
+        for graph in &small_chips() {
             let n = graph.qubits();
             for k in 0..12 {
-                // Pauli exponentials on the first qubits, idle ones beyond.
-                let circuit = crate::testing::pauli_exponentials(&mut rng, n - k % 2, 6);
+                // Pauli exponentials on the first qubits, idle ones beyond;
+                // or Clifford gates on any pairs, with a few rotations.
+                let circuit = if k % 4 == 3 {
+                    random_circuit(&mut rng, n, 40)
+                } else {
+                    crate::testing::pauli_exponentials(&mut rng, n - k % 2, 6)
+                };
                 let seed = (k % 3) as u64;
                 let penalty = [LOCAL_PENALTY, FRUGAL_LOCAL_PENALTY][k % 2];
-                let (mut out, wires) =
-                    synthesize_on(&circuit, graph, seed, penalty).expect("a network");
-                // Every CX up to the last rotation is on a coupled pair; only
-                // the Clifford left at the end may not be.
-                let last = out
-                    .iter()
-                    .rposition(|i| i.name == "rz")
-                    .expect("a rotation");
-                for inst in out[..last].iter().filter(|i| i.name == "cx") {
-                    assert!(graph.coupled(inst.qubits[0], inst.qubits[1]), "{inst:?}");
-                }
-                let mut at = wires.clone();
-                for q in 0..n {
-                    let w = at[q];
-                    if w != q {
-                        out.push(Instruction::gate("swap", [w, q], []));
-                        let p = at.iter().position(|&x| x == q).expect("a permutation");
-                        at[p] = w;
-                        at[q] = q;
+                let networks = synthesize_on(&circuit, graph, seed, penalty).expect("a network");
+                assert_eq!(networks.len(), 2);
+                for (kind, (out, wires)) in networks.into_iter().enumerate() {
+                    // With the Clifford synthesized on the chip, every CX is on
+                    // a coupled pair; with it synthesized as off a device,
+                    // every CX up to the last rotation.
+                    let last = match kind {
+                        0 => out.len(),
+                        _ => out.iter().rposition(|i| i.name == "rz").unwrap_or(0),
+                    };
+                    for inst in out[..last].iter().filter(|i| i.name == "cx") {
+                        assert!(graph.coupled(inst.qubits[0], inst.qubits[1]), "{inst:?}");
                     }
+                    assert!(dense_equal_up_to_phase(
+                        &circuit_unitary(&unpermuted(out, &wires), n),
+                        &circuit_unitary(&circuit, n),
+                        1e-8
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cliffords_on_a_chip_need_coupled_pairs_only() {
+        // Random Clifford circuits alone (no rotation to set up), so the
+        // network is the Clifford synthesis only; on the tree its rows must
+        // end on leaves, never on a qubit that would split the free ones.
+        let mut rng = Rng::new(31);
+        let mut fewer = 0;
+        for graph in &small_chips() {
+            let n = graph.qubits();
+            for _ in 0..20 {
+                let circuit: Vec<Instruction> = random_circuit(&mut rng, n, 60)
+                    .into_iter()
+                    .filter(|i| !["rz", "t"].contains(&i.name.as_str()))
+                    .collect();
+                let networks = synthesize_on(&circuit, graph, 0, LOCAL_PENALTY).expect("a network");
+                let cxs = |out: &[Instruction]| out.iter().filter(|i| i.name == "cx").count();
+                // The other, routed from the identity layout: its CXs plus
+                // the CXs of its SWAPs.
+                let identity: Vec<usize> = (0..n).collect();
+                let routed = crate::routing::route(
+                    &networks[1].0,
+                    n,
+                    graph,
+                    &identity,
+                    &crate::routing::SabreOptions::default(),
+                )
+                .expect("a routing");
+                let routed_cxs = cxs(&routed.instructions) + routed.swap_cost;
+                let (out, wires) = &networks[0];
+                assert!(
+                    out.iter()
+                        .filter(|i| i.name == "cx")
+                        .all(|i| graph.coupled(i.qubits[0], i.qubits[1]))
+                );
+                if cxs(out) < routed_cxs {
+                    fewer += 1;
                 }
                 assert!(dense_equal_up_to_phase(
-                    &circuit_unitary(&out, n),
+                    &circuit_unitary(&unpermuted(out.clone(), wires), n),
                     &circuit_unitary(&circuit, n),
                     1e-8
                 ));
             }
         }
+        // Not vacuous, and the point of it: on these chips the Clifford
+        // synthesized on them mostly needs fewer CXs than the other routed.
+        assert!(fewer > 30, "{fewer} of 60");
+    }
+
+    #[test]
+    fn steiner_trees_join_their_terminals_through_allowed_qubits() {
+        let grid = CouplingGraph::grid(3, 3);
+        let support = |qs: &[usize]| qs.iter().fold(0u128, |s, &q| s | 1 << q);
+        // Corners 0, 2 and 8 of a 3 × 3 grid from the centre, avoiding 1.
+        let allowed = support(&[0, 2, 3, 4, 5, 6, 7, 8]);
+        let (parent, order) = steiner_tree(&grid, allowed, 4, support(&[0, 2, 8])).expect("a tree");
+        assert_eq!(order[0], 4);
+        for &v in &order[1..] {
+            assert!(grid.coupled(v, parent[v]));
+            assert!(
+                order.iter().position(|&p| p == parent[v]) < order.iter().position(|&p| p == v)
+            );
+        }
+        assert!(order.iter().all(|&v| allowed >> v & 1 == 1));
+        assert!([0, 2, 8].iter().all(|t| order.contains(t)));
+        // 4–3–0, 4–5–2, 5–8: six qubits.
+        assert_eq!(order.len(), 6);
+        // Cut off: 2 cannot be reached without 1 and 5.
+        assert!(steiner_tree(&grid, support(&[0, 2, 3, 4]), 4, support(&[2])).is_none());
+        assert!(connected(&grid, support(&[0, 1, 2])));
+        assert!(!connected(&grid, support(&[0, 2, 4])));
     }
 
     #[test]
