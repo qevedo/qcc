@@ -324,7 +324,10 @@ qubits (`core/src/device.rs`):
    a circuit worse.
 5. For a circuit of Pauli rotations (where the all-to-all pipeline tries
    Pauli networks), one more candidate: from each initial layout of
-   step 3, the rotations placed on the physical qubits and synthesized
+   step 3, and from placements chosen for the rotations themselves (each
+   of those layouts improved by exchanges that lower the rotations'
+   spanning-tree costs, and one grown greedily; `placement`, after
+   Vuorenkoski and Meijer-van de Griend, arXiv:2605.03545), the rotations placed on the physical qubits and synthesized
    again with every CX that sets one up on a coupled pair, scored by each
    rotation's spanning tree on the chip (`synthesize_on` in
    `core/src/pauli_network.rs`). The Clifford left at the end is
@@ -335,15 +338,15 @@ qubits (`core/src/device.rs`):
    with fewest CXs and SWAPs after a light cleanup goes through step 4
    beside the others (`networks_on_chip` in `core/src/device.rs`). The
    16-qubit Hamiltonian on the heavy-hex chip: 1321 → 1078 CNOTs (0.4.15),
-   1063 (0.4.16).
+   1063 (0.4.16), 1035 (0.4.17).
 
 The result is a circuit on a register `q` of the device's qubits;
 `Circuit.initial_layout` and `Circuit.output_permutation` say on which
 physical qubit each logical qubit starts and ends. A circuit whose two-qubit
 gates already act on coupled pairs keeps its layout. On a 19-qubit
 heavy-hex chip (`benchmarks/compilation/device.py`) this uses 12–14% fewer
-two-qubit gates than Qiskit's level 3 (0.879× with CX, 0.858× with CZ), and
-19–21% fewer gates in all.
+two-qubit gates than Qiskit's level 3 (0.877× with CX, 0.857× with CZ), and
+20–21% fewer gates in all.
 
 Still to come: technology-specific constraints from `DeviceSpec.gate_rules`,
 and error rates in the layout.

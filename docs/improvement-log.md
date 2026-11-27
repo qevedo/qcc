@@ -8,6 +8,78 @@ See [experiments.md](experiments.md) for the short index: what worked, what
 didn't (and why), what was considered, and the current next steps. Read it
 before choosing a change, and update it in the same commit.
 
+## 2026-11-27 — Placements chosen for the chip network's rotations (0.4.17)
+
+**What.** `core/src/pauli_network.rs` gains `placement`: a layout of a
+circuit's logical qubits on the chip, chosen for its Pauli rotations. It
+lowers the sum, over the rotations (as `extract` reads them), of each
+one's spanning-tree cost once placed (`tree_cost`, what `synthesize_on`
+scores), by first-improvement exchanges of two physical qubits (an
+unused one too) until none lowers it. It starts from a given layout, or
+from a greedy growth (`greedy_placement`): the logical qubit in most
+rotations on the most central physical qubit, then, among the free
+qubits next to placed ones, the unplaced qubit sharing most rotations
+with that qubit's placed neighbours, the placement of Vuorenkoski and
+Meijer-van de Griend ("Shortest Path in Pauli Forest — An Algorithm for
+Decomposing Pauli Exponentials to Quantum Circuits", arXiv:2605.03545).
+`networks_on_chip` (`core/src/device.rs`) now runs its trials from
+SABRE's layouts as before, plus each of them improved and the greedy
+one; it keeps the best trial of each ending from SABRE's layouts and
+from the new ones apart, and all of them are optimized beside the other
+candidates, so the candidates of 0.4.16 are all still there and no
+result can be costlier.
+
+Tests: placements are injective layouts of the right length on a line, a
+2 × 3 grid and a 7-qubit tree, never costlier than their start and
+cheaper on most (not vacuous); a shuffled chain of ZZ rotations on a
+line is placed along the chain, every rotation's tree costing 2, from
+the greedy start and from the identity. Mutation caught: refusing every
+exchange fails both.
+
+**Why.** Next item 1 since 2026-11-23: the chip network's trials only
+started from layouts SABRE found for the circuit as written, CX ladders
+and all, and the layout was known to matter (first layout only 6562
+against 6004 held-out CNOTs). The Pauli Forest paper (read this run)
+chooses placement together with architecture-aware Pauli-exponential
+synthesis; a placement scored with the synthesis's own tree costs could
+be checked end to end today on the held-out set.
+
+**Measured** (4-vCPU Xeon VM; `device.py` full run, all outputs
+verified; `check.py` passes; held-out script in the run's scratch space).
+- Chip with CX: Hamiltonian 187 / 443 → 186 / 430 (8 qubits), 1063 /
+  1894 → 1035 / 1957 (16); with CZ 181 / 730 unchanged, 1030 / 3952 →
+  1010 / 3833. Every other row of `device.csv` identical. Geometric means
+  over Qiskit level 3: CX 0.879× → 0.877× two-qubit, 0.788× all gates;
+  CZ 0.858× → 0.857×, 0.805× → 0.803×.
+- Held out (random Hamiltonians built as `circuits.hamiltonian`, seeds
+  100n + 7 and 100n + 8, n = 6–16, on the chip): CX 10463 / 21300 →
+  10068 / 20220 (−3.8% CNOTs), CZ 10214 / 39643 → 9963 / 38571 (−2.5%);
+  none more two-qubit gates; 3 CX rows more gates in all, at most 46
+  (n = 15 seed 1507, 876 / 1580 → 825 / 1626). All 44 held-out outputs
+  verified by state.
+- All-to-all and inside Qiskit unchanged (the plugin does not route).
+- Time, paired workers (0.4.16 wheel against this wheel, medians of
+  five, alternating order): Hamiltonian-8 189 → 279 ms with CX, 504 →
+  577 ms with CZ; -16 1.31 → 2.30 s and 2.89 → 4.31 s (Qiskit about
+  0.1 s); other rows 0.88–1.08× (noise on unchanged paths); geometric
+  means over the 16 chip rows 1.04× CX, 1.03× CZ.
+- Core 125 tests (fmt and clippy clean on Rust 1.100), Python 219
+  passed; wasm builds.
+
+**Variants dropped** (details in experiments.md). New placements in place
+of SABRE's layouts (greedy alone 10936; greedy and improved 10265, worse
+at 8 and 16 qubits); fewer trials on the new layouts (every 2nd 10142,
+every 3rd 10197); one best of all layouts per ending (a held-out CZ row
+258 → 259 CZs).
+
+**Learned.** SABRE's layouts and the rotation placements find different
+good networks; neither alone is best, as with the trial portfolios of
+2026-11-07. A pool ranked by an estimate can lose a row when it grows:
+rank the new group apart.
+
+**Next.** See experiments.md: chip network time (now the main cost);
+a better placement objective or search; the tail's row order.
+
 ## 2026-11-25 — The chip network's final Clifford, synthesized on the chip (0.4.16)
 
 **What.** `core/src/pauli_network.rs` gains `State::clifford_on`: on a

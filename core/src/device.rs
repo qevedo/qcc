@@ -16,7 +16,7 @@ use crate::passes::{
     Last, commutative_cancellation, lowered_for_network, merge_single_qubit_runs, network_trials,
     on_the_same_pairs, with_and_without_network,
 };
-use crate::pauli_network::{merge_rotations, synthesize_on};
+use crate::pauli_network::{merge_rotations, placement, synthesize_on};
 use crate::phase_folding::phase_folding;
 use crate::routing::{CouplingGraph, SabreOptions, layout_and_route_and_first, route};
 use crate::two_qubit::kak;
@@ -201,7 +201,9 @@ fn compile_with(
 
 /// A Pauli network synthesized on the chip's pairs, as a routed candidate:
 /// for each initial layout of `routed` (the routings of the other
-/// candidates) and each of the pipeline's network trials, the rotations of
+/// candidates), each placement of the rotations improved from one of them
+/// or grown greedily (`placement` in `pauli_network.rs`), and each of the
+/// pipeline's network trials, the rotations of
 /// `lowered` placed by that layout and synthesized again with every CX that
 /// sets them up on a coupled pair (`synthesize_on` in `pauli_network.rs`),
 /// each with two endings: the Clifford left at the end synthesized on the
@@ -226,20 +228,43 @@ fn networks_on_chip(
     graph: &CouplingGraph,
     options: &SabreOptions,
 ) -> Vec<DeviceCircuit> {
-    let mut layouts: Vec<&Vec<usize>> = Vec::new();
+    let mut layouts: Vec<Vec<usize>> = Vec::new();
     for r in routed {
-        if !layouts.contains(&&r.initial_layout) {
-            layouts.push(&r.initial_layout);
+        if !layouts.contains(&r.initial_layout) {
+            layouts.push(r.initial_layout.clone());
+        }
+    }
+    // Besides SABRE's layouts, placements chosen for the rotations
+    // themselves (`placement`): one grown greedily, and each of SABRE's
+    // improved by exchanges. SABRE lays out the circuit as written, CX
+    // ladders and all, and its layouts are not the best for the network:
+    // on 22 held-out Hamiltonians (6–16 qubits) on the benchmark chip, these
+    // took the CNOTs from 10463 to 10068, more on none. Without SABRE's own
+    // layouts they would leave 10265 (8 and 16 qubits got worse), and with
+    // only half the trials on the new ones 10142.
+    let from_sabre = layouts.len();
+    let mut placed = Vec::new();
+    placed.extend(placement(lowered, logical, graph, None));
+    for layout in &layouts {
+        placed.extend(placement(lowered, logical, graph, Some(layout)));
+    }
+    for layout in placed {
+        if !layouts.contains(&layout) {
+            layouts.push(layout);
         }
     }
     let n = graph.qubits();
     let identity: Vec<usize> = (0..n).collect();
-    let trials: Vec<(&Vec<usize>, (u64, f64))> = layouts
+    let trials: Vec<(usize, &Vec<usize>, (u64, f64))> = layouts
         .iter()
-        .flat_map(|&layout| network_trials().map(move |trial| (layout, trial)))
+        .enumerate()
+        .flat_map(|(l, layout)| {
+            let placed = usize::from(l >= from_sabre);
+            network_trials().map(move |trial| (placed, layout, trial))
+        })
         .collect();
     let candidates = crate::parallel::map_ordered(trials.len(), |t| {
-        let (layout, (seed, penalty)) = trials[t];
+        let (_, layout, (seed, penalty)) = trials[t];
         let placed: Vec<Instruction> = lowered.iter().map(|i| i.relabel(layout)).collect();
         let networks = synthesize_on(&placed, graph, seed, penalty)?;
         let mut kinds = Vec::new();
@@ -268,9 +293,15 @@ fn networks_on_chip(
         }
         Some(kinds)
     });
-    // Of each kind of tail, the first of the cheapest, as in a loop.
-    let mut best: Vec<Option<(usize, DeviceCircuit)>> = Vec::new();
-    for kinds in candidates.into_iter().flatten() {
+    // Of each kind of tail, the first of the cheapest, as in a loop; from
+    // SABRE's layouts and from the placements apart, so that the candidates
+    // of SABRE's layouts are still optimized: a placement can win the
+    // ranking and lose once optimized (with one best of all, a held-out
+    // 9-qubit Hamiltonian with CZ got 259 CZs instead of 258).
+    let mut best: [Vec<Option<(usize, DeviceCircuit)>>; 2] = [Vec::new(), Vec::new()];
+    for (&(placed, _, _), kinds) in trials.iter().zip(candidates) {
+        let Some(kinds) = kinds else { continue };
+        let best = &mut best[placed];
         best.resize_with(best.len().max(kinds.len()), || None);
         for (b, candidate) in best.iter_mut().zip(kinds) {
             let Some(candidate) = candidate else { continue };
@@ -280,6 +311,7 @@ fn networks_on_chip(
         }
     }
     best.into_iter()
+        .flatten()
         .flatten()
         .map(|(_, circuit)| circuit)
         .collect()

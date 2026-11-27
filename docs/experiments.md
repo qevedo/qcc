@@ -17,29 +17,27 @@ stated) and only comparable within that run.
 
 In priority order. Replace this list at the end of each run.
 
-1. **A layout chosen for the chip network itself** (2026-11-23, still
-   open). Trials use the layouts SABRE found for the direct /
-   logical-network circuits; from the first layout only, 6562 CNOTs on the
-   held-out 24 against 6004 from all, so the layout matters. Try a layout
-   from the rotations' interaction graph, or a second pass seeded with the
-   winning trial's final layout. Also new (2026-11-25): "Shortest Path in
-   Pauli Forest" (arXiv:2605.03545) chooses placement together with
-   architecture-aware Pauli-exponential synthesis; read it first.
-2. **The chip Clifford tail, closer to its bound** (2026-11-25). With the
-   tail dropped (not equivalent) the held-out CX total is 9601; 0.4.16
-   reaches 10463 from 10874. Untried: a lookahead in the row/qubit choice
-   of `clifford_on` (cost of this row plus the cheapest next one), or
-   synthesizing the tail backwards from the final layout so its last CXs
-   cancel against the network's; the Steiner search weighted as `gather`
-   pays changed nothing (see Didn't work).
-3. **Chip network time** (2026-11-23; 0.4.16 adds 1.10–1.38× on the chip
-   Hamiltonians). Hamiltonian-16 with CX about 1.7 s (Qiskit 0.1 s): 48
-   syntheses, each now with two tails and two routings. Candidate cuts:
-   route only the routed-tail ending when its raw estimate is close;
-   incremental tree costs; fewer seeds per layout once (1) gives better
-   layouts.
+1. **Chip network time** (2026-11-27; 0.4.17 adds 1.48–1.76× with CX
+   on the chip Hamiltonians, 1.15–1.49× with CZ). Hamiltonian-16 with CX
+   about 2.3 s (Qiskit 0.1 s): about 9 layouts × 12 trials, each with two
+   tails and two routings. Candidate cuts: fewer trials on the placed
+   layouts (half the trials left 10142 held-out CNOTs against 10068,
+   measured with one best of all); dedupe placements whose rotation costs
+   tie; route only the routed-tail ending when its raw estimate is close;
+   incremental tree costs.
+2. **A better placement objective or search** (2026-11-27). The sum of
+   spanning-tree costs with first-improvement exchanges: the greedy start
+   alone was worse than SABRE's layouts (10936 against 10463 held-out),
+   improved SABRE layouts alone 10265. Untried: weight rotations by their
+   position (the first layer matters most to the greedy), random restarts,
+   annealing, or a second pass from the winning trial's final layout.
+3. **The chip Clifford tail, closer to its bound** (2026-11-25). With the
+   tail dropped (not equivalent) the held-out CX total was 9601 (from
+   0.4.16's 10463). Untried: a lookahead in the row/qubit choice of
+   `clifford_on`, or synthesizing the tail backwards from the final layout
+   so its last CXs cancel against the network's.
 4. **CZ device time, by doing less per round.** The 16-qubit Hamiltonian
-   on the chip takes about 3.7 s now (2026-11-25 device.py; Qiskit 0.12 s).
+   on the chip takes about 4.3 s now (2026-11-27 paired; Qiskit 0.08 s).
    Pruning candidates does not work (2026-11-17, **Didn't work**). The big
    lever left is incremental rounds: rerun only the parts of the circuit
    the last round changed.
@@ -63,6 +61,7 @@ Newest first. Details are in `improvement-log.md` under the same date.
 
 | Date | Version | Change | Effect |
 |---|---|---|---|
+| 2026-11-27 | 0.4.17 | Placements chosen for the chip network's rotations (`placement`, `pauli_network.rs`: first-improvement exchanges of two physical qubits lowering the sum of the rotations' spanning-tree costs, from each SABRE layout and from a greedy growth after Vuorenkoski and Meijer-van de Griend, arXiv:2605.03545); trials from SABRE's layouts and the new ones, the best of each ending from each group optimized (`networks_on_chip`, `device.rs`), so never worse | Chip CX Hamiltonian-8 187 / 443 → 186 / 430, -16 1063 / 1894 → 1035 / 1957; CZ -16 1030 / 3952 → 1010 / 3833; chip 2q vs Qiskit 0.879× → 0.877× (CX), 0.858× → 0.857× (CZ). Held-out 22 Hamiltonians (6–16 q): CX 10463 / 21300 → 10068 / 20220 (−3.8%), CZ 10214 / 39643 → 9963 / 38571 (−2.5%); none more 2q; 3 CX rows more gates in all (at most +46). Other rows identical. Time chip Hamiltonians CX 1.48× / 1.76× (8 / 16 q; -16 1.31 → 2.30 s), CZ 1.15× / 1.49× (2.89 → 4.31 s); other rows 0.88–1.08× (noise) |
 | 2026-11-25 | 0.4.16 | The chip network's final Clifford synthesized on the chip too (`clifford_on`, `pauli_network.rs`: row by row, both images of a row gathered onto a free qubit along a Steiner tree of the free qubits, X image or Z image first, whichever needs fewer CXs; the row and qubit with fewest CXs, never a cut vertex of the free qubits; after Winderl et al., arXiv:2309.08972). Each trial keeps both endings (on the chip, or as before routed); the best of each is optimized (`networks_on_chip`, `device.rs`), so never worse | Chip CX Hamiltonian-8 189 / 465 → 187 / 443, -16 1078 / 1903 → 1063 / 1894; CZ 184 / 742 → 181 / 730, 1095 / 4198 → 1030 / 3952; chip 2q vs Qiskit 0.880× → 0.879× (CX), 0.862× → 0.858× (CZ). Held-out 22 Hamiltonians (6–16 q): CX 10874 / 21675 → 10463 / 21300, CZ 10589 / 40489 → 10214 / 39643; none more 2q (21 / 19 of 22 fewer), 5 + 5 more gates in all (at most +56). Other rows identical. Time chip Hamiltonians 1.10–1.38× (paired; CX -8 170 → 235 ms, -16 1.45 → 1.67 s; CZ 476 → 640 ms, 3.60 → 3.96 s), chip geometric mean 1.07× CX, 1.03× CZ |
 | 2026-11-23 | 0.4.15 | Pauli networks synthesized on the chip's pairs (`synthesize_on`, `pauli_network.rs`: CXs only on coupled pairs a first-layer rotation touches, scored by spanning-tree cost `tree_cost` under the chip's distances, Clifford weight 0.2, patience 32, forced moves along shortest paths; `networks_on_chip`, `device.rs`: 12 trials from each routed layout, cleaned, routed, best by CXs + SWAP cost optimized as one more candidate) | Chip CX Hamiltonian-8 335 / 634 → 189 / 465, -16 1321 / 2089 → 1078 / 1903; CZ 307 / 1099 → 184 / 742, 1231 / 4201 → 1095 / 4198; chip 2q vs Qiskit 0.924× → 0.880× (CX), 0.897× → 0.862× (CZ). Held-out 24 Hamiltonians (6–16 q): all 15–35% fewer 2q (CX 8145 → 6004, CZ 7471 → 5799). Other rows identical. Time Hamiltonian-16 2.83× CX (0.49 → 1.39 s), 1.46× CZ |
 | 2026-11-21 | 0.4.14 | Rotation pairs (`insert_rotation_pairs`, `pauli_pairs.rs`): at each gate a whole axis commutes with (Z on CX controls and CZs, X on CX targets), rotations at angles that remove an outer rotation of the 2 nearest runs each way, besides I and the Pauli; same exact per-wire DP; once on the final result (`with_rotation_pairs`, `passes.rs`), so every keep rule sees what it saw before; separable pricing between Z-axis gates (`Basis1q::split_count`) | All-to-all gates 0.866× → 0.863× of Qiskit (Clifford+T 1009 → 988, -16 484 → 476, Hamiltonian-32 1504 → 1499, QAOA-32 615 → 612); chip CX 0.813× → 0.811× (adder-16 402 → 395), CZ 0.829× (Clifford+T-16 2668 → 2664); plugin CX 0.842× → 0.839×. 67 of 234 compilations fewer gates (35 of 122 held out), none more, no 2q count changed. Time 1.03× all-to-all, 1.00× chip (paired) |
@@ -153,6 +152,8 @@ Held-out set: 12 random Hamiltonians (seeds 100n+7, 100n+8, n = 6–16) on the 1
 - **The Clifford tail on the chip alone, X image first** (2026-11-25, `clifford_on` replacing the routed tail). Held-out CX 10874 → 10488, but the benchmark Hamiltonian-8 189 → 191 CNOTs and some held-out rows more gates (n = 14 seed 1408 1373 → 1429): the ranking after cleanup does not predict the optimized result. **Both endings ranked together, one optimized**: 10488 again (the chip tail wins nearly every ranking). Shipped: the best of each ending optimized (never worse; 189 back).
 - **Steiner search weighted as `gather` pays** (2026-11-25: a Dijkstra over the free qubits, 1 per terminal, 2 per other qubit, in place of hop-count BFS from the tree). Identical counts on every held-out row (10463), 1.2× slower on Hamiltonian-16. Dropped. (A first version looped forever: the root, a terminal already in the tree, was found again; terminals in the tree must be excluded.)
 - **Bound measured first** (2026-11-25, throwaway env var dropping the tail, not equivalent): Hamiltonian-16 1078 → 1008, -8 189 → 176, held-out CX 10874 → 9601. Raw tail before routing: 75 CXs per trial on Hamiltonian-16 (body about 1800 raw).
+- **Placement variants** (2026-11-27, `placement` / `networks_on_chip`; held-out 22 Hamiltonians with CX, baseline 0.4.16 10463 / 21300, 8.4 s summed): the greedy placement alone, replacing SABRE's layouts, 10936 / 21509 (5.7 s); improved SABRE layouts alone (replacing them) 10434 / 20604; greedy + improved alone 10265 / 20343 (9.9 s), worse than 0.4.16 at 8 (807: 198 → 215) and 16 qubits (1607: 1000 → 1045, 1608: 931 → 993); greedy added to SABRE's 10284; improved added 10189; all added 10069 / 20243 (14.6 s); with every 2nd trial on the new layouts 10142 (12.2 s), every 3rd 10197 (11.5 s). Shipped: all added, full trials.
+- **One best of all layouts per ending** (2026-11-27, before ranking SABRE's and the placed layouts apart): CZ held-out 9 qubits seed 907 258 → 259 CZs (a placement won the ranking and lost once optimized). Ranking the two groups apart (4 candidates optimized instead of 2) fixed it: CZ 9963, CX 10068, none worse.
 - **Ruled out while measuring**: a held-out script that checked outputs against the `PauliEvolutionGate` circuit failed every row and ran slowly: Qiskit's `Statevector` exponentiates it exactly; check against the decomposed circuit. A 12-qubit dense-unitary unit test ran for over 10 minutes; the device test uses 8 qubits.
 
 **CZ devices (`passes.rs`, `until_fixed_point`)**
@@ -208,6 +209,7 @@ Held-out set: 12 random Hamiltonians (seeds 100n+7, 100n+8, n = 6–16) on the 1
 - **Phoenix** (arXiv:2504.03529, 2025): Pauli-based high-level optimization that reports fewer gates than Paulihedral; not read beyond search results this run. Candidate for comparing on the Hamiltonian benchmark.
 - **SAT-optimal Clifford synthesis under connectivity** (arXiv:2504.00634, 2025; reports up to 30% fewer CNOTs than Qiskit) (2026-11-25). Exact only for few qubits; the chip tail spans 19. Could serve small blocks; not tried.
 - **Heuristic and optimal synthesis of CNOT and Clifford circuits** (Webster et al., arXiv:2503.14660, Quantum 2026) (2026-11-25): not architecture-aware as read in search results; not tried.
+- **"Shortest Path in Pauli Forest"** (Vuorenkoski and Meijer-van de Griend, arXiv:2605.03545, 2026) (2026-11-27). Read for its placement (used, as the greedy start of `placement`); its synthesis (shortest paths in a graph of Pauli frames, nearest gadget first, Clifford tableau synthesis at the end) was not built: QCC's greedy already shares CXs and is scored by trees. The paper reports its mapping helps only below roughly 20–40 gadgets on a 16-qubit line, and here the greedy placement alone was worse than SABRE's layouts.
 - **Rustiq / PauliOpt architecture-aware synthesis via Steiner trees** (2026-11-23): QCC's `tree_cost` uses a metric spanning tree (at most 2× the Steiner tree); a true Steiner heuristic would score more exactly at more cost per candidate. Not tried.
 
 ## Method lessons
@@ -244,4 +246,6 @@ Held-out set: 12 random Hamiltonians (seeds 100n+7, 100n+8, n = 6–16) on the 1
 - **Debug-build tests for new tableau code** (2026-11-25): `cargo test --release` skips `debug_assert!`; run new synthesis tests once without `--release` so the per-step assertions run. Wrap long test runs in `timeout`: an infinite loop in a variant cost 10 minutes before it was noticed.
 - **Bitmask precedence in Rust** (2026-11-25): `a & !b >> u & 1` parses as `a & ((!b) >> u) & 1`; parenthesize `(a & !b) >> u`.
 - **A "not vacuous" assertion must compare what the change competes with** (2026-11-25): the chip tail is mostly more CXs than the off-device tail *before* routing (0 of 60 random Cliffords fewer) but fewer than it routed (more than 30 of 60).
+- **A ranking that mixes old and new candidates can lose a row** (2026-11-27): adding layouts to a pool ranked by estimate made one held-out CZ row 1 CZ worse; ranking the new group apart and optimizing both bests made the change never worse. Check per-row regressions, not only totals.
+- **Held-out harness first, then flags** (2026-11-27): one throwaway env var with bit flags (which layouts, which trials) and the held-out script gave every variant's totals in 10–15 s each with CX; CZ (40 s) only for the shortlisted one.
 

@@ -548,6 +548,159 @@ fn tree_cost(g: &CouplingGraph, support: u128) -> u32 {
     1 + total
 }
 
+/// A placement of `instructions`' logical qubits on `graph` for a network
+/// synthesized on the chip ([`synthesize_on`]): `layout[q]` is the physical
+/// qubit of logical qubit `q`, for `logical` qubits. It minimizes the sum,
+/// over the circuit's rotations, of each rotation's spanning-tree cost under
+/// the placement ([`tree_cost`], what the synthesis itself scores), by
+/// exchanging two physical qubits (an unused one too) while that lowers
+/// the sum, from `start` or else from a greedy growth: the logical qubit in
+/// most rotations on the most central physical qubit, then, next to the
+/// placed qubits, the unplaced one sharing most rotations with a placed
+/// neighbour (the placement of Vuorenkoski and Meijer-van de Griend,
+/// "Shortest Path in Pauli Forest", arXiv:2605.03545).
+///
+/// SABRE's layouts are chosen for the circuit as written, CX ladders and
+/// all; the network's rotations are what the synthesis on the chip sees.
+pub fn placement(
+    instructions: &[Instruction],
+    logical: usize,
+    graph: &CouplingGraph,
+    start: Option<&[usize]>,
+) -> Option<Vec<usize>> {
+    let n = graph.qubits();
+    if logical > n || n > MAX_QUBITS {
+        return None;
+    }
+    let (rotations, _) = extract(instructions, logical)?;
+    let supports: Vec<u128> = rotations
+        .iter()
+        .map(|(p, _)| p.support())
+        .filter(|s| s.count_ones() > 1)
+        .collect();
+    if supports.is_empty() {
+        return None;
+    }
+    // at[p]: the logical qubit on physical qubit p, if any.
+    let mut at: Vec<Option<usize>> = vec![None; n];
+    match start {
+        Some(layout) => {
+            for (q, &p) in layout.iter().enumerate().take(logical) {
+                at[p] = Some(q);
+            }
+        }
+        None => greedy_placement(&supports, logical, graph, &mut at),
+    }
+    let placed = |at: &[Option<usize>], s: u128| -> u128 {
+        let mut out = 0u128;
+        for (p, q) in at.iter().enumerate() {
+            if let Some(q) = *q
+                && s >> q & 1 == 1
+            {
+                out |= 1 << p;
+            }
+        }
+        out
+    };
+    let total = |at: &[Option<usize>]| -> u64 {
+        supports
+            .iter()
+            .map(|&s| u64::from(tree_cost(graph, placed(at, s))))
+            .sum()
+    };
+    let mut best = total(&at);
+    // First improvement, in a fixed order, until no exchange lowers the sum.
+    loop {
+        let mut improved = false;
+        for a in 0..n {
+            for b in a + 1..n {
+                if at[a].is_none() && at[b].is_none() {
+                    continue;
+                }
+                at.swap(a, b);
+                let cost = total(&at);
+                if cost < best {
+                    best = cost;
+                    improved = true;
+                } else {
+                    at.swap(a, b);
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    let mut layout = vec![0; logical];
+    for (p, q) in at.iter().enumerate() {
+        if let Some(q) = *q {
+            layout[q] = p;
+        }
+    }
+    Some(layout)
+}
+
+/// The greedy start of [`placement`].
+fn greedy_placement(
+    supports: &[u128],
+    logical: usize,
+    graph: &CouplingGraph,
+    at: &mut [Option<usize>],
+) {
+    let n = graph.qubits();
+    // shared[a][b]: the rotations on both a and b.
+    let mut shared = vec![vec![0u32; logical]; logical];
+    let mut uses = vec![0u32; logical];
+    for &s in supports {
+        for a in 0..logical {
+            if s >> a & 1 == 0 {
+                continue;
+            }
+            uses[a] += 1;
+            for b in 0..logical {
+                if b != a && s >> b & 1 == 1 {
+                    shared[a][b] += 1;
+                }
+            }
+        }
+    }
+    // The most central physical qubit: least total distance to the others,
+    // the first on ties.
+    let centre = (0..n)
+        .min_by_key(|&p| (0..n).map(|r| graph.distance(p, r)).sum::<u32>())
+        .expect("a qubit");
+    let first = (0..logical)
+        .max_by_key(|&q| (uses[q], std::cmp::Reverse(q)))
+        .expect("a qubit");
+    let mut done = vec![false; logical];
+    at[centre] = Some(first);
+    done[first] = true;
+    for _ in 1..logical {
+        // Of the free physical qubits next to placed ones and the unplaced
+        // logical qubits, the pair sharing most rotations with that
+        // physical qubit's placed neighbours (then most rotations in all).
+        let mut choice: Option<((u32, u32), usize, usize)> = None;
+        for p in 0..n {
+            if at[p].is_some() {
+                continue;
+            }
+            let near: Vec<usize> = graph.neighbours(p).iter().filter_map(|&r| at[r]).collect();
+            if near.is_empty() {
+                continue;
+            }
+            for q in (0..logical).filter(|&q| !done[q]) {
+                let score = (near.iter().map(|&r| shared[q][r]).sum::<u32>(), uses[q]);
+                if choice.as_ref().is_none_or(|(s, _, _)| score > *s) {
+                    choice = Some((score, p, q));
+                }
+            }
+        }
+        let (_, p, q) = choice.expect("a connected chip");
+        at[p] = Some(q);
+        done[q] = true;
+    }
+}
+
 /// Whether the qubits of `set` are connected on `g` through qubits of `set`.
 fn connected(g: &CouplingGraph, set: u128) -> bool {
     let start = set.trailing_zeros() as usize;
@@ -1713,6 +1866,82 @@ mod tests {
                         1e-8
                     ));
                 }
+            }
+        }
+    }
+
+    /// The sum [`placement`] lowers: each rotation's tree cost, placed.
+    fn placed_cost(
+        circuit: &[Instruction],
+        logical: usize,
+        g: &CouplingGraph,
+        layout: &[usize],
+    ) -> u32 {
+        let (rotations, _) = extract(circuit, logical).expect("rotations");
+        rotations
+            .iter()
+            .map(|(p, _)| p.support())
+            .filter(|s| s.count_ones() > 1)
+            .map(|s| {
+                let placed = (0..logical)
+                    .filter(|&q| s >> q & 1 == 1)
+                    .fold(0u128, |out, q| out | 1 << layout[q]);
+                tree_cost(g, placed)
+            })
+            .sum()
+    }
+
+    #[test]
+    fn placements_are_layouts_no_costlier_than_their_start() {
+        let mut rng = Rng::new(31);
+        let mut better = 0;
+        for graph in &small_chips() {
+            let n = graph.qubits();
+            for k in 0..8 {
+                let logical = n - k % 2;
+                let circuit = crate::testing::pauli_exponentials(&mut rng, logical, 6);
+                let start: Vec<usize> = (0..logical).rev().collect();
+                for from in [None, Some(&start[..])] {
+                    let layout = placement(&circuit, logical, graph, from).expect("a placement");
+                    assert_eq!(layout.len(), logical);
+                    let mut seen = vec![false; n];
+                    for &p in &layout {
+                        assert!(p < n && !seen[p], "{layout:?}");
+                        seen[p] = true;
+                    }
+                    if from.is_some() {
+                        let (after, before) = (
+                            placed_cost(&circuit, logical, graph, &layout),
+                            placed_cost(&circuit, logical, graph, &start),
+                        );
+                        assert!(after <= before, "{after} > {before}");
+                        better += usize::from(after < before);
+                    }
+                }
+            }
+        }
+        // Not vacuous: the exchanges improve most starts.
+        assert!(better >= 12, "{better}");
+    }
+
+    #[test]
+    fn placements_put_a_chain_of_rotations_on_a_line() {
+        // ZZ rotations on the neighbours of a shuffled chain of 6 qubits:
+        // on a line, the best placement follows the chain, and every
+        // rotation's tree costs 2.
+        let chain = [3, 0, 5, 1, 4, 2];
+        let mut circuit = Vec::new();
+        for w in chain.windows(2) {
+            circuit.push(Instruction::gate("cx", [w[0], w[1]], []));
+            circuit.push(Instruction::gate("rz", [w[1]], [0.3]));
+            circuit.push(Instruction::gate("cx", [w[0], w[1]], []));
+        }
+        let line = CouplingGraph::line(6);
+        for from in [None, Some(&[0, 1, 2, 3, 4, 5][..])] {
+            let layout = placement(&circuit, 6, &line, from).expect("a placement");
+            assert_eq!(placed_cost(&circuit, 6, &line, &layout), 10, "{layout:?}");
+            for w in chain.windows(2) {
+                assert!(line.coupled(layout[w[0]], layout[w[1]]), "{layout:?}");
             }
         }
     }
