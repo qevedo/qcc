@@ -27,7 +27,10 @@ checks the small ones, and fails if any uses more gates than recorded in
 circuits. When QCC improves, rerun `run.py` to record it.
 
 `plugin.py` compares Qiskit with and without QCC as its optimization stage
-(below).
+(below). `heldout.py` compiles the 22 held-out random Hamiltonians (6–16
+qubits, seeds 100n + 7 and 100n + 8) onto the chip of `device.py` and checks
+them; the held-out totals of the chip network changes below come from it
+(0.4.17: 10068 CNOTs with CX, 9963 CZs with CZ).
 
 The suite follows the kinds of circuits of
 [ucc-bench](https://github.com/unitaryfoundation/ucc-bench), but its code and

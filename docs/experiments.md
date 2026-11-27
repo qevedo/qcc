@@ -247,5 +247,6 @@ Held-out set: 12 random Hamiltonians (seeds 100n+7, 100n+8, n = 6–16) on the 1
 - **Bitmask precedence in Rust** (2026-11-25): `a & !b >> u & 1` parses as `a & ((!b) >> u) & 1`; parenthesize `(a & !b) >> u`.
 - **A "not vacuous" assertion must compare what the change competes with** (2026-11-25): the chip tail is mostly more CXs than the off-device tail *before* routing (0 of 60 random Cliffords fewer) but fewer than it routed (more than 30 of 60).
 - **A ranking that mixes old and new candidates can lose a row** (2026-11-27): adding layouts to a pool ranked by estimate made one held-out CZ row 1 CZ worse; ranking the new group apart and optimizing both bests made the change never worse. Check per-row regressions, not only totals.
+- **The held-out set is a script now** (2026-11-27): `benchmarks/compilation/heldout.py [--basis cx|cz]` (state-checked; 15 s CX, 36 s CZ). Earlier runs kept it in scratch space; use it, so site numbers link to a script.
 - **Held-out harness first, then flags** (2026-11-27): one throwaway env var with bit flags (which layouts, which trials) and the held-out script gave every variant's totals in 10–15 s each with CX; CZ (40 s) only for the shortlisted one.
 
